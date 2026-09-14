@@ -201,7 +201,7 @@ common:
   uncertainty:
     # Master on/off switch. When false, none of the below runs: no extra models are trained, no
     # extra columns are written, and the run costs exactly what it would without this block.
-    enabled: false
+    enabled: true
     # How many versions of each model to train per target (the ensemble size). Training time scales
     # directly with this - 5 members means training that model 5 separate times. 3 is enough while
     # iterating, 5 for a report, 10 for a final/published result. On Lightning models this also
@@ -221,9 +221,8 @@ common:
     # Lightning models only. When true, instead of predicting just one number, the model directly
     # predicts a value AND how uncertain it is about that value, and is trained to get both right.
     # This is the only way to get a margin of error that's wider specifically where the DATA is
-    # noisier, rather than only where the ensemble members happen to disagree. Two things change
-    # when this is on: the training loss becomes harder to compare against a plain run's, and the
-    # soil_graph model doesn't support this option and will ignore it.
+    # noisier, rather than only where the ensemble members happen to disagree. When this is on, the
+    # training loss becomes harder to compare against a plain run's.
     heteroscedastic: true
     # Only used when heteroscedastic is true. Tunes how much the training loss penalizes the model
     # for claiming high uncertainty instead of trying harder to fit difficult points. 0.0 is the
@@ -315,7 +314,7 @@ common:
     models: []
     # Models to always exclude, since running them over the full dataset can take a very long time
     # (the same reason TabICL is excluded from SHAP and ensembling above).
-    skip_models: ["TabICL"]
+    skip_models: [] #"TabICL"
     # If exporting a model's predictions fails, false (default) records the failure in
     # meta/run_summary.json and continues with the rest of the run.
     fail_on_error: false

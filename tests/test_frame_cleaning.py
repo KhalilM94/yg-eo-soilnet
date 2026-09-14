@@ -1,7 +1,7 @@
-"""The cleaning helpers shared by the graph and sequence builders.
+"""The cleaning helpers the sequence builder cleans its inputs with.
 
-These were lifted out of SpatiotemporalGraphBuilder so both paths clean their inputs identically;
-these tests pin the behaviour that both now depend on.
+They were first lifted out of the since-deleted graph builder so two paths could share them; these
+tests pin the behaviour the sequence path depends on.
 """
 
 from __future__ import annotations

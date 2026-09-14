@@ -1,8 +1,9 @@
-"""Builder -> datamodule -> module tests for the graph-free sequence path.
+"""Builder and datamodule tests for the ragged, date-stamped sequence path the CNN reads.
 
-The properties that matter most here are the ones that let a trained checkpoint outlive the window
-it was trained on: era invariance, length agnosticism and cadence agnosticism. Each has a dedicated
-test below.
+The model-level guarantees that let a trained checkpoint outlive the window it was trained on - era
+invariance, length agnosticism and cadence agnosticism - are pinned against the CNN in
+tests/test_cnn_pipeline.py. The embedding tests here run through the CNN too: it owns the static
+encoder that turns the datamodule's categorical contract into learned embeddings.
 """
 
 from __future__ import annotations
@@ -20,16 +21,7 @@ from yg_eo_soilnet.datamodules.categorical import CategoricalEncoder
 from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder, to_decimal_year
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
-from yg_eo_soilnet.models.lightningmodules.soil_sequence_lightning_module import SoilSequenceLightningModule
-from yg_eo_soilnet.models.lightningmodules.soil_tabular_lightning_module import SoilTabularLightningModule
-from yg_eo_soilnet.models.lightningmodules.temporal_encoders import (
-    TemporalTransformerEncoder,
-    TimeAwareLSTMEncoder,
-    compact_observations,
-    sequence_time_features,
-)
-
-ENCODERS = ["time_transformer", "time_lstm"]
+from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
 
 # --- fixtures --------------------------------------------------------------
@@ -138,22 +130,6 @@ def _categorical_bundle(tmp_path: Path, logger) -> SoilSequenceBundle:
     return _build_bundle(
         tmp_path, logger, with_categoricals=True, categorical_features=["texture", "landform"]
     )
-
-
-def _synthetic_batch(batch_size=4, length=10, channels=3, seed=0, start_year=2018.0):
-    generator = torch.Generator().manual_seed(seed)
-    times = torch.sort(
-        start_year + torch.rand(batch_size, length, generator=generator, dtype=torch.float64) * 5.0, dim=1
-    ).values
-    values = torch.randn(batch_size, length, channels, generator=generator)
-    mask = torch.ones(batch_size, length, dtype=torch.bool)
-    return {
-        "x_static": torch.randn(batch_size, 4, generator=generator),
-        "y": torch.randn(batch_size, 1, generator=generator),
-        "sequences": {"m": values},
-        "sequence_mask": {"m": mask},
-        "sequence_time": {"m": times},
-    }
 
 
 # --- builder ---------------------------------------------------------------
@@ -304,89 +280,6 @@ def test_datamodule_predict_order_matches_the_evaluation_frame(tmp_path: Path, l
     assert len(datamodule.y_test_frame_) == len(expected_ids)
 
 
-# --- time features and encoders -------------------------------------------
-
-
-def test_time_features_are_invariant_to_the_calendar_era() -> None:
-    times = torch.tensor([[2018.0, 2018.25, 2019.5, 2021.0]], dtype=torch.float64)
-    mask = torch.ones(1, 4, dtype=torch.bool)
-
-    base = sequence_time_features(times, mask)
-    shifted = sequence_time_features(times + 10.0, mask)
-    torch.testing.assert_close(base, shifted)
-
-
-def test_time_features_encode_seasonality_and_gaps() -> None:
-    # Same month in different years must land on the same point of the seasonal circle.
-    times = torch.tensor([[2018.0, 2019.0, 2019.5]], dtype=torch.float64)
-    mask = torch.ones(1, 3, dtype=torch.bool)
-    features = sequence_time_features(times, mask)
-
-    torch.testing.assert_close(features[0, 0, :2], features[0, 1, :2])
-    assert not torch.allclose(features[0, 0, :2], features[0, 2, :2])
-    # Relative age is measured from this row's own latest observation, so it ends at 0.
-    assert features[0, -1, 2].item() == pytest.approx(0.0)
-    assert features[0, 0, 2].item() < 0.0
-    # A 6-month gap must read larger than a 0-month one.
-    assert features[0, 2, 3].item() > 0.0
-
-
-def test_time_features_zero_a_row_with_no_observations() -> None:
-    times = torch.tensor([[2018.0, 2019.0]], dtype=torch.float64)
-    mask = torch.zeros(1, 2, dtype=torch.bool)
-    features = sequence_time_features(times, mask)
-
-    assert torch.isfinite(features).all()
-    assert bool((features == 0).all())
-
-
-def test_compact_observations_moves_real_tokens_to_the_front() -> None:
-    values = torch.tensor([[[1.0], [2.0], [3.0], [4.0]]])
-    times = torch.tensor([[2018.0, 2019.0, 2020.0, 2021.0]], dtype=torch.float64)
-    mask = torch.tensor([[False, True, False, True]])
-
-    compacted_values, compacted_mask, compacted_times = compact_observations(values, mask, times)
-
-    assert compacted_mask[0].tolist() == [True, True, False, False]
-    assert compacted_values[0, :2, 0].tolist() == [2.0, 4.0]
-    assert compacted_times[0, :2].tolist() == [2019.0, 2021.0]
-
-
-def test_transformer_rejects_a_head_count_that_does_not_divide_d_model() -> None:
-    with pytest.raises(ValueError, match="divisible"):
-        TemporalTransformerEncoder(input_dim=3, output_dim=8, d_model=10, nhead=4)
-
-
-@pytest.mark.parametrize("encoder_cls", [TemporalTransformerEncoder, TimeAwareLSTMEncoder])
-def test_encoders_run_at_any_length_with_one_instance(encoder_cls) -> None:
-    """No parameter may be sized by sequence length, or a future series of a different shape fails."""
-    encoder = encoder_cls(input_dim=3, output_dim=8).eval()
-
-    for length in (1, 4, 37):
-        batch = _synthetic_batch(length=length, channels=3)
-        with torch.no_grad():
-            embedding = encoder(
-                batch["sequences"]["m"], batch["sequence_mask"]["m"], batch["sequence_time"]["m"]
-            )
-        assert embedding.shape == (4, 8)
-        assert torch.isfinite(embedding).all()
-
-
-@pytest.mark.parametrize("encoder_cls", [TemporalTransformerEncoder, TimeAwareLSTMEncoder])
-def test_encoders_zero_a_point_with_no_observations(encoder_cls) -> None:
-    encoder = encoder_cls(input_dim=3, output_dim=8).eval()
-    batch = _synthetic_batch(length=6, channels=3)
-    mask = batch["sequence_mask"]["m"].clone()
-    mask[0] = False
-
-    with torch.no_grad():
-        embedding = encoder(batch["sequences"]["m"], mask, batch["sequence_time"]["m"])
-
-    assert torch.isfinite(embedding).all()
-    assert bool((embedding[0] == 0).all())
-    assert not bool((embedding[1] == 0).all())
-
-
 # --- categorical covariates and entity embeddings --------------------------
 
 
@@ -473,22 +366,20 @@ def test_batch_has_a_well_shaped_categorical_key_with_no_categoricals(tmp_path: 
     assert batch["x_categorical"].dtype == torch.int64
 
 
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_end_to_end_training_step_with_embeddings(tmp_path: Path, logger, encoder: str) -> None:
+def test_end_to_end_training_step_with_embeddings(tmp_path: Path, logger) -> None:
     bundle = _categorical_bundle(tmp_path, logger)
     datamodule = SoilSequenceDataModule(bundle, batch_size=6, val_size=0.0, test_size=0.0, seed=7)
     datamodule.setup("fit")
     batch = next(iter(datamodule.train_dataloader()))
 
     torch.manual_seed(0)
-    module = SoilSequenceLightningModule(
+    module = SoilCNNLightningModule(
         static_dim=datamodule.static_dim,
         target_dim=datamodule.target_dim,
         categorical_cardinalities=datamodule.categorical_cardinalities,
         categorical_vocabularies=datamodule.categorical_vocabularies,
         categorical_feature_names=datamodule.categorical_feature_names,
         modality_dims=datamodule.modality_dims,
-        temporal_encoder=encoder,
     )
 
     predictions = module(batch)
@@ -506,7 +397,7 @@ def test_embedding_widths_follow_the_heuristic(tmp_path: Path, logger) -> None:
     datamodule = SoilSequenceDataModule(bundle, batch_size=6, val_size=0.0, test_size=0.0, seed=7)
     datamodule.setup("fit")
 
-    module = SoilSequenceLightningModule(
+    module = SoilCNNLightningModule(
         static_dim=datamodule.static_dim,
         target_dim=1,
         categorical_cardinalities=datamodule.categorical_cardinalities,
@@ -528,7 +419,7 @@ def test_checkpoint_carries_the_vocabulary_under_weights_only(tmp_path: Path, lo
     datamodule = SoilSequenceDataModule(bundle, batch_size=6, val_size=0.0, test_size=0.0, seed=7)
     datamodule.setup("fit")
 
-    module = SoilSequenceLightningModule(
+    module = SoilCNNLightningModule(
         static_dim=datamodule.static_dim,
         target_dim=1,
         categorical_cardinalities=datamodule.categorical_cardinalities,
@@ -562,255 +453,6 @@ def test_an_undeclared_non_numeric_column_fails_loudly(tmp_path: Path, logger) -
 def test_a_declared_column_absent_from_the_data_fails_loudly(tmp_path: Path, logger) -> None:
     with pytest.raises(KeyError, match="SU_WRB1_PH"):
         _build_bundle(tmp_path, logger, categorical_features=["SU_WRB1_PH"])
-
-
-def test_tabular_module_runs_on_the_same_batch(tmp_path: Path, logger) -> None:
-    """The static-only baseline shares the datamodule and ignores every sequence key."""
-    bundle = _categorical_bundle(tmp_path, logger)
-    datamodule = SoilSequenceDataModule(bundle, batch_size=6, val_size=0.0, test_size=0.0, seed=7)
-    datamodule.setup("fit")
-    batch = next(iter(datamodule.train_dataloader()))
-
-    torch.manual_seed(0)
-    module = SoilTabularLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        categorical_cardinalities=datamodule.categorical_cardinalities,
-        categorical_feature_names=datamodule.categorical_feature_names,
-    )
-
-    predictions = module(batch)
-    assert predictions.shape == (6, 1)
-
-    module.loss_fn(predictions, batch["y"]).backward()
-    assert module.static_encoder.embeddings.embeddings[0].weight.grad is not None
-
-
-# --- lightning module ------------------------------------------------------
-
-
-def _module(encoder: str, **kwargs) -> SoilSequenceLightningModule:
-    defaults = dict(static_dim=4, target_dim=1, modality_dims={"m": 3}, temporal_encoder=encoder)
-    defaults.update(kwargs)
-    torch.manual_seed(0)
-    return SoilSequenceLightningModule(**defaults).eval()
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_forward_produces_gradients(encoder: str) -> None:
-    module = _module(encoder)
-    batch = _synthetic_batch()
-
-    predictions = module(batch)
-    assert predictions.shape == (4, 1)
-
-    module.loss_fn(predictions, batch["y"]).backward()
-    encoder_parameters = [p for p in module.temporal_encoders.parameters() if p.requires_grad]
-    assert encoder_parameters, "the dynamic branch should have trainable parameters"
-    assert all(p.grad is not None and torch.isfinite(p.grad).all() for p in encoder_parameters)
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_predictions_are_invariant_to_the_calendar_era(encoder: str) -> None:
-    """A model trained on 2017-2025 must behave identically on the same series shifted ten years."""
-    module = _module(encoder)
-    batch = _synthetic_batch()
-    shifted = {**batch, "sequence_time": {"m": batch["sequence_time"]["m"] + 10.0}}
-
-    with torch.no_grad():
-        torch.testing.assert_close(module(batch), module(shifted))
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_runs_on_sequence_lengths_it_was_not_built_for(encoder: str) -> None:
-    module = _module(encoder)
-
-    with torch.no_grad():
-        short = module(_synthetic_batch(length=2, seed=1))
-        long = module(_synthetic_batch(length=64, seed=2))
-
-    assert short.shape == long.shape == (4, 1)
-    assert torch.isfinite(short).all() and torch.isfinite(long).all()
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_reads_the_whole_series_not_just_a_prefix(encoder: str) -> None:
-    """Regression guard: perturbing the LAST observation must move the prediction.
-
-    A consumer that mistook the observation count for a sequence length would truncate here and
-    show no sensitivity at all - the failure that previously reduced the temporal branch to noise.
-    """
-    module = _module(encoder)
-    batch = _synthetic_batch(length=12)
-    mask = batch["sequence_mask"]["m"].clone()
-    mask[:, 4:] = False  # only the first four tokens are real
-    mask[0, 9] = True  # ...except one straggler far past that count for row 0
-    batch = {**batch, "sequence_mask": {"m": mask}}
-
-    perturbed_values = batch["sequences"]["m"].clone()
-    perturbed_values[0, 9] += 5.0
-    perturbed = {**batch, "sequences": {"m": perturbed_values}}
-
-    with torch.no_grad():
-        difference = (module(batch)[0] - module(perturbed)[0]).abs().item()
-    assert difference > 1e-6
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_ignores_masked_out_observations(encoder: str) -> None:
-    module = _module(encoder)
-    batch = _synthetic_batch(length=8)
-    mask = batch["sequence_mask"]["m"].clone()
-    mask[:, 5:] = False
-    batch = {**batch, "sequence_mask": {"m": mask}}
-
-    polluted_values = batch["sequences"]["m"].clone()
-    polluted_values[:, 5:] += 99.0
-    polluted = {**batch, "sequences": {"m": polluted_values}}
-
-    with torch.no_grad():
-        torch.testing.assert_close(module(batch), module(polluted))
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_inverts_the_target_transform_for_prediction(encoder: str) -> None:
-    module = _module(encoder, target_mean=[1.5], target_scale=[0.5], target_transform="log1p")
-    batch = _synthetic_batch()
-
-    with torch.no_grad():
-        standardized = module(batch)
-        predicted = module.predict_step(batch, 0)
-
-    expected = torch.expm1((standardized * 0.5 + 1.5) / 10.0)
-    torch.testing.assert_close(predicted, expected)
-
-
-def test_module_runs_without_a_temporal_branch() -> None:
-    module = _module("time_transformer", temporal_enabled=False)
-    batch = _synthetic_batch()
-
-    predictions = module(batch)
-    assert predictions.shape == (4, 1)
-    assert len(module.temporal_encoders) == 0
-
-
-def test_module_runs_without_static_features() -> None:
-    module = _module("time_transformer", static_dim=0)
-    batch = {**_synthetic_batch(), "x_static": torch.zeros(4, 0)}
-
-    predictions = module(batch)
-    assert predictions.shape == (4, 1)
-    assert torch.isfinite(predictions).all()
-
-
-def test_module_rejects_an_unknown_encoder_name() -> None:
-    with pytest.raises(ValueError, match="temporal_encoder"):
-        SoilSequenceLightningModule(static_dim=4, target_dim=1, modality_dims={"m": 3}, temporal_encoder="gru")
-
-
-def test_module_rejects_a_per_modality_mapping_that_omits_a_modality() -> None:
-    with pytest.raises(ValueError, match="no width in modality_embed_dim"):
-        SoilSequenceLightningModule(
-            static_dim=4,
-            target_dim=1,
-            modality_dims={"s1": 3, "s2": 4},
-            modality_embed_dim={"s1": 16},
-        )
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_module_checkpoint_reloads_under_weights_only(tmp_path: Path, encoder: str) -> None:
-    module = _module(encoder, target_mean=np.array([2.0]), target_scale=np.array([0.75]))
-    checkpoint_path = tmp_path / "model.ckpt"
-    torch.save(
-        {"state_dict": module.state_dict(), "hyper_parameters": dict(module.hparams)}, checkpoint_path
-    )
-
-    # weights_only=True is the PyTorch >= 2.6 default; a numpy array in hyper_parameters breaks it.
-    loaded = torch.load(checkpoint_path, weights_only=True)
-    assert loaded["hyper_parameters"]["target_mean"] == [2.0]
-
-    # Nothing in the weights may be sized by sequence length or tied to a date range.
-    for name, tensor in loaded["state_dict"].items():
-        assert "time_values" not in name and "temporal_steps" not in name
-        assert tensor.numel() < 100_000, name
-
-
-# --- end to end ------------------------------------------------------------
-
-
-@pytest.mark.parametrize("encoder", ENCODERS)
-def test_builder_to_module_end_to_end(tmp_path: Path, logger, encoder: str) -> None:
-    """A real Trainer.fit: covers the steps, the epoch metrics and the predict path together."""
-    from lightning.pytorch import Trainer
-
-    bundle = _build_bundle(tmp_path, logger)
-    # val needs >= 2 points or R2 is undefined and correctly goes unlogged.
-    datamodule = SoilSequenceDataModule(
-        bundle, batch_size=3, val_size=0.5, test_size=0.34, seed=5, target_transform="log1p"
-    )
-    datamodule.setup("fit")
-    assert datamodule.val_idx_.size >= 2
-
-    module = SoilSequenceLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        modality_dims=datamodule.modality_dims,
-        temporal_encoder=encoder,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-        target_transform=datamodule.target_transform,
-        fusion_norm_type="none",  # batches here are too small for BatchNorm1d
-    )
-
-    trainer = Trainer(
-        max_epochs=2,
-        accelerator="cpu",
-        logger=False,
-        enable_checkpointing=False,
-        enable_progress_bar=False,
-        enable_model_summary=False,
-    )
-    trainer.fit(module, datamodule=datamodule)
-
-    assert torch.isfinite(torch.as_tensor(trainer.callback_metrics["train_loss"]))
-    # The two health numbers this architecture exists to move.
-    assert "val_r2" in trainer.callback_metrics
-    assert "val_pred_std_ratio" in trainer.callback_metrics
-
-    predictions = trainer.predict(module, datamodule=datamodule)
-    predicted = torch.cat(predictions).reshape(-1)
-    assert len(predicted) == len(datamodule.y_test_frame_)
-    assert torch.isfinite(predicted).all()
-
-
-def test_end_to_end_predictions_survive_a_ten_year_shift(tmp_path: Path, logger) -> None:
-    """The transfer guarantee, end to end: same readings, dates a decade later, same predictions."""
-    base_dir = tmp_path / "base"
-    shifted_dir = tmp_path / "shifted"
-    base_dir.mkdir()
-    shifted_dir.mkdir()
-    base_bundle = _build_bundle(base_dir, logger)
-    shifted_bundle = _build_bundle(shifted_dir, logger, year_offset=10)
-
-    module = SoilSequenceLightningModule(
-        static_dim=2,
-        target_dim=1,
-        modality_dims={"s1": 1, "s2": 2},
-        temporal_encoder="time_transformer",
-        fusion_norm_type="none",
-    ).eval()
-
-    predictions = []
-    for bundle in (base_bundle, shifted_bundle):
-        datamodule = SoilSequenceDataModule(bundle, batch_size=6, val_size=0.0, test_size=0.0)
-        datamodule.setup("fit")
-        with torch.no_grad():
-            predictions.append(module(datamodule._collate_points(np.arange(6))))
-
-    # Not exact: a decade shifts which years are leap years, moving each date a fraction of a day
-    # along the seasonal circle. The tolerance is that drift, not a modelling approximation.
-    torch.testing.assert_close(predictions[0], predictions[1], atol=1e-3, rtol=1e-3)
 
 
 # --- the shared split plan -------------------------------------------------

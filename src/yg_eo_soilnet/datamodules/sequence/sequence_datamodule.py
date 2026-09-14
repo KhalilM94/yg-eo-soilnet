@@ -33,7 +33,7 @@ class _PointDataset(Dataset):
 class SoilSequenceDataModule(LightningDataModule):
     """Serves static covariates plus ragged, date-stamped observation sequences.
 
-    Two properties distinguish this from the graph datamodule, and both are load-bearing:
+    Two properties are load-bearing:
 
     * **Padding is a batch-local artefact.** Sequences are stored ragged and padded only to the
       current batch's longest series, so ``L`` differs from batch to batch. Nothing downstream may

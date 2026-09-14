@@ -242,7 +242,7 @@ def test_missing_roster_statistics_are_refused() -> None:
 
 
 def test_the_mapping_survives_a_weights_only_checkpoint_round_trip(tmp_path: Path) -> None:
-    """save_hyperparameters is called twice; this pins that the second call MERGES rather than wins.
+    """The residual settings must round-trip through hyper_parameters along with everything else.
 
     Losing residual_base_columns on reload would rebuild the module with an empty mapping, which now
     raises - but losing static_dim would rebuild a differently shaped network that still loads.
@@ -402,14 +402,16 @@ def test_the_shipped_registry_entry_builds_through_the_factory(tmp_path: Path, l
     """Every `auto` in the entry must be a keyword the module declares, or model_cls(**init_args)
     raises TypeError - the factory fills a written sentinel WITHOUT signature filtering, on purpose.
 
-    Also the only place auxiliary_label_mean/scale injection is exercised: they are offered from the
-    datamodule's fitted statistics, not written in the YAML.
+    Also the only place auxiliary_label_mean/scale injection is exercised: the YAML writes them as
+    `auto` and the factory fills them from the datamodule's fitted statistics. The residual base is a
+    switch on the soil_cnn entry now; soil_residual_cnn survives only as a legacy class name.
     """
     from config import load_lightning_registry
     from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 
     registry = load_lightning_registry("configs/lightning/models/defaults.yml")
-    spec = registry["soil_residual_cnn"]
+    spec = registry["soil_cnn"]
+    spec["init_args"]["residual_enabled"] = True
     # The shipped entry names the real dataset's columns; the fixture carries its own.
     spec["init_args"]["residual_base_columns"] = {"target_a": "lab_dense"}
 
@@ -421,7 +423,7 @@ def test_the_shipped_registry_entry_builds_through_the_factory(tmp_path: Path, l
     factory = LightningConfigFactory(registry, SimpleNamespace(TARGET_COLUMNS=["target_a"]))
     module = factory._build_model(spec, datamodule)
 
-    assert isinstance(module, SoilResidualCNNLightningModule)
+    assert module.residual_enabled
     assert module.residual_base_label_mean.tolist() == pytest.approx(
         [float(datamodule.label_mean_[datamodule.label_feature_names.index("lab_dense")])]
     )

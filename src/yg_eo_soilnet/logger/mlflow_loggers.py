@@ -612,10 +612,6 @@ class ChildRunLogger:
         checkpoint's stored preprocessing state instead of re-fitting scalers on whatever rows it
         was handed, which is the property that makes a prediction over the whole population mean
         the same thing as a prediction over the test split.
-
-        SoilGraphLightningModule's datamodule exposes no equivalent - it carries a graph, not a
-        sequence bundle - so a graph entry is skipped with a reason rather than half-supported. It
-        is `enabled: false` throughout the shipped registry.
         """
         if not export_enabled_for(config, model_name):
             return {}

@@ -23,7 +23,6 @@ from yg_eo_soilnet.datamodules.frame_cleaning import (
     assert_columns_are_dense_enough,
     column_missing_ratios,
 )
-from yg_eo_soilnet.datamodules.lightning.spatiotemporal_graph_builder import SpatiotemporalGraphBuilder
 from yg_eo_soilnet.datamodules.scikit.tabular_preprocessor import TabularPreprocessor
 from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 
@@ -111,7 +110,7 @@ def test_fail_false_warns_and_reports_instead_of_raising(logger, caplog):
     assert "the run continues" in caplog.text
 
 
-# --- the same rule on all three entry points ----------------------------------------------
+# --- the same rule on both entry points --------------------------------------------------
 
 
 def _configure(toy_config, tmp_path: Path, frame: pd.DataFrame):
@@ -132,12 +131,10 @@ def _run_family(family: str, config, logger, frame: pd.DataFrame):
     manager = DataManager(config, logger)
     if family == "sklearn":
         return TabularPreprocessor(config, logger, manager).preprocess_data(manager.load_dataset().tabular)
-    if family == "sequence":
-        return SoilSequenceBuilder(config, logger, manager).usable_point_ids()
-    return SpatiotemporalGraphBuilder(config, logger, manager).usable_point_ids()
+    return SoilSequenceBuilder(config, logger, manager).usable_point_ids()
 
 
-FAMILIES = ["sklearn", "sequence", "graph"]
+FAMILIES = ["sklearn", "sequence"]
 
 
 @pytest.mark.parametrize("family", FAMILIES)

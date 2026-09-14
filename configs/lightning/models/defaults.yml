@@ -1,9 +1,7 @@
 # Lightning (deep-learning) model registry. This file holds the settings shared by every model
 # (the `defaults:` block below); each model's own settings live in its own file beside this one
-# (soil_cnn.yml, soil_residual_cnn.yml, soil_residual_attention_cnn.yml, soil_sequence.yml,
-# soil_tabular.yml, soil_graph.yml). To register another model, add a new .yml file in this
-# folder, named after the model, with the model name as its top-level key - it's picked up
-# automatically.
+# (soil_cnn.yml today). To register another model, add a new .yml file in this folder, named after
+# the model, with the model name as its top-level key - it's picked up automatically.
 #
 # How defaults work: settings in `defaults:` below apply to every model, unless a model's own
 # file sets that same setting itself (which then wins). So a model's file only needs to list what

@@ -1,6 +1,6 @@
 """Optuna hyperparameter search over any entry in the Lightning registry.
 
-    python tune.py --entry soil_tabular --n-trials 200
+    python tune.py --entry soil_cnn --n-trials 200
 
 Nothing here is specific to a model. The entry name selects a registry entry and a matching search
 space; the trial mutates that entry and hands it to the ordinary LightningConfigFactory, so a model
@@ -8,7 +8,7 @@ added to the registry tomorrow is tunable by writing a search space for it and n
 
 The winner is exported as a ready-to-run registry file, named for the study that produced it:
 
-    LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_tabular-7438eb_best.yml python main.py
+    LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_cnn-e6c9f8_best.yml python main.py
 
 A study is named `<entry>-<fingerprint of its search space>` and resumed by name, so re-running the
 same command continues the sweep while editing the entry's search space starts a clean one. `--reset`
@@ -49,7 +49,7 @@ from yg_eo_soilnet.logger.training_logger import TrainingLogger
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Tune a Lightning registry entry with Optuna")
-    parser.add_argument("--entry", required=True, help="Registry entry to tune, e.g. soil_tabular")
+    parser.add_argument("--entry", required=True, help="Registry entry to tune, e.g. soil_cnn")
     parser.add_argument("--config-path", default="configs/main_config.yml", help="Path to the main YAML config file")
     parser.add_argument(
         "--target",

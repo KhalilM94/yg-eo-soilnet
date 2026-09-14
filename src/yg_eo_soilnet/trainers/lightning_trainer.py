@@ -531,9 +531,8 @@ class LightningTrainer:
     def _attach_preprocessing_state(bundle: LightningModelBundle) -> None:
         """Copy the datamodule's fitted input statistics onto the model, when both support it.
 
-        Both sides are optional on purpose: the graph datamodule and SoilGraphLightningModule do not
-        implement this pair, and a model that cannot carry the state should train exactly as before
-        rather than fail.
+        Both sides are optional on purpose: a model or datamodule that does not implement this pair
+        should train exactly as before rather than fail.
         """
         state_source = getattr(bundle.datamodule, "preprocessing_state", None)
         attach = getattr(bundle.model, "attach_preprocessing_state", None)

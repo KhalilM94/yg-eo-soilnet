@@ -22,9 +22,7 @@ from yg_eo_soilnet.models.lightningmodules.losses import (
     MahalanobisLoss,
     build_loss_fn,
 )
-from yg_eo_soilnet.models.lightningmodules.soil_tabular_lightning_module import (
-    SoilTabularLightningModule,
-)
+from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
 # Two targets that move together and a third that is nearly independent - the shape the soil
 # targets actually have, and enough structure for a "defiant" error direction to exist.
@@ -44,7 +42,7 @@ def _pair(n_rows=64, target_dim=3, seed=0):
     return predictions, targets
 
 
-def _module(**overrides) -> SoilTabularLightningModule:
+def _module(**overrides) -> SoilCNNLightningModule:
     kwargs = dict(
         static_dim=3,
         target_dim=3,
@@ -54,7 +52,7 @@ def _module(**overrides) -> SoilTabularLightningModule:
         target_covariance=CORRELATED.tolist(),
     )
     kwargs.update(overrides)
-    return SoilTabularLightningModule(**kwargs)
+    return SoilCNNLightningModule(**kwargs)
 
 
 def _detach_logging(module):
@@ -374,8 +372,8 @@ def test_datamodule_to_factory_to_trainer_end_to_end(loss_name) -> None:
     factory = LightningConfigFactory(registry={}, config=SimpleNamespace(TARGET_COLUMNS=[]))
     spec = {
         "import_path": (
-            "yg_eo_soilnet.models.lightningmodules.soil_tabular_lightning_module"
-            ".SoilTabularLightningModule"
+            "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module"
+            ".SoilCNNLightningModule"
         ),
         "init_args": {
             "static_hidden_dims": [4],

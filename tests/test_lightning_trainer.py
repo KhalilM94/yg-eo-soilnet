@@ -8,9 +8,8 @@ import pandas as pd
 import pytest
 
 import yg_eo_soilnet.trainers.lightning_trainer as lightning_trainer_module
-from yg_eo_soilnet.data_manager import DataManager
-from yg_eo_soilnet.datamodules.lightning.lightning_graph import SingleNodeGraphDataModule
-from yg_eo_soilnet.datamodules.lightning.spatiotemporal_graph_builder import SpatiotemporalGraphBuilder
+from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
+from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningModelBundle
 from yg_eo_soilnet.trainers.lightning_trainer import LightningTrainer
 
@@ -58,7 +57,7 @@ class FakeModel:
 
 
 def test_lightning_trainer_runs_fit_validate_test_and_logs(monkeypatch) -> None:
-    datamodule = _tiny_graph_datamodule()
+    datamodule = _tiny_datamodule()
 
     bundle = LightningModelBundle(
         name="toy_lightning",
@@ -155,7 +154,7 @@ def test_lightning_trainer_disables_default_logger_when_configured(monkeypatch) 
 
 
 def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
-    datamodule = _tiny_graph_datamodule()
+    datamodule = _tiny_datamodule()
 
     bundle = LightningModelBundle(
         name="toy_lightning",
@@ -228,49 +227,18 @@ def test_lightning_epoch_metrics_callback_logs_train_and_val_losses(monkeypatch)
     assert log_metric.call_args_list[1].kwargs == {"step": 3}
 
 
-def test_lightning_trainer_builds_graph_evaluation_frame(tmp_path, logger) -> None:
-    static_df = pd.DataFrame(
-        {
-            "point_id": [1, 2, 3],
-            "lat": [0.0, 0.5, 1.0],
-            "lon": [0.0, 0.5, 1.0],
-            "target_a": [1.0, 2.0, 3.0],
-            "static_1": [10.0, 11.0, 12.0],
-            "static_2": [20.0, 21.0, 22.0],
-        }
-    )
-    static_path = tmp_path / "static.csv"
-    static_df.to_csv(static_path, index=False)
-
-    config = SimpleNamespace(
-        DATA_FOLDER=str(tmp_path),
-        DATA_FILE="static.csv",
-        STATIC_CSV_PATH=str(static_path),
-        TIMESERIES_CSV_PATH=None,
-        POINT_ID_COLUMN="point_id",
-        LAT_COLUMN="lat",
-        LON_COLUMN="lon",
-        TIME_COLUMN="month",
-        TEMPORAL_FEATURES_ENABLED=False,
-        TARGET_COLUMNS=["target_a"],
-        ELIMINATED_FEATURES=[],
-        TEST_SIZE=0.33,
-        LIGHTNING_VAL_SIZE=0.33,
-        RANDOM_SEED=42,
-        SPATIAL_RADIUS=2.0,
-        BASELINE_METHOD="knn",
-        BASELINE_K_NEIGHBORS=1,
-    )
-
-    manager = DataManager(config=config, logger=logger)
-    bundle_dict = SpatiotemporalGraphBuilder(manager.config, manager.logger, manager).build(graph_data_args={"spatial_graph_enabled": False})
-    datamodule = SingleNodeGraphDataModule(
-        spatiotemporal_graph=bundle_dict,
+def test_lightning_trainer_builds_an_evaluation_frame() -> None:
+    datamodule = SoilSequenceDataModule(
+        SoilSequenceBundle(
+            point_ids=list(range(9)),
+            static_features=np.arange(18, dtype=np.float32).reshape(9, 2),
+            static_feature_names=["static_1", "static_2"],
+            targets=np.linspace(1.0, 3.0, 9, dtype=np.float32).reshape(9, 1),
+            target_names=["target_a"],
+        ),
         batch_size=1,
-        val_size=0.33,
-        num_workers=0,
-        pin_memory=False,
-        persistent_workers=False,
+        val_size=1 / 3,
+        test_size=1 / 3,
         seed=42,
     )
     datamodule.setup("fit")
@@ -287,15 +255,17 @@ def test_lightning_trainer_builds_graph_evaluation_frame(tmp_path, logger) -> No
 
     lightning_trainer = LightningTrainer(config=SimpleNamespace(), logger=MagicMock())
 
+    test_rows = len(datamodule.y_test_frame_)
     fake_trainer = SimpleNamespace(
-        predict=lambda model, datamodule=None: [np.asarray([[0.25]], dtype=np.float32)]
+        predict=lambda model, datamodule=None: [np.full((test_rows, 1), 0.25, dtype=np.float32)]
     )
 
     eval_df = lightning_trainer._build_evaluation_frame(bundle, fake_trainer, target="target_a")
 
     assert eval_df is not None
-    assert list(eval_df.columns) == ["static_1", "static_2", "target_a", "prediction", "target_name"]
-    assert eval_df["prediction"].iloc[0] == 0.25
+    assert len(eval_df) == test_rows > 0
+    assert {"static_1", "static_2", "target_a", "prediction", "target_name"} <= set(eval_df.columns)
+    assert (eval_df["prediction"] == 0.25).all()
 
 
 def test_lightning_trainer_fans_out_multitarget_child_runs(monkeypatch) -> None:
@@ -388,40 +358,38 @@ def test_the_logger_splits_a_joint_frame_into_one_frame_per_target() -> None:
 # hyper_parameters crashed every real run while the suite stayed green.
 
 
-def _tiny_graph_datamodule(num_nodes: int = 24):
+def _tiny_datamodule(num_points: int = 24):
     rng = np.random.default_rng(0)
-    graph = {
-        "point_ids": list(range(num_nodes)),
-        "static_features": rng.normal(5.0, 2.0, (num_nodes, 3)).astype(np.float32),
-        "targets": rng.gamma(2.0, 1.5, (num_nodes, 1)).astype(np.float32),
-        "coords": rng.normal(0.0, 1.0, (num_nodes, 2)).astype(np.float32),
-        "edge_index": np.zeros((2, 0), dtype=np.int64),
-        "edge_attr": np.zeros((0, 1), dtype=np.float32),
-    }
-    datamodule = SingleNodeGraphDataModule(
-        spatiotemporal_graph=graph, batch_size=8, test_size=0.25, val_size=0.25, seed=42
+    bundle = SoilSequenceBundle(
+        point_ids=list(range(num_points)),
+        static_features=rng.normal(5.0, 2.0, (num_points, 3)).astype(np.float32),
+        static_feature_names=["static_1", "static_2", "static_3"],
+        targets=rng.gamma(2.0, 1.5, (num_points, 1)).astype(np.float32),
+        target_names=["target_a"],
     )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=8, test_size=0.25, val_size=0.25, seed=42)
     datamodule.setup("fit")
     return datamodule
 
 
 def _fit_and_checkpoint(tmp_path):
     """Train one epoch through the real Lightning Trainer and return the checkpoint path."""
-    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch")
     from lightning.pytorch import Trainer
     from lightning.pytorch.callbacks import ModelCheckpoint
 
-    from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
-    from yg_eo_soilnet.models.lightningmodules.soil_graph_lightning_module import SoilGraphLightningModule
+    from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
-    datamodule = _tiny_graph_datamodule()
-    # Go through the factory so the test covers how stats actually reach the model in production.
+    datamodule = _tiny_datamodule()
+    # The target statistics as the factory hands them over in production: plain floats.
     init_args = {}
     for key, attribute in (("target_mean", "target_mean_"), ("target_scale", "target_scale_")):
         init_args[key] = [float(v) for v in np.asarray(getattr(datamodule, attribute)).ravel()]
-    model = SoilGraphLightningModule(
+    # No modalities in the bundle, so the CNN runs its static branch alone - all a checkpoint round
+    # trip needs, and small enough for one CPU epoch.
+    model = SoilCNNLightningModule(
         static_dim=datamodule.static_dim, target_dim=datamodule.target_dim,
-        temporal_enabled=False, spatial_graph_enabled=False, **init_args,
+        static_hidden_dims=[8], head_hidden_dims=[8], **init_args,
     )
     checkpoint = ModelCheckpoint(dirpath=str(tmp_path), monitor="val_loss", save_top_k=1)
     Trainer(
@@ -464,10 +432,10 @@ def test_checkpoint_hyperparameters_contain_no_array_objects(tmp_path) -> None:
 def test_target_inverse_transform_survives_a_checkpoint_restore(tmp_path) -> None:
     """Guards against 'fixing' this by ignoring the hparams, which would silently skip the inverse."""
     torch = pytest.importorskip("torch")
-    from yg_eo_soilnet.models.lightningmodules.soil_graph_lightning_module import SoilGraphLightningModule
+    from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
     path, datamodule = _fit_and_checkpoint(tmp_path)
-    restored = SoilGraphLightningModule.load_from_checkpoint(path, map_location="cpu")
+    restored = SoilCNNLightningModule.load_from_checkpoint(path, map_location="cpu")
 
     assert bool(restored.targets_are_standardized) is True
     # 0 in standardized space must map back to the training target mean, in original units.

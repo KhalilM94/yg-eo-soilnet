@@ -11,25 +11,6 @@ class FakeModel:
         self.kwargs = kwargs
 
 
-class FakeGraphDataModule:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-        self.spatiotemporal_graph = kwargs["spatiotemporal_graph"]
-        self.static_dim = 3
-        self.target_dim = 2
-        self.modality_dims = {"radar": 4, "optical": 5, "thermal": 6}
-        self.temporal_steps = 7
-        self.edge_attr_dim = 1
-
-    def setup(self, stage=None):
-        return None
-
-
-class FakeGraphModel:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
-
-
 def test_lightning_factory_rejects_non_dl_entries() -> None:
     factory = LightningConfigFactory(registry={}, config=SimpleNamespace())
 
@@ -49,154 +30,38 @@ def test_lightning_factory_rejects_non_dl_entries() -> None:
         raise AssertionError("Expected ValueError")
 
 
-def test_lightning_factory_builds_spatiotemporal_graph_and_infers_graph_dimensions() -> None:
-    registry = {
-        "graph_lightning": {
-            "enabled": True,
-            "modeltype": "dl",
-            "input_kind": "graph",
-            "random_seed": 13,
-            "import_path": "fake.module.FakeGraphModel",
-            "datamodule_import_path": "fake.module.FakeGraphDataModule",
-            "init_args": {
-                "static_dim": "auto",
-                "target_dim": "auto",
-                "temporal_steps": "auto",
-                "edge_attr_dim": "auto",
-                "temporal_lstm_hidden_dim": 16,
-                "temporal_lstm_num_layers": 2,
-                "temporal_lstm_dropout": 0.1,
-                "temporal_lstm_bidirectional": False,
-                "temporal_pooling": "last",
-                "spatial_graph_enabled": False,
-            },
-            "datamodule_init_args": {"batch_size": 1},
-        }
-    }
-    config = SimpleNamespace(
-        LIGHTNING_BATCH_SIZE=1,
-        LIGHTNING_VAL_SIZE=0.2,
-        LIGHTNING_NUM_WORKERS=0,
-        LIGHTNING_PIN_MEMORY=False,
-        LIGHTNING_PERSISTENT_WORKERS=False,
-        RANDOM_SEED=42,
-    )
-
-    factory = LightningConfigFactory(registry=registry, config=config)
-
-    def fake_dynamic_import(path: str):
-        if path == "fake.module.FakeGraphModel":
-            return FakeGraphModel
-        if path == "fake.module.FakeGraphDataModule":
-            return FakeGraphDataModule
-        raise AssertionError(f"Unexpected import path: {path}")
-
-    factory._dynamic_import = fake_dynamic_import  # type: ignore[method-assign]
-
-    spatiotemporal_graph = {
-        "static_features": np.asarray([[1.0, 2.0, 3.0]]),
-        "targets": np.asarray([[4.0, 5.0]]),
-        "temporal_features": {},
-        "temporal_enabled": False,
-        "edge_index": np.zeros((2, 0), dtype=np.int64),
-        "edge_attr": np.zeros((0, 1), dtype=np.float32),
-        "train_idx": np.asarray([0]),
-        "val_idx": np.asarray([], dtype=np.int64),
-        "test_idx": np.asarray([], dtype=np.int64),
-    }
-
-    bundles = factory.build_lightning_configs(target="target_a", data={"spatiotemporal_graph": spatiotemporal_graph})
-
-    bundle = bundles["graph_lightning"]
-    assert isinstance(bundle.model, FakeGraphModel)
-    assert bundle.datamodule.kwargs["seed"] == 13
-    assert bundle.datamodule.spatiotemporal_graph is spatiotemporal_graph
-    assert bundle.model.kwargs["static_dim"] == 3
-    assert bundle.model.kwargs["target_dim"] == 2
-    assert bundle.model.kwargs["modality_dims"] == {"radar": 4, "optical": 5, "thermal": 6}
-    assert bundle.model.kwargs["temporal_steps"] == 7
-    assert bundle.model.kwargs["edge_attr_dim"] == 1
-    assert bundle.model.kwargs["temporal_lstm_hidden_dim"] == 16
-    assert bundle.model.kwargs["temporal_lstm_num_layers"] == 2
-    assert bundle.model.kwargs["temporal_lstm_dropout"] == 0.1
-    assert bundle.model.kwargs["temporal_lstm_bidirectional"] is False
-    assert bundle.model.kwargs["temporal_pooling"] == "last"
-    assert bundle.model.kwargs["spatial_graph_enabled"] is False
-
-
 def _factory(registry: dict) -> LightningConfigFactory:
     return LightningConfigFactory(registry, SimpleNamespace())
 
 
-def test_graph_data_args_carries_spatial_graph_flag_from_init_args() -> None:
-    spec = {
-        "enabled": True,
-        "input_kind": "graph",
-        "graph_data_args": {"spatial_radius": 50000},
-        "init_args": {"spatial_graph_enabled": False},
-    }
-
-    graph_data_args = LightningConfigFactory._graph_data_args(spec)
-
-    assert graph_data_args["spatial_graph_enabled"] is False
-    assert graph_data_args["spatial_radius"] == 50000
-
-
-def test_graph_data_args_does_not_override_an_explicit_flag() -> None:
-    spec = {
-        "graph_data_args": {"spatial_graph_enabled": True},
-        "init_args": {"spatial_graph_enabled": False},
-    }
-
-    assert LightningConfigFactory._graph_data_args(spec)["spatial_graph_enabled"] is True
-
-
-def test_has_graph_input_finds_an_enabled_graph_entry() -> None:
-    factory = _factory({"soil_graph": {"enabled": True, "input_kind": "graph"}})
-
-    assert factory.has_graph_input() is True
-    assert factory.graph_spec()["input_kind"] == "graph"
-
-
-def test_has_graph_input_ignores_a_disabled_graph_entry() -> None:
-    factory = _factory({"soil_graph": {"enabled": False, "input_kind": "graph"}})
-
-    assert factory.has_graph_input() is False
-    assert factory.graph_spec() is None
-
-
-def test_has_graph_input_is_false_for_a_tabular_only_registry() -> None:
-    factory = _factory({"ts_soilnet": {"enabled": True, "input_kind": "tabular"}})
-
-    assert factory.has_graph_input() is False
-
-
-def test_has_graph_input_accepts_the_legacy_datamodule_type_spelling() -> None:
-    factory = _factory({"soil_graph": {"enabled": True, "datamodule_type": "graph"}})
-
-    assert factory.has_graph_input() is True
-
-
-def test_explicit_input_kind_wins_over_datamodule_type() -> None:
-    """The factory builds on input_kind, so the predicate must agree with what gets built."""
-    factory = _factory({"soil_graph": {"enabled": True, "input_kind": "tabular", "datamodule_type": "graph"}})
-
-    assert factory.has_graph_input() is False
-
-
-def test_factory_rejects_a_non_graph_input_kind() -> None:
-    """The tabular datamodule is gone; a registry entry asking for it must fail loudly."""
+@pytest.mark.parametrize("input_kind", ["tabular", "graph"])
+def test_factory_rejects_an_input_kind_other_than_sequence(input_kind) -> None:
+    """The tabular and graph datamodules are gone; an entry asking for either must fail loudly."""
     factory = _factory({})
     spec = {
         "enabled": True,
         "modeltype": "dl",
-        "input_kind": "tabular",
+        "input_kind": input_kind,
         "import_path": "fake.module.FakeModel",
         "datamodule_import_path": "fake.module.Whatever",
     }
 
-    with pytest.raises(ValueError, match="Unsupported input_kind 'tabular'"):
+    with pytest.raises(ValueError, match=f"Unsupported input_kind '{input_kind}'"):
         factory._build_datamodule(target="target_a", spec=spec, data={})
+
+
+def test_has_sequence_input_finds_an_enabled_sequence_entry() -> None:
+    factory = _factory({"soil_cnn": {"enabled": True, "input_kind": "sequence"}})
+
+    assert factory.has_sequence_input() is True
+    assert factory.sequence_spec()["input_kind"] == "sequence"
+
+
+def test_explicit_input_kind_wins_over_datamodule_type() -> None:
+    """The factory builds on input_kind, so the predicate must agree with what gets built."""
+    factory = _factory({"soil_cnn": {"enabled": True, "input_kind": "tabular", "datamodule_type": "sequence"}})
+
+    assert factory.has_sequence_input() is False
 
 
 class FakeSequenceDataModule:
@@ -267,19 +132,6 @@ def test_sequence_bundle_requires_a_data_manager_when_none_is_supplied() -> None
 
     with pytest.raises(KeyError, match="data_manager"):
         factory._build_datamodule(target="target_a", spec=_sequence_spec(), data={})
-
-
-def test_has_sequence_input_and_combined_target_predicate() -> None:
-    sequence_factory = _factory({"soil_sequence": {"enabled": True, "input_kind": "sequence"}})
-    assert sequence_factory.has_sequence_input() is True
-    assert sequence_factory.has_graph_input() is False
-    assert sequence_factory.covers_all_targets_in_one_run() is True
-
-    graph_factory = _factory({"soil_graph": {"enabled": True, "input_kind": "graph"}})
-    assert graph_factory.covers_all_targets_in_one_run() is True
-
-    tabular_factory = _factory({"ts": {"enabled": True, "input_kind": "tabular"}})
-    assert tabular_factory.covers_all_targets_in_one_run() is False
 
 
 def test_has_sequence_input_ignores_a_disabled_entry() -> None:
@@ -372,8 +224,8 @@ def test_target_covariance_is_injected_only_into_models_that_accept_it() -> None
     assert covariance == [[1.0, 0.4], [0.4, 1.0]]
     assert all(isinstance(value, float) for row in covariance for value in row)
 
-    # A model whose signature does not declare it - SoilGraphLightningModule, in production - is
-    # left alone rather than failing on an unexpected keyword.
+    # A model whose signature does not declare it is left alone rather than failing on an
+    # unexpected keyword.
     grid_free_model = factory._build_model(
         {"import_path": f"{__name__}.FakeGridFreeModel", "init_args": {}}, datamodule
     )

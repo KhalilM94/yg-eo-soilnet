@@ -41,6 +41,7 @@ LABEL_COLUMNS:
   - sand_median_0_30cm
   - silt_median_0_30cm
   - soc_median_0_30cm
+  - som_median_0_30cm
   - swc_median_0_30cm
   - texture_20cm
   - landform_class
@@ -50,6 +51,8 @@ LABEL_COLUMNS:
   - p2o5_ehangable_olsen_ppm_base
   - exchangeable_k2o_ppm_base
   - c_e_c_meq_100g_base
+  - c_e_c_meq_100g__TabICL
+  - caco3_pct_total__TabICL
 
 # Whether the lab values listed above are made AVAILABLE to models as optional extra inputs. This
 # does not turn them into ordinary features - they're always excluded from the regular feature set,
@@ -68,13 +71,13 @@ CARRY_LABEL_COLUMNS: true
 # the feature set; only the columns listed here get a model trained to predict them.
 TARGET_COLUMNS:
   - organic_matter_g_kg
-  # - clay_pct
-  # - sand_pct
+  - clay_pct
+  - sand_pct
   # - total_silt_pct
   # - coarse_silt_pct
   # - coarse_element_pct
-  # - ph_water
-  # - caco3_pct_total
+  - ph_water
+  - caco3_pct_total
   # - caco3_active_pct
   - c_e_c_meq_100g
   # - c_n_ratio

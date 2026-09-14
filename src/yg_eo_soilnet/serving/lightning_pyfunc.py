@@ -69,8 +69,8 @@ SERVING_MODULES: tuple[str, ...] = (
 # Every __init__.py in the staged copy is replaced with this. Mandatory, not cosmetic: every package
 # __init__ in this project re-exports its subpackages, and those re-exports reach modules the
 # serving subset deliberately leaves out - yg_eo_soilnet/__init__ pulls clustering_utils and
-# plot_utils, datamodules/__init__ pulls the graph path, lightningmodules/__init__ pulls the graph
-# module. A staged copy carrying the real ones fails on import.
+# plot_utils, datamodules/__init__ pulls the sklearn path. A staged copy carrying the real ones
+# fails on import.
 #
 # Blanking ALL of them rather than curating a list is safe because nothing in the serving subset
 # imports from a package namespace; every import is a fully-qualified submodule import. The

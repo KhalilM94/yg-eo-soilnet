@@ -3,9 +3,6 @@
 Loss selection, target de-standardization, the train/val/test steps and the optimizer are identical
 across architectures; only ``forward`` differs. Subclasses implement ``forward(batch)`` and call
 ``_init_regression_targets`` from their constructor.
-
-``SoilGraphLightningModule`` deliberately keeps its own copy rather than inheriting from this: it is
-covered by a large test suite and refactoring it is a separate change.
 """
 
 from __future__ import annotations

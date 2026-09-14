@@ -1,9 +1,8 @@
 # This file defines the shared rules for what `tune.py` (Optuna-based hyperparameter search) is
 # allowed to try. Each model's own search space lives in its own file under
-# configs/lightning/search_spaces/ (soil_tabular.yml, soil_sequence.yml, soil_cnn.yml,
-# soil_residual_cnn.yml), named after the entry it tunes in configs/lightning/models/ - add a new
-# .yml file there, named after the model, with the model name as its top-level key, to add a
-# search space for another one.
+# configs/lightning/search_spaces/ (soil_cnn.yml today), named after the entry it tunes in
+# configs/lightning/models/ - add a new .yml file there, named after the model, with the model name
+# as its top-level key, to add a search space for another one.
 #
 # Quick glossary: Optuna runs many "trials" - each trial trains the model once with one particular
 # combination of settings - and tries to find the combination that scores best. A "study" is one
@@ -23,11 +22,12 @@
 #              trials rely on being stopped early rather than run to completion).
 #   params     the actual search space - the settings Optuna is allowed to vary, and the range or
 #              choices for each one. `when:` makes a setting only apply in trials where an earlier
-#              choice matches - e.g. only search LSTM settings in trials that actually chose the
-#              LSTM encoder.
+#              choice - or a value pinned under `fixed` - matches, e.g. only search the attention
+#              settings in trials that actually chose attention fusion.
 #   derive     named helper rules (defined in hpo/constraints.py) for relationships between
 #              settings that are too complex to write directly as a plain search range. Write a
-#              bare helper name, or `{name: {option: value}}` to pass it settings of its own.
+#              bare helper name, or `{name: {option: value}}` to pass it settings of its own. A
+#              `when:` option skips the helper the same way it skips a setting under `params`.
 #
 # LAYER WIDTHS: every stack of layers in these models (the head, the static branch, the conv
 # blocks) is set as a list of per-layer widths, where the list's length IS the number of layers -
@@ -68,13 +68,24 @@
 #     it applies to the whole study at once.
 
 # --- static features + one CNN per data source, over a rasterised (year x month) grid (soil_cnn) ---
+# One search space for every combination of soil_cnn's three architecture switches (see
+# configs/lightning/models/soil_cnn.yml). `fusion` is searched: each trial picks gated or attention,
+# and the attention settings are only drawn in trials that picked attention.
+#
+# residual_enabled and auxiliary_enabled are pinned under `fixed` rather than searched. They depend
+# on which lab columns your data carries, which no trial can change, and a pinned value is part of
+# the study's fingerprint - so flipping one here starts a fresh study instead of ranking trials of
+# two different models against each other. The residual settings below are only drawn while
+# residual_enabled is pinned to true.
 soil_cnn:
   objective:
     # This has to be exactly "val_loss" (not e.g. "mse") because that's the actual name the
     # training loop logs the metric under - naming anything else here means the pruner above would
     # never find the metric it's supposed to watch, and would prune every single trial. With this
     # model's loss_name: mse (in configs/lightning/models/soil_cnn.yml), val_loss ends up being the
-    # mean squared error, measured in standardized/log1p space rather than the target's original units.
+    # mean squared error, measured in standardized/log1p space rather than the target's original
+    # units. With the residual base on it is the loss of the final prediction (base + correction),
+    # not of the correction alone, so trials with and without it rank the same way.
     metric: val_loss
     direction: minimize
   sampler: {name: tpe, seed: 42}
@@ -86,13 +97,18 @@ soil_cnn:
     datamodule.persistent_workers: true
     callbacks.early_stopping.patience: 12
     model.pool: masked_avg
+    # The two switches that stay out of the search - see the note above this entry.
+    model.residual_enabled: false
+    model.auxiliary_enabled: true
 
   params:
+    # First, so the attention settings below can depend on it.
+    model.fusion: {type: categorical, choices: [gated, attention]}
     model.learning_rate: {type: float, low: 1.0e-5, high: 1.0e-3, log: true}
-    model.weight_decay: {type: float, low: 1.0e-1, high: 1.0e-1, log: true}
+    model.weight_decay: {type: float, low: 1.0e-4, high: 1.0e-1, log: true}
     model.dropout: {type: float, low: 0.2, high: 0.6, step: 0.1}
     model.embedding_dropout: {type: float, low: 0.1, high: 0.4, step: 0.1}
-    model.continuous_norm: {type: categorical, choices: [batch, layer]}
+    model.continuous_norm: {type: categorical, choices: [none, batch, layer]}
     model.temporal_encoder: {type: categorical, choices: [dilated_tempcnn, annual_grid2d]}
     model.modality_embed_dim: {type: categorical, choices: [16, 32, 64]}
     model.cnn_norm: {type: categorical, choices: [batch, group]}
@@ -102,16 +118,39 @@ soil_cnn:
     model.head_norm_final: {type: categorical, choices: [true, false]}
     model.scheduler_patience: {type: int, low: 3, high: 8, step: 1}
     datamodule.batch_size: {type: categorical, choices: [64, 128]}
+    # --- attention fusion: only in trials that picked it ---
+    model.attention_static_tokens: {type: categorical, choices: [summary, per_feature],
+                                    when: {model.fusion: attention}}
+    model.attention_d_model: {type: categorical, choices: [32, 64, 128], when: {model.fusion: attention}}
+    model.attention_nhead: {type: categorical, choices: [2, 4, 8], when: {model.fusion: attention}}
+    model.attention_num_layers: {type: int, low: 1, high: 3, step: 1, when: {model.fusion: attention}}
+    model.attention_ff_multiplier: {type: categorical, choices: [2, 4], when: {model.fusion: attention}}
+    model.attention_dropout: {type: float, low: 0.1, high: 0.6, step: 0.1,
+                              when: {model.fusion: attention}}
+    model.attention_readout: {type: categorical, choices: [cls, mean, flatten],
+                              when: {model.fusion: attention}}
+    # --- residual base: only while residual_enabled is pinned to true above ---
+    model.residual_base_validity_channels: {type: categorical, choices: [true, false],
+                                            when: {model.residual_enabled: true}}
+    model.residual_base_dropout: {type: float, low: 0.1, high: 0.6, step: 0.1,
+                                  when: {model.residual_enabled: true}}
 
   derive:
+    # Rounds the token width up to a multiple of the head count. It does nothing in a gated trial,
+    # where neither setting is drawn.
+    - d_model_divisible_by_nhead: {d_model_key: model.attention_d_model,
+                                   nhead_key: model.attention_nhead}
     - dims_pyramid: {key: model.head_hidden_dims,   min_depth: 0, max_depth: 3,
                      widths: [32, 64, 128], taper: 0.5, floor: 8}
+    # No effect with attention_static_tokens: per_feature, where the static branch has no layers.
     - dims_pyramid: {key: model.static_hidden_dims, min_depth: 1, max_depth: 2,
-                     widths: [16,32, 64], taper: 1.0}
+                     widths: [16, 32, 64], taper: 1.0}
     # taper: 1.0 means every conv layer in the stack gets tried at the same width. Raise it toward
     # 2.0 if you also want to search stacks that widen from one layer to the next.
     - dims_pyramid: {key: model.cnn_hidden_dims,    min_depth: 1, max_depth: 3,
                      widths: [16, 32, 64], taper: 1.0}
+    - dims_pyramid: {key: model.residual_base_hidden_dims, min_depth: 0, max_depth: 1,
+                     widths: [16, 32], taper: 1.0, when: {model.residual_enabled: true}}
     # min_depth: 0 lets a trial try feeding the auxiliary lab values in as-is, with no extra layers
     # (see auxiliary_hidden_dims in configs/lightning/models/soil_cnn.yml). This is commented out
     # because it has no effect unless auxiliary_label_columns is also set to a non-empty list -

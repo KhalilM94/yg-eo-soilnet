@@ -11,7 +11,7 @@ from typing import Any, Mapping
 
 from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 
-PAYLOAD_KEYS = {"sequence": "sequence_bundle", "graph": "spatiotemporal_graph"}
+PAYLOAD_KEYS = {"sequence": "sequence_bundle"}
 
 
 def build_lightning_input(
@@ -36,6 +36,5 @@ def build_lightning_input(
         return data
 
     factory = LightningConfigFactory({entry: dict(spec)}, config, logger=logger, data_manager=data_manager)
-    builder = factory._build_sequence_bundle if input_kind == "sequence" else factory._build_spatiotemporal_graph
-    data[payload_key] = builder(spec)
+    data[payload_key] = factory._build_sequence_bundle(spec)
     return data

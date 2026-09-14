@@ -60,13 +60,23 @@ soil_residual_attention_cnn:
     architecture: residual-calendar-grid-cnn-attention
   enabled: true
   input_kind: sequence
-  import_path: yg_eo_soilnet.models.lightningmodules.soil_residual_attention_cnn_lightning_module.SoilResidualAttentionCNNLightningModule
+  import_path: yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule
   datamodule_import_path: yg_eo_soilnet.datamodules.sequence.sequence_datamodule.SoilSequenceDataModule
   init_args:
     static_dim: auto
     target_dim: auto
     modality_dims: auto
     grid_years: auto
+    # The architecture switches (see configs/lightning/models/soil_cnn.yml). Set to what trial #114
+    # ran with: attention fusion, anchored on the residual base below. Each switch's own settings
+    # further down are ignored while it is off.
+    #   residual_enabled   false predicts the value itself instead of a correction to
+    #                      residual_base_columns; true needs a base column for EVERY target fitted
+    #   auxiliary_enabled  true feeds the lab values listed in auxiliary_label_columns as extra
+    #                      inputs; with that list empty, as tuned, it changes nothing
+    fusion: attention
+    residual_enabled: true
+    auxiliary_enabled: false
     categorical_cardinalities: auto
     categorical_vocabularies: auto
     categorical_feature_names: auto
@@ -93,14 +103,22 @@ soil_residual_attention_cnn:
     attention_readout: mean
     residual_base_columns:
       organic_matter_g_kg: organic_matter_g_kg_base
-      c_e_c_meq_100g: c_e_c_meq_100g_base
+      clay_pct: clay_median_0_30cm
+      sand_pct: sand_median_0_30cm
+      c_e_c_meq_100g: c_e_c_meq_100g__TabICL
+      caco3_pct_total: caco3_pct_total__TabICL
+      ph_water: ph_median_0_30cm
     residual_base_hidden_dims: []
     residual_base_dropout: 0.2
     residual_base_validity_channels: false
     residual_base_max_missing: 0.05
     auxiliary_label_mean: auto
     auxiliary_label_scale: auto
-    auxiliary_label_columns: []
+    auxiliary_label_columns: 
+    # - clay_median_0_30cm
+    # - sand_median_0_30cm
+    # - ph_median_0_30cm
+    # - c_e_c_meq_100g__TabICL
     auxiliary_available_names: auto
     auxiliary_validity_channels: true
     auxiliary_hidden_dims: []

@@ -517,7 +517,7 @@ class AttentionFusion(nn.Module):
             self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
             nn.init.normal_(self.cls_token, std=0.02)
 
-        # Same layer as TemporalTransformerEncoder, plus a closing LayerNorm: a pre-norm stack leaves
+        # A standard pre-norm encoder layer, plus a closing LayerNorm: a pre-norm stack leaves
         # its last residual stream unnormalized, and this output feeds a head rather than another block.
         layer = nn.TransformerEncoderLayer(
             d_model=d_model,

@@ -261,8 +261,6 @@ class Config:
         ).lower()
         # Lightning only. The head emits (mu, log var) and the loss becomes beta-NLL, which is what
         # gives an input-dependent bar width rather than one driven by ensemble spread alone.
-        # SoilGraphLightningModule does not inherit the shared regression base, so it ignores this
-        # and gets ensemble-only uncertainty.
         self.UNCERTAINTY_HETEROSCEDASTIC = self._get_uncertainty_config(
             'heteroscedastic', 'UNCERTAINTY_HETEROSCEDASTIC', True
         )

@@ -1,10 +1,11 @@
 """Residual calendar-grid CNN with attention fusion: the fusion, and that nothing else moved.
 
-Everything after the fusion - the base offset, the base and auxiliary blocks, the variance head - is
-inherited from SoilResidualCNNLightningModule and pinned by tests/test_residual_cnn.py. This file
-pins what changed: the attention fusion itself, the two ways static covariates become tokens, and
-the contracts the swap could silently break - the head's width, the attribution seam's exact
-equality, and the checkpoint round trip of settings saved by a third save_hyperparameters() call.
+Runs through SoilResidualAttentionCNNLightningModule, now a legacy name for soil_cnn with
+residual_enabled and fusion="attention" (tests/test_unified_cnn.py pins that equivalence). Everything
+after the fusion - the base offset, the base and auxiliary blocks, the variance head - is pinned by
+tests/test_residual_cnn.py. This file pins the attention fusion itself, the two ways static
+covariates become tokens, and the contracts the fusion could silently break - the head's width, the
+attribution seam's exact equality, and the checkpoint round trip of the attention settings.
 """
 
 from __future__ import annotations
@@ -417,7 +418,9 @@ def test_the_shipped_registry_entry_builds_through_the_factory(tmp_path: Path, l
     from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 
     registry = load_lightning_registry("configs/lightning/models/defaults.yml")
-    spec = registry["soil_residual_attention_cnn"]
+    # The two switches soil_residual_attention_cnn now stands for, on the one soil_cnn entry.
+    spec = registry["soil_cnn"]
+    spec["init_args"].update(residual_enabled=True, fusion="attention")
     # The shipped entry names the real dataset's columns; the fixture carries its own.
     spec["init_args"]["residual_base_columns"] = {"target_a": "lab_dense"}
 
@@ -425,7 +428,7 @@ def test_the_shipped_registry_entry_builds_through_the_factory(tmp_path: Path, l
     factory = LightningConfigFactory(registry, SimpleNamespace(TARGET_COLUMNS=["target_a"]))
     module = factory._build_model(spec, datamodule)
 
-    assert isinstance(module, SoilResidualAttentionCNNLightningModule)
+    assert module.residual_enabled
     assert isinstance(module.fusion, AttentionFusion)
     assert module.hparams["attention_static_tokens"] == spec["init_args"]["attention_static_tokens"]
     assert module.serving_label_columns == ["lab_dense"]

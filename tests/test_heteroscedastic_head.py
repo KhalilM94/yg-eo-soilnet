@@ -4,12 +4,11 @@ import numpy as np
 import pytest
 import torch
 
-from yg_eo_soilnet.models.lightningmodules.soil_tabular_lightning_module import (
-    SoilTabularLightningModule,
-)
+from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
 
-def _module(**overrides) -> SoilTabularLightningModule:
+def _module(**overrides) -> SoilCNNLightningModule:
+    # No modalities: the CNN's static branch alone, so a batch needs only x_static and y.
     kwargs = dict(
         static_dim=3,
         target_dim=1,
@@ -19,7 +18,7 @@ def _module(**overrides) -> SoilTabularLightningModule:
         predict_variance=True,
     )
     kwargs.update(overrides)
-    return SoilTabularLightningModule(**kwargs)
+    return SoilCNNLightningModule(**kwargs)
 
 
 def _batch(n_rows=8, static_dim=3, target_dim=1, seed=0):

@@ -217,9 +217,8 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
 
     if not hasattr(model, "explanation_parts") or not hasattr(model, "forward_from_parts"):
         raise TypeError(
-            f"{type(model).__name__} has no attribution seam. SoilCNNLightningModule and "
-            "SoilSequenceLightningModule implement explanation_parts/forward_from_parts; "
-            "SoilGraphLightningModule deliberately does not."
+            f"{type(model).__name__} has no attribution seam: SoilCNNLightningModule implements "
+            "explanation_parts/forward_from_parts, and a model explained here must too."
         )
 
     max_samples = int(getattr(config, "EXPLAIN_MAX_SAMPLES", 500))

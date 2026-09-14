@@ -230,7 +230,7 @@ def test_relog_refuses_a_single_checkpoint_from_an_ensemble_run(monkeypatch, tmp
             "D",
             (),
             {
-                "tags": {"model_name": "soil_tabular", "target": "target_a"},
+                "tags": {"model_name": "soil_cnn", "target": "target_a"},
                 "params": {"uncertainty_n_members": "5"},
                 "metrics": {},
             },
@@ -248,6 +248,6 @@ def test_relog_refuses_a_single_checkpoint_from_an_ensemble_run(monkeypatch, tmp
                 "--run-id",
                 "abc",
                 "--model-class",
-                "yg_eo_soilnet.models.lightningmodules.soil_tabular_lightning_module.SoilTabularLightningModule",
+                "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule",
             ]
         )

@@ -48,20 +48,45 @@ def split_derive_entry(entry: Any) -> tuple[str, dict[str, Any]]:
     )
 
 
+def split_when(options: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    """`(hook options, when guard)` - the guard belongs to the search space, not to the hook.
+
+    Same semantics as a `params` entry's `when:`: the hook runs only in trials where every named
+    parameter - drawn, or pinned under `fixed:` - equals the given value.
+    """
+    options = dict(options)
+    when = options.pop("when", None) or {}
+    if not isinstance(when, Mapping):
+        raise ValueError(f"A derive entry's 'when' must map parameters to values; got {when!r}.")
+    return options, dict(when)
+
+
+def _guarded(hook: ConstraintHook, when: Mapping[str, Any]) -> ConstraintHook:
+    def run(trial: optuna.Trial, chosen: MutableMapping[str, Any]) -> None:
+        if all(key in chosen and chosen[key] == expected for key, expected in when.items()):
+            hook(trial, chosen)
+
+    return run
+
+
 def resolve_constraints(entries: list[Any]) -> list[ConstraintHook]:
     """Look up hooks by name, failing at search-space load time rather than mid-study.
 
     Options given in the mapping form are bound here, so a resolved hook is always callable as
-    `(trial, chosen)` and nothing downstream has to carry them.
+    `(trial, chosen)` and nothing downstream has to carry them. A `when:` option is not passed to
+    the hook; it wraps it, so a pyramid for a switched-off branch draws nothing at all.
     """
     parsed = [split_derive_entry(entry) for entry in entries]
     unknown = [name for name, _ in parsed if name not in CONSTRAINTS]
     if unknown:
         available = ", ".join(sorted(CONSTRAINTS)) or "(none)"
         raise ValueError(f"Unknown constraint hook(s): {', '.join(unknown)}. Available: {available}.")
-    return [
-        partial(CONSTRAINTS[name], **options) if options else CONSTRAINTS[name] for name, options in parsed
-    ]
+    hooks: list[ConstraintHook] = []
+    for name, options in parsed:
+        options, when = split_when(options)
+        hook = partial(CONSTRAINTS[name], **options) if options else CONSTRAINTS[name]
+        hooks.append(_guarded(hook, when) if when else hook)
+    return hooks
 
 
 @constraint("d_model_divisible_by_nhead")

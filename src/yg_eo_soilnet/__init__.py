@@ -7,10 +7,6 @@ from yg_eo_soilnet.clustering_utils import (
 	KMeansClusterStrategy,
 	SpatialGridClusterStrategy,
 )
-from yg_eo_soilnet.datamodules.lightning import (
-	SingleNodeGraphDataModule,
-	SpatiotemporalGraphBuilder,
-)
 from yg_eo_soilnet.datamodules.scikit import (
 	CVSplitter,
 	PipelineBuilder,
@@ -43,8 +39,6 @@ __all__ = [
 	"ScikitDataModule",
 	"SklearnDataSplitter",
 	"TabularPreprocessor",
-	"SingleNodeGraphDataModule",
-	"SpatiotemporalGraphBuilder",
 	"ModelConfigFactory",
 	"BaseSpatialClusterStrategy",
 	"KMeansClusterStrategy",

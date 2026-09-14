@@ -15,7 +15,7 @@ from typing import Any, Mapping
 import optuna
 import yaml
 
-from yg_eo_soilnet.hpo.constraints import ConstraintHook, resolve_constraints, split_derive_entry
+from yg_eo_soilnet.hpo.constraints import ConstraintHook, resolve_constraints, split_derive_entry, split_when
 from yg_eo_soilnet.hpo.overrides import to_builtin, validate_override_keys
 
 DIRECTIONS = {"minimize": "min", "maximize": "max"}
@@ -249,18 +249,29 @@ class SearchSpace:
         distributions = [Distribution.from_mapping(dotted, spec) for dotted, spec in params.items()]
 
         # A `when:` guard may only reference a parameter drawn earlier - dict order is the draw
-        # order, so a forward reference would silently never match.
-        drawn: set[str] = set()
+        # order, so a forward reference would silently never match - or one pinned under `fixed:`,
+        # which suggest() puts in place before anything is drawn.
+        drawn: set[str] = set(fixed)
         for distribution in distributions:
             for guarded in distribution.when:
                 if guarded not in drawn:
                     raise ValueError(
                         f"{distribution.dotted!r}: 'when' references {guarded!r}, which is not "
-                        f"declared before it. Move {guarded!r} earlier in the 'params' block."
+                        f"declared before it or pinned under 'fixed'. Move {guarded!r} earlier in "
+                        "the 'params' block."
                     )
             drawn.add(distribution.dotted)
 
         derive = list(mapping.get("derive") or [])
+        # Derive hooks run after every draw, so their guards may name any fixed or searched key.
+        for entry in derive:
+            name, options = split_derive_entry(entry)
+            unknown = [key for key in split_when(options)[1] if key not in drawn]
+            if unknown:
+                raise ValueError(
+                    f"derive entry {name!r}: 'when' references {unknown}, which is neither pinned "
+                    "under 'fixed' nor declared under 'params', so it could never match."
+                )
         return cls(
             entry=entry,
             objective=Objective.from_mapping(mapping.get("objective")),

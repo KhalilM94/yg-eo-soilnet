@@ -1,10 +1,9 @@
 """Reusable tabular blocks: learned entity embeddings plus a static feature encoder.
 
 Plain ``nn.Module``s, deliberately not ``LightningModule``s, for the same reason
-``temporal_encoders`` and ``temporal_cnn_encoders`` are: the sequence model, the calendar-grid CNN
-and any future tabular model all need this block, and a LightningModule cannot be composed into
-three different parents. Everything training-related - loss, optimizer, target inversion - stays in
-``SoilRegressionLightningBase``.
+``temporal_cnn_encoders`` is: a LightningModule cannot be composed into another model, and this block
+is a part of the calendar-grid CNN rather than a model of its own. Everything training-related -
+loss, optimizer, target inversion - stays in ``SoilRegressionLightningBase``.
 
 The counterpart on the data side is ``datamodules.categorical``, which produces the integer codes
 these embeddings look up. The contract between them is narrow on purpose: an ``(B, K)`` int64 tensor
@@ -201,6 +200,7 @@ class TabularStaticEncoder(nn.Module):
         activation: str = "relu",
         use_layer_norm: bool = True,
         continuous_norm: str = "none",
+        mlp: bool = True,
     ):
         super().__init__()
         self.num_continuous = int(num_continuous)
@@ -208,7 +208,10 @@ class TabularStaticEncoder(nn.Module):
             raise ValueError(f"num_continuous must be non-negative, got {num_continuous}")
 
         self.hidden_dims = [int(width) for width in hidden_dims]
-        if not self.hidden_dims:
+        # mlp=False stops at the raw [continuous_norm(x), embedded] block: what an attention fusion
+        # cuts one token per column from. hidden_dims is then unused, so an empty list is allowed.
+        self.mlp = bool(mlp)
+        if self.mlp and not self.hidden_dims:
             raise ValueError(
                 "TabularStaticEncoder needs at least one hidden width. A zero-layer static branch "
                 "would feed the raw concatenation straight into the fusion, which is a different "
@@ -238,20 +241,28 @@ class TabularStaticEncoder(nn.Module):
             else nn.Identity()
         )
 
-        self.encoder = build_mlp_stack(
-            self.input_dim,
-            self.hidden_dims,
-            output_dim,
-            dropout=float(dropout),
-            use_layer_norm=use_layer_norm,
-            activation=activation,
-            # Every block is a full block: this branch feeds a fusion, not a readout, so there is no
-            # magnitude for a trailing norm or dropout to strip.
-            norm_final=True,
-            dropout_final=True,
-        )
-
-        self.output_dim = self.hidden_dims[-1] if output_dim is None else int(output_dim)
+        if self.mlp:
+            self.encoder = build_mlp_stack(
+                self.input_dim,
+                self.hidden_dims,
+                output_dim,
+                dropout=float(dropout),
+                use_layer_norm=use_layer_norm,
+                activation=activation,
+                # Every block is a full block: this branch feeds a fusion, not a readout, so there is
+                # no magnitude for a trailing norm or dropout to strip.
+                norm_final=True,
+                dropout_final=True,
+            )
+            self.output_dim = self.hidden_dims[-1] if output_dim is None else int(output_dim)
+        else:
+            if output_dim is not None:
+                raise ValueError("output_dim projects the MLP's output, and mlp=False builds no MLP.")
+            # nn.Identity registers nothing, so this has exactly the state_dict keys of an encoder
+            # whose MLP was swapped for an Identity after construction - what per_feature attention
+            # tokens used to do.
+            self.encoder = nn.Identity()
+            self.output_dim = self.input_dim
 
     @property
     def embedding_dims(self) -> list[int]:

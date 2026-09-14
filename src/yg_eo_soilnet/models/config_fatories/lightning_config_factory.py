@@ -8,7 +8,6 @@ from typing import Any, Mapping, MutableMapping
 
 import numpy as np
 
-from yg_eo_soilnet.datamodules.lightning.spatiotemporal_graph_builder import SpatiotemporalGraphBuilder
 from yg_eo_soilnet.seeding import seed_everything
 from yg_eo_soilnet.targets import split_target_names
 
@@ -105,16 +104,6 @@ class LightningConfigFactory:
         """The datamodule shape an entry declares. An explicit `input_kind` wins."""
         return spec.get("input_kind", spec.get("datamodule_type", "tabular"))
 
-    def graph_spec(self) -> dict[str, Any] | None:
-        """The enabled registry entry that needs a spatiotemporal graph, if any."""
-        for spec in self.registry.values():
-            if spec.get("enabled", False) and self._input_kind(spec) == "graph":
-                return spec
-        return None
-
-    def has_graph_input(self) -> bool:
-        return self.graph_spec() is not None
-
     def sequence_spec(self) -> dict[str, Any] | None:
         """The enabled registry entry that needs a sequence bundle, if any."""
         for spec in self.registry.values():
@@ -124,17 +113,6 @@ class LightningConfigFactory:
 
     def has_sequence_input(self) -> bool:
         return self.sequence_spec() is not None
-
-    def covers_all_targets_in_one_run(self) -> bool:
-        """Whether an enabled datamodule *can* span every target in one pass.
-
-        A CAPABILITY, not a decision. It used to be read as the multi-target switch, which was
-        misleading twice over: it is always True (``_build_datamodule`` accepts only 'graph' and
-        'sequence', and both are built from the whole dataset at once), and the head was a
-        ``Linear(..., target_dim)`` over every configured target regardless of what it returned.
-        What a run actually fits is now decided by MULTI_TARGET_MODE; see yg_eo_soilnet.targets.
-        """
-        return self.has_graph_input() or self.has_sequence_input()
 
     def _validate_entry(self, name: str, spec: Mapping[str, Any]) -> None:
         required_keys = {"enabled", "modeltype", "import_path", "datamodule_import_path"}
@@ -146,10 +124,9 @@ class LightningConfigFactory:
 
     def _build_datamodule(self, target: str, spec: Mapping[str, Any], data: Mapping[str, Any]) -> Any:
         input_kind = self._input_kind(spec)
-        if input_kind not in {"graph", "sequence"}:
+        if input_kind != "sequence":
             raise ValueError(
-                f"Unsupported input_kind {input_kind!r} in the Lightning registry; "
-                "expected 'graph' or 'sequence'"
+                f"Unsupported input_kind {input_kind!r} in the Lightning registry; expected 'sequence'"
             )
 
         datamodule_cls = self._dynamic_import(spec["datamodule_import_path"])
@@ -185,16 +162,10 @@ class LightningConfigFactory:
         # target groups over the same payload cannot collide in the cache.
         cache_key = (spec["datamodule_import_path"], repr(sorted(datamodule_kwargs.items())))
 
-        if input_kind == "graph":
-            payload = data.get("spatiotemporal_graph")
-            if payload is None:
-                payload = self._build_spatiotemporal_graph(spec)
-            datamodule_kwargs["spatiotemporal_graph"] = payload
-        else:
-            payload = data.get("sequence_bundle")
-            if payload is None:
-                payload = self._build_sequence_bundle(spec)
-            datamodule_kwargs["sequence_bundle"] = payload
+        payload = data.get("sequence_bundle")
+        if payload is None:
+            payload = self._build_sequence_bundle(spec)
+        datamodule_kwargs["sequence_bundle"] = payload
 
         split_plan = self._resolve_split_plan(data)
         if split_plan is not None and self._accepts_kwarg(datamodule_cls, "split_plan"):
@@ -215,36 +186,17 @@ class LightningConfigFactory:
         return datamodule
 
     def _build_sequence_bundle(self, spec: Mapping[str, Any]) -> Any:
-        """Build the sequence bundle on demand, mirroring the graph path."""
+        """Build the sequence bundle on demand, when the caller supplied none."""
         if self.data_manager is None:
             raise KeyError(
                 "Sequence lightning registry entries require either a 'sequence_bundle' payload "
                 "or a data_manager on LightningConfigFactory"
             )
-        # Imported here rather than at module scope so the graph path does not pay for it, and vice
-        # versa - neither branch should drag the other's dependencies in.
+        # Imported here rather than at module scope, so building a factory does not pay for it.
         from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 
         builder = SoilSequenceBuilder(self.config, self.logger, self.data_manager)
         return builder.build(sequence_data_args=dict(spec.get("sequence_data_args", {}) or {}))
-
-    def _build_spatiotemporal_graph(self, spec: Mapping[str, Any]) -> dict[str, Any]:
-        """Build the graph bundle on demand; graph construction belongs to the Lightning layer."""
-        if self.data_manager is None:
-            raise KeyError(
-                "Graph lightning registry entries require either a 'spatiotemporal_graph' payload "
-                "or a data_manager on LightningConfigFactory"
-            )
-        builder = SpatiotemporalGraphBuilder(self.config, self.logger, self.data_manager)
-        return builder.build(graph_data_args=self._graph_data_args(spec))
-
-    @staticmethod
-    def _graph_data_args(spec: Mapping[str, Any]) -> dict[str, Any]:
-        graph_data_args = dict(spec.get("graph_data_args", {}) or {})
-        init_args = dict(spec.get("init_args", {}) or {})
-        if "spatial_graph_enabled" in init_args and "spatial_graph_enabled" not in graph_data_args:
-            graph_data_args["spatial_graph_enabled"] = init_args["spatial_graph_enabled"]
-        return graph_data_args
 
     def _resolve_split_plan(self, data: Mapping[str, Any]):
         """The run's shared split, from the payload dict or from the provider.
@@ -366,6 +318,11 @@ class LightningConfigFactory:
             value = getattr(datamodule, attribute, None)
             if value is not None and init_args.get(key) in (None, "auto"):
                 offer(key, [float(item) for item in np.asarray(value).ravel()])
+            elif init_args.get(key) == "auto":
+                # No lab columns carried, so nothing to offer. A written `auto` left in place would
+                # reach the model as the string "auto"; None is what it reads as "no statistics",
+                # exactly as the shape_args loop above resolves its own sentinels.
+                init_args[key] = None
         # The datamodule owns the choice of target transform; the model only needs to know so it can
         # invert it. Propagating it here keeps the two from ever disagreeing.
         if init_args.get("target_transform") in (None, "auto"):
@@ -382,9 +339,8 @@ class LightningConfigFactory:
             )
 
         # Heteroscedastic head, from the run's uncertainty block. Offered rather than set, so an
-        # architecture that does not implement it - SoilGraphLightningModule keeps its own copy of
-        # the regression base and has no predict_variance argument - is left alone instead of
-        # failing, and gets ensemble-only uncertainty. A registry entry that names the key wins, so
+        # architecture without a predict_variance argument is left alone instead of failing, and
+        # gets ensemble-only uncertainty. A registry entry that names the key wins, so
         # one model can opt out of the variance head without changing the mode for the rest.
         if "predict_variance" not in init_args and self._heteroscedastic_enabled():
             offer("predict_variance", True)

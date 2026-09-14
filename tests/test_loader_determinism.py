@@ -9,11 +9,9 @@ once per new iterator, and only a non-persistent loader builds a new iterator ev
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 import torch
 from torch.utils.data import DataLoader, RandomSampler
 
-from yg_eo_soilnet.datamodules.lightning.lightning_graph import SingleNodeGraphDataModule
 from yg_eo_soilnet.datamodules.loaders import build_loader
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 
@@ -74,16 +72,12 @@ def test_shuffle_off_keeps_the_dataset_order():
     assert all(order == list(range(96)) for order in orders)
 
 
-@pytest.mark.parametrize(
-    "datamodule_cls, collate_attr",
-    [(SoilSequenceDataModule, "_collate_points"), (SingleNodeGraphDataModule, "_collate_nodes")],
-)
-def test_every_datamodule_builds_through_build_loader(datamodule_cls, collate_attr):
-    """Structural guard: a bare DataLoader in either datamodule would silently bring the bug back."""
+def test_the_sequence_datamodule_builds_through_build_loader():
+    """Structural guard: a bare DataLoader in the datamodule would silently bring the bug back."""
     fake = SimpleNamespace(batch_size=4, num_workers=0, pin_memory=False, persistent_workers=False)
-    setattr(fake, collate_attr, lambda batch: batch)
+    fake._collate_points = lambda batch: batch
 
-    loader = datamodule_cls._make_loader(fake, np.arange(8), shuffle=True)
+    loader = SoilSequenceDataModule._make_loader(fake, np.arange(8), shuffle=True)
 
     assert loader.generator is not None
     assert isinstance(loader.sampler, RandomSampler)

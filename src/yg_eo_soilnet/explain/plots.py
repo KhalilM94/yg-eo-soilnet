@@ -88,8 +88,8 @@ def shap_block_bar(result: ShapResult):
 
     The per-feature plots are capped at the top N, and with every band of every modality holding its
     own row the temporal branch can dominate in aggregate while no single band ranks highly enough to
-    be displayed. This view is the antidote, and it is the direct quantitative answer to the question
-    the soil_tabular ablation baseline exists to ask: what does the time series actually buy?
+    be displayed. This view is the antidote, and the direct quantitative answer to the question of
+    what the time series actually buys over the static features.
     """
     blocks = result.block_mean_abs()
     if not blocks:

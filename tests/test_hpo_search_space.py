@@ -149,6 +149,60 @@ def test_a_when_guard_suppresses_the_parameter_when_it_does_not_match():
     assert "model.nhead" not in lstm
 
 
+def test_a_when_guard_may_name_a_pinned_value():
+    """suggest() starts from `fixed`, so a guard on a pinned switch works - and must validate."""
+
+    def space(enabled):
+        return _space(
+            fixed={"model.residual_enabled": enabled},
+            params={
+                "model.learning_rate": {"type": "float", "low": 1e-4, "high": 1e-2, "log": True},
+                "model.residual_base_dropout": {
+                    "type": "float", "low": 0.1, "high": 0.5, "when": {"model.residual_enabled": True}
+                },
+            },
+        )
+
+    on = space(True).suggest(optuna.trial.FixedTrial({"model.learning_rate": 1e-3, "model.residual_base_dropout": 0.2}))
+    off = space(False).suggest(optuna.trial.FixedTrial({"model.learning_rate": 1e-3}))
+
+    assert on["model.residual_base_dropout"] == 0.2
+    assert "model.residual_base_dropout" not in off
+
+
+def _guarded_pyramid(**options):
+    return {
+        "dims_pyramid": {
+            "key": "model.residual_base_hidden_dims", "min_depth": 1, "max_depth": 1, "widths": [16], **options
+        }
+    }
+
+
+def test_a_guarded_derive_hook_runs_only_when_its_guard_matches():
+    guard = {"when": {"model.residual_enabled": True}}
+    study = optuna.create_study()
+    on = _space(fixed={"model.residual_enabled": True}, derive=[_guarded_pyramid(**guard)]).suggest(study.ask())
+    off_trial = study.ask()
+    off = _space(fixed={"model.residual_enabled": False}, derive=[_guarded_pyramid(**guard)]).suggest(off_trial)
+
+    assert on["model.residual_base_hidden_dims"] == [16]
+    assert "model.residual_base_hidden_dims" not in off
+    # Skipped outright, not drawn and discarded: the sampler never sees the dimension.
+    assert not any(name.startswith("residual_base_hidden_dims") for name in off_trial.params)
+
+
+def test_a_derive_guard_on_an_undeclared_key_is_rejected():
+    with pytest.raises(ValueError, match="could never match"):
+        _space(derive=[_guarded_pyramid(when={"model.nothing": True})])
+
+
+def test_a_derive_guard_is_part_of_the_fingerprint():
+    fixed = {"model.residual_enabled": True}
+    guarded = _space(fixed=fixed, derive=[_guarded_pyramid(when={"model.residual_enabled": True})])
+
+    assert guarded.fingerprint() != _space(fixed=fixed, derive=[_guarded_pyramid()]).fingerprint()
+
+
 def test_derive_hook_repairs_d_model_to_divide_by_nhead():
     """TimeAwareTransformerEncoder raises unless d_model % nhead == 0."""
     mapping = {
@@ -249,7 +303,21 @@ def test_defaults_are_tpe_and_median():
     assert isinstance(space.make_pruner(), optuna.pruners.MedianPruner)
 
 
-SHIPPED_ENTRIES = ["soil_tabular", "soil_sequence", "soil_cnn", "soil_residual_cnn", "soil_residual_attention_cnn"]
+SHIPPED_ENTRIES = ["soil_cnn"]
+
+
+def test_the_soil_cnn_space_draws_attention_settings_only_for_attention_trials():
+    """fusion is searched; the attention settings follow it, and the pinned residual stays out."""
+    space = SearchSpace.from_yaml(SEARCH_SPACES_PATH, "soil_cnn")
+    study = optuna.create_study(direction=space.objective.direction, sampler=optuna.samplers.RandomSampler(seed=0))
+    draws = [space.suggest(study.ask()) for _ in range(20)]
+
+    assert {chosen["model.fusion"] for chosen in draws} == {"gated", "attention"}
+    for chosen in draws:
+        attention = [key for key in chosen if key.startswith("model.attention_")]
+        assert bool(attention) == (chosen["model.fusion"] == "attention"), chosen
+        # residual_enabled is pinned false in the shipped space, so none of its settings are drawn.
+        assert not any(key.startswith("model.residual_base_") for key in chosen), chosen
 
 
 @pytest.mark.parametrize("entry", SHIPPED_ENTRIES)
@@ -266,7 +334,7 @@ def test_the_shipped_search_spaces_load_and_draw(entry):
 
 
 def test_a_missing_entry_names_what_is_available():
-    with pytest.raises(KeyError, match="soil_tabular"):
+    with pytest.raises(KeyError, match="soil_cnn"):
         SearchSpace.from_yaml(SEARCH_SPACES_PATH, "no_such_model")
 
 
@@ -515,7 +583,7 @@ def test_the_taper_selects_the_shape(taper, expected):
 
 
 def test_depth_zero_yields_an_empty_list_and_draws_no_width():
-    """A bare readout was unreachable while min_depth floored at 1, and soil_sequence searched it."""
+    """A bare readout was unreachable while min_depth floored at 1; soil_cnn's head searches it."""
     space = _space(derive=[{"dims_pyramid": {"min_depth": 0, "max_depth": 0}}])
     trial = optuna.create_study().ask()
     chosen = space.suggest(trial)
@@ -524,12 +592,14 @@ def test_depth_zero_yields_an_empty_list_and_draws_no_width():
     assert "head_hidden_dims_width" not in trial.params  # no dimension that changes nothing
 
 
-def test_the_shipped_sequence_space_can_still_reach_a_bare_readout():
-    space = SearchSpace.from_yaml(SEARCH_SPACES_PATH, "soil_sequence")
+def test_the_shipped_cnn_space_can_still_reach_a_bare_readout():
+    space = SearchSpace.from_yaml(SEARCH_SPACES_PATH, "soil_cnn")
     depths = {
         entry["dims_pyramid"]["min_depth"]
         for entry in space.derive
-        if isinstance(entry, dict) and entry["dims_pyramid"]["key"] == "model.head_hidden_dims"
+        if isinstance(entry, dict)
+        and "dims_pyramid" in entry
+        and entry["dims_pyramid"]["key"] == "model.head_hidden_dims"
     }
 
     assert depths == {0}

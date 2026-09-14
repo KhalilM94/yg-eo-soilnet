@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping, Optional, Sequence
 
 import torch
@@ -16,10 +17,16 @@ from yg_eo_soilnet.models.lightningmodules.spatial_encoders import HarmonicPosit
 from yg_eo_soilnet.models.lightningmodules.tabular_encoders import TabularStaticEncoder
 from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import (
     AnnualGrid2DEncoder,
+    AttentionFusion,
     CalendarGridRasterizer,
     ConcatGatedFusion,
     DilatedTempCNNEncoder,
 )
+
+logger = logging.getLogger(__name__)
+
+FUSION_TYPES = ("gated", "attention")
+STATIC_TOKEN_MODES = ("summary", "per_feature")
 
 
 def _as_width_list(value: Any) -> list[int]:
@@ -35,12 +42,14 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         x_static ---> static_encoder --------------------------------.
                                                                       \\
         sequences[m] + mask + time + validity                          \\
-                 |                                                      >-- ConcatGatedFusion
-                 '--> CalendarGridRasterizer ---> CNN_m ---> concat ---/            |
-                      (ragged -> years x months)                      /            v
-                                                                     /   LayerNorm+GELU MLP head
-        x_coords ---> HarmonicPositionEncoder ----------------------'
-        (train-bbox normalized lat/lon; absent unless USE_HARMONIC_COORDS)
+                 |                                                      >-- fusion ------------.
+                 '--> CalendarGridRasterizer ---> CNN_m ---> concat ---/   gated | attention   |
+                      (ragged -> years x months)                      /                        |
+        x_coords ---> HarmonicPositionEncoder ----------------------'                         |
+        (train-bbox normalized lat/lon; absent unless USE_HARMONIC_COORDS)                     v
+                                                                                            concat --> MLP head --> (+ base)
+        auxiliary lab block  (auxiliary_enabled) -------------------------------------------'  |
+        residual base block  (residual_enabled) ---------------------------------------------'
 
     Convolution replaces recurrence, so every month is processed in parallel and annual seasonality
     is a property of the receptive field rather than something the network has to learn to remember.
@@ -51,11 +60,50 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
 
     Any number of modalities of any width is supported: everything is driven by ``modality_dims``.
 
-    ``auxiliary_label_columns`` optionally appends MEASURED lab values to the fused vector, just
-    before the head. This is an explicit opt-out of the rule that a label is never a feature, and it
-    is only sound when the named values are genuinely available at inference time too - predicting
-    organic matter for a sample whose texture and pH were measured, say. Naming a column that is
-    also being fitted raises rather than being filtered out.
+    Three independent switches shape the rest, and every combination builds. Each module is
+    constructed exactly once, so the weights a seed produces depend only on the modules the
+    configuration actually uses. SoilResidualCNNLightningModule and
+    SoilResidualAttentionCNNLightningModule remain as legacy names for two of the combinations.
+
+    ``fusion`` picks how the static, temporal and coordinate branches are combined:
+
+    * ``gated`` - ConcatGatedFusion, a self-gate over the concatenation that rescales each feature.
+    * ``attention`` - AttentionFusion: every branch chunk becomes a token and the tokens attend to one
+      another, so a branch is rebuilt from the others before the head sees it.
+      ``attention_static_tokens`` picks how the static covariates become tokens. ``summary`` makes
+      TabularStaticEncoder's output ONE token. ``per_feature`` makes every continuous column its own
+      token and every categorical embedding another, FT-Transformer style; the encoder is then built
+      without its MLP, keeping its embeddings and ``continuous_norm``, and ``static_hidden_dims`` has
+      no effect.
+
+    ``auxiliary_enabled`` with ``auxiliary_label_columns`` appends MEASURED lab values to the fused
+    vector, just before the head. This is an explicit opt-out of the rule that a label is never a
+    feature, and it is only sound when the named values are genuinely available at inference time too
+    - predicting organic matter for a sample whose texture and pH were measured, say. Naming a column
+    that is also being fitted raises rather than being filtered out.
+
+    ``residual_enabled`` makes the head learn a CORRECTION to an existing prediction rather than the
+    value. ``residual_base_columns`` nominates one column of the lab roster as the base for each
+    fitted target - in practice a ``<target>__<model>`` column written by ``predictions_export`` and
+    merged back into the static or targets source. The base is mapped into the target's own space
+    and added to the readout::
+
+        b_raw = x_labels[:, i] * label_scale[i] + label_mean[i]      # undo the LAB standardizer
+        b_std = (10*log1p(b_raw) - target_mean) / target_scale       # into the TARGET's space
+        pred  = b_std + output_head(fused)
+
+    The offset lives entirely inside ``forward``: ``y`` is already in that space, so the loss, the
+    epoch metrics, ``predict_step``'s inversion, the uncertainty ensemble and the serving path all work
+    unchanged. For the same reason ``val_loss`` is the loss of the final prediction, comparable with a
+    run without the base as long as both share the target, split, target_transform and loss_name. The
+    base ALSO enters the network as an input, through a block of its own concatenated after the
+    fusion beside the auxiliary block - without it the head would be correcting blind.
+
+    LEAKAGE: a base column clears the auxiliary check only because ``c_e_c_meq_100g__soil_cnn`` is a
+    different string from ``c_e_c_meq_100g``. That is right in principle - a prediction exists at
+    inference time and the measurement does not - but it is only SOUND if those predictions were
+    produced out-of-fold with respect to the split this run uses, which nothing here can verify. A
+    warning naming each base column is emitted at construction.
 
     ``coord_dim`` optionally adds a third branch reading the point's own position. It is 0 unless
     the data carries coordinates, which happens only under ``USE_HARMONIC_COORDS``; at 0 the branch
@@ -65,6 +113,14 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
     position deliberately - that is the signal - and the train bounding box that anchors it travels
     in the datamodule's preprocessing state.
     """
+
+    # Mirrored on the class as well as set per instance. A model logged to MLflow is a pickle, and
+    # unpickling restores the instance __dict__ only - so a model pickled before these switches
+    # existed reads them from its class, where each legacy name declares the values it was built with.
+    fusion_type = "gated"
+    attention_static_tokens = "summary"
+    auxiliary_enabled = True
+    residual_enabled = False
 
     def __init__(
         self,
@@ -133,6 +189,37 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         # uncertainty.heteroscedastic; see SoilRegressionLightningBase._beta_nll_loss.
         predict_variance: bool = False,
         beta_nll: float = 0.5,
+        *,
+        # --- auxiliary switch ---------------------------------------------------------------
+        # False ignores auxiliary_label_columns without clearing it, so the list survives in
+        # hyper_parameters and switching back needs no second edit. True by default: a checkpoint
+        # written before the switch existed used exactly the columns it lists.
+        auxiliary_enabled: bool = True,
+        # --- fusion -------------------------------------------------------------------------
+        # "gated" (ConcatGatedFusion) or "attention" (AttentionFusion). The attention_* settings
+        # are read only under "attention".
+        fusion: str = "gated",
+        attention_static_tokens: str = "summary",
+        attention_d_model: int = 64,
+        attention_nhead: int = 4,
+        attention_num_layers: int = 2,
+        attention_ff_multiplier: int = 2,
+        attention_dropout: float = 0.1,
+        attention_readout: str = "cls",
+        # --- residual base ------------------------------------------------------------------
+        # The residual_* settings are read only when residual_enabled is true; see the class
+        # docstring for what the base is and why it must be out-of-fold.
+        residual_enabled: bool = False,
+        residual_base_columns: Optional[Mapping[str, str]] = None,
+        residual_base_hidden_dims: Optional[Sequence[int]] = None,
+        residual_base_dropout: float = 0.0,
+        residual_base_validity_channels: bool = True,
+        residual_base_max_missing: float = 0.05,
+        # Full-roster lab standardization stats, injected by LightningConfigFactory exactly as
+        # target_mean/target_scale are. They are what maps the base out of the lab standardizer;
+        # without them the offset would be a z-score.
+        auxiliary_label_mean: Optional[Any] = None,
+        auxiliary_label_scale: Optional[Any] = None,
     ):
         super().__init__()
         # Coerce BEFORE save_hyperparameters(): it captures this frame's locals, and a numpy array
@@ -164,6 +251,32 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         # Every target the RUN fits, which under per-target grouping is a superset of this model's
         # outputs. Defaults to target_names so a hand-built module keeps the old behaviour.
         fitted_target_names = [str(name) for name in (fitted_target_names or target_names)]
+        auxiliary_enabled = bool(auxiliary_enabled)
+        fusion = str(fusion).lower()
+        if fusion not in FUSION_TYPES:
+            raise ValueError(f"fusion must be one of {list(FUSION_TYPES)}, got {fusion!r}")
+        attention_static_tokens = str(attention_static_tokens).lower()
+        if fusion == "attention" and attention_static_tokens not in STATIC_TOKEN_MODES:
+            raise ValueError(
+                f"attention_static_tokens must be one of {list(STATIC_TOKEN_MODES)}, "
+                f"got {attention_static_tokens!r}"
+            )
+        attention_d_model = int(attention_d_model)
+        attention_nhead = int(attention_nhead)
+        attention_num_layers = int(attention_num_layers)
+        attention_ff_multiplier = int(attention_ff_multiplier)
+        attention_dropout = float(attention_dropout)
+        attention_readout = str(attention_readout).lower()
+        residual_enabled = bool(residual_enabled)
+        residual_base_columns = {
+            str(target): str(column) for target, column in dict(residual_base_columns or {}).items()
+        }
+        residual_base_hidden_dims = [int(width) for width in (residual_base_hidden_dims or [])]
+        # `or []` because as_float_list passes None straight through, and the width check in
+        # _build_residual_base_encoder - the one thing standing between a missing statistic and an
+        # offset expressed as a z-score - needs a length rather than a TypeError.
+        auxiliary_label_mean = as_float_list(auxiliary_label_mean) or []
+        auxiliary_label_scale = as_float_list(auxiliary_label_scale) or []
         self.save_hyperparameters()
 
         self._init_regression_targets(
@@ -227,6 +340,9 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         self._cnn_hidden_dims = cnn_hidden_dims
         self._modality_embed_dim = modality_embed_dim
 
+        # Before the static encoder: per_feature tokens change how it is built.
+        self.fusion_type = fusion
+        self.attention_static_tokens = attention_static_tokens
         self.static_encoder = self._build_static_encoder(
             dropout,
             embedding_dims=embedding_dims,
@@ -268,9 +384,10 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
 
         self.target_names = list(target_names)
         self.fitted_target_names = list(fitted_target_names)
+        self.auxiliary_enabled = auxiliary_enabled
         self.auxiliary_validity_channels = bool(auxiliary_validity_channels)
         self.auxiliary_encoder = self._build_auxiliary_encoder(
-            auxiliary_label_columns,
+            auxiliary_label_columns if auxiliary_enabled else [],
             auxiliary_available_names,
             auxiliary_hidden_dims,
             auxiliary_dropout,
@@ -284,14 +401,32 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
             harmonic_dropout,
         )
 
-        # The static branch keeps its width even when static_dim is 0, so the fused vector has a
-        # fixed shape regardless of whether covariates are present.
-        temporal_dim = sum(encoder.output_dim for encoder in self.temporal_encoders.values())
-        self.fusion = ConcatGatedFusion(
-            self.static_hidden_dim, temporal_dim, self.coordinate_output_dim
+        # After the auxiliary branch: the base is resolved against the same roster, and checked
+        # against the columns that branch actually reads.
+        self.residual_enabled = residual_enabled
+        self.residual_base_columns = residual_base_columns
+        self.residual_base_validity_channels = bool(residual_base_validity_channels)
+        self.residual_base_max_missing = float(residual_base_max_missing)
+        self.base_encoder = self._build_residual_base_encoder(
+            auxiliary_label_mean,
+            auxiliary_label_scale,
+            residual_base_hidden_dims,
+            float(residual_base_dropout),
         )
+
+        self.fusion = self._build_fusion(
+            d_model=attention_d_model,
+            nhead=attention_nhead,
+            num_layers=attention_num_layers,
+            ff_multiplier=attention_ff_multiplier,
+            dropout=attention_dropout,
+            readout=attention_readout,
+        )
+        # Built once, last, off the widths every block above settled on. The residual and attention
+        # variants used to build a head here and then replace it, spending parameters and random
+        # draws on modules that were thrown away.
         self.output_head = build_mlp_stack(
-            self.fusion.output_dim + self.auxiliary_output_dim,
+            self.fusion.output_dim + self.auxiliary_output_dim + self.residual_base_output_dim,
             head_hidden_dims,
             # head_output_dim, not target_dim: a heteroscedastic head is twice as wide
             # because it emits a log variance beside every mean.
@@ -321,6 +456,37 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
                 )
             return value
         return setting
+
+    @property
+    def _static_tokens_per_feature(self) -> bool:
+        return self.fusion_type == "attention" and self.attention_static_tokens == "per_feature"
+
+    def _static_token_dims(self) -> list[int]:
+        """How the static vector reaching an attention fusion is cut into tokens.
+
+        ``summary`` reads the static branch as one token, including a zero-filled one when there are
+        no static features at all. ``per_feature`` with no static features has nothing to cut, and
+        the fusion then reads no static tokens.
+        """
+        if self.attention_static_tokens == "summary":
+            return [self.static_hidden_dim]
+        if not self.has_static_features:
+            return []
+        return [1] * self.static_dim + list(self.static_encoder.embedding_dims)
+
+    def _build_fusion(self, **attention: Any) -> nn.Module:
+        """ConcatGatedFusion or AttentionFusion. The two share a call signature on purpose, so
+        :meth:`_fuse` and :meth:`_fuse_from_parts` drive either one without knowing which they hold.
+        """
+        # ModuleDict order is the order _encode_temporal_from_grids concatenates in.
+        temporal_dims = [encoder.output_dim for encoder in self.temporal_encoders.values()]
+        if self.fusion_type == "attention":
+            return AttentionFusion(
+                self._static_token_dims(), temporal_dims, self.coordinate_output_dim, **attention
+            )
+        # The static branch keeps its width even when static_dim is 0, so the fused vector has a
+        # fixed shape regardless of whether covariates are present.
+        return ConcatGatedFusion(self.static_hidden_dim, sum(temporal_dims), self.coordinate_output_dim)
 
     def _build_auxiliary_encoder(
         self,
@@ -410,6 +576,136 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         self.auxiliary_output_dim = hidden_dims[-1] if hidden_dims else input_dim
         return encoder
 
+    def _build_residual_base_encoder(
+        self,
+        label_mean: list[float],
+        label_scale: list[float],
+        hidden_dims: list[int],
+        dropout: float,
+    ) -> nn.Module:
+        """Resolve one base column per fitted target and build the block that reads them.
+
+        Resolution is by name against the same roster the auxiliary branch uses, and for the same
+        reason: the roster's order follows LABEL_COLUMNS, so a configured index would point at a
+        different measurement the moment that list is reordered.
+        """
+        self.residual_base_output_dim = 0
+        if not self.residual_enabled:
+            # Nothing registered, not even empty buffers. Every checkpoint written without a base -
+            # all of soil_cnn's before this switch existed - carries no residual keys and must keep
+            # loading strictly; with the switch on, the buffers below are exactly the ones the
+            # residual class always registered, so those checkpoints load too.
+            return nn.Identity()
+
+        self.register_buffer("residual_base_index", torch.zeros(0, dtype=torch.long), persistent=True)
+        self.register_buffer("residual_base_label_mean", torch.zeros(0), persistent=True)
+        self.register_buffer("residual_base_label_scale", torch.ones(0), persistent=True)
+
+        selected = self.residual_base_columns
+        if not selected:
+            # An empty mapping with the switch on means there is nothing to be a residual OF.
+            # Silently degrading to a plain head would train a model other than the one configured,
+            # with only the metrics to say which one actually ran.
+            raise ValueError(
+                "residual_base_columns is required when residual_enabled is true: the head anchors on "
+                "a base prediction per target. Set residual_enabled: false for a model with no base."
+            )
+
+        missing = [name for name in self.target_names if name not in selected]
+        if missing:
+            raise ValueError(
+                f"residual_base_columns has no entry for target(s) {sorted(missing)}; it must name a "
+                f"base column for every target this model fits ({sorted(self.target_names)}). A "
+                "partially anchored head would learn residuals for some outputs and absolute values "
+                "for others, against a single loss."
+            )
+
+        extra = [name for name in selected if name not in set(self.target_names)]
+        if extra:
+            raise ValueError(
+                f"residual_base_columns names target(s) this model does not fit: {sorted(extra)}. "
+                f"This model's targets are {sorted(self.target_names)}."
+            )
+
+        # The measured target itself, rather than a prediction of it. The auxiliary check never sees
+        # this mapping, so the same rail has to be laid here.
+        leaking = [column for column in selected.values() if column in set(self.fitted_target_names)]
+        if leaking:
+            raise ValueError(
+                f"residual_base_columns may not name a column being fitted: {sorted(leaking)} "
+                f"also appear(s) in the run's targets {sorted(self.fitted_target_names)}. The base "
+                "must be a PREDICTION of the target, not the target."
+            )
+
+        shared = sorted(set(selected.values()) & set(self.auxiliary_label_columns))
+        if shared:
+            raise ValueError(
+                f"Column(s) {shared} appear in both residual_base_columns and "
+                "auxiliary_label_columns. A base column already reaches the head through its own "
+                "block; listing it twice feeds it twice and lets the two roles be configured apart."
+            )
+
+        available = list(self.auxiliary_available_names)
+        if not available:
+            raise ValueError(
+                f"residual_base_columns names {sorted(set(selected.values()))} but no lab columns "
+                "are being carried with the data. Set CARRY_LABEL_COLUMNS: true in data_spec.yml, "
+                "and list the base column(s) in LABEL_COLUMNS."
+            )
+
+        unknown = [column for column in selected.values() if column not in set(available)]
+        if unknown:
+            raise ValueError(
+                f"residual_base_columns names column(s) the data does not carry: {sorted(unknown)}. "
+                f"Available: {sorted(available)}. A base column must be listed in LABEL_COLUMNS and "
+                "present in the static or targets source."
+            )
+
+        if len(label_mean) != len(available) or len(label_scale) != len(available):
+            # Without these the base cannot leave the lab standardizer's space, and adding it as-is
+            # would offset the prediction by a z-score. The factory supplies them from the training
+            # split; this only fires on a hand-built module.
+            raise ValueError(
+                "residual_base_columns requires auxiliary_label_mean and auxiliary_label_scale at "
+                f"the roster's width ({len(available)}); got {len(label_mean)} and "
+                f"{len(label_scale)}. They are what maps the base out of the lab standardizer."
+            )
+
+        # Ordered by target_names, so position j of the offset lines up with output column j.
+        indices = [available.index(selected[name]) for name in self.target_names]
+        self.residual_base_index = torch.as_tensor(indices, dtype=torch.long)
+        self.residual_base_label_mean = torch.as_tensor(
+            [label_mean[index] for index in indices], dtype=torch.float32
+        )
+        self.residual_base_label_scale = torch.as_tensor(
+            [label_scale[index] for index in indices], dtype=torch.float32
+        )
+
+        logger.warning(
+            "%s anchors on %s. These must be OUT-OF-FOLD predictions for the split this run uses: "
+            "nothing in the pipeline can verify that, and in-fold predictions will inflate every "
+            "reported metric.",
+            type(self).__name__,
+            {name: selected[name] for name in self.target_names},
+        )
+
+        input_dim = self.target_dim * (2 if self.residual_base_validity_channels else 1)
+        # An empty hidden_dims makes this an Identity, which IS the raw-concat mode - the same shape
+        # the auxiliary and harmonic blocks use, and for the same reason.
+        encoder = build_mlp_stack(
+            input_dim,
+            hidden_dims,
+            None,
+            dropout=dropout,
+            activation="gelu",
+            use_layer_norm=True,
+            # This block feeds the head's input vector rather than a readout, so both are on.
+            norm_final=True,
+            dropout_final=True,
+        )
+        self.residual_base_output_dim = hidden_dims[-1] if hidden_dims else input_dim
+        return encoder
+
     def _build_coordinate_encoder(
         self,
         coord_dim: Any,
@@ -452,12 +748,17 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
     def serving_label_columns(self) -> list[str]:
         """The lab columns a served request must supply, i.e. every one the model actually reads.
 
-        Distinct from ``auxiliary_label_columns`` only for a subclass that reads a lab column for
-        some other purpose - the residual variant anchors on one. The serving signature is built
-        from this, so a column missing here arrives NaN, is median-filled from the training split
-        and is flagged unmeasured, with nothing raised.
+        The auxiliary columns, plus the base columns when the residual is on. The serving signature
+        is built from this, so a column missing here arrives NaN, is median-filled from the training
+        split and is flagged unmeasured, with nothing raised. The base is the one column a request
+        must never omit: a median-filled base leaves the head correcting the same constant for
+        every point.
         """
-        return list(self.auxiliary_label_columns)
+        auxiliary = list(self.auxiliary_label_columns)
+        if not self.residual_enabled:
+            return auxiliary
+        base = [self.residual_base_columns[name] for name in self.target_names]
+        return auxiliary + [column for column in base if column not in set(auxiliary)]
 
     @property
     def has_static_features(self) -> bool:
@@ -488,7 +789,44 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
             activation="gelu",
             use_layer_norm=True,
             continuous_norm=continuous_norm,
+            # per_feature attention tokens are cut from the raw [continuous_norm(x), embedded] block,
+            # so the encoder stops before its MLP. forward reaches it through static_encoder(...) and
+            # forward_from_parts through forward_with_embedding, and both return that same block.
+            mlp=not self._static_tokens_per_feature,
         )
+
+    # --- coverage guard -----------------------------------------------------
+
+    def on_fit_start(self) -> None:
+        """Refuse to train on a base column the data mostly does not carry.
+
+        Nothing upstream checks this: ``assert_columns_are_dense_enough`` inspects only the
+        continuous covariates, and lab columns are removed from that block by ``filter_schema``. A
+        sparse base is median-filled, so the failure is silent - the head learns to correct a
+        constant and the run merely looks mediocre.
+        """
+        super().on_fit_start()
+        if not self.residual_enabled:
+            return
+        datamodule = getattr(self.trainer, "datamodule", None) if self.trainer is not None else None
+        bundle = getattr(datamodule, "sequence_bundle", None)
+        if bundle is None or not hasattr(bundle, "label_missing_fraction"):
+            return
+
+        offenders = {}
+        for name in self.target_names:
+            column = self.residual_base_columns[name]
+            fraction = float(bundle.label_missing_fraction(column))
+            if fraction > self.residual_base_max_missing:
+                offenders[column] = round(fraction, 4)
+        if offenders:
+            raise ValueError(
+                f"Base column(s) {offenders} exceed residual_base_max_missing="
+                f"{self.residual_base_max_missing}. A missing base is median-filled, so the head "
+                "would be correcting the training median rather than a prediction for that point. "
+                "Regenerate the predictions over the full population, or raise the threshold "
+                "deliberately."
+            )
 
     # --- forward -----------------------------------------------------------
 
@@ -580,6 +918,67 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
             return None
         return self.auxiliary_encoder(selected)
 
+    def _residual_base(self, batch: Any, *, device, dtype) -> torch.Tensor:
+        """``[base_in_target_space, validity]`` - the offset and the block, in one tensor.
+
+        One tensor rather than two so :meth:`explanation_parts` can publish a single part from which
+        BOTH the encoder input and the additive offset are derived. Splitting them across two parts,
+        or reading the offset off the batch, would break the equality
+        ``forward_from_parts(explanation_parts(batch)[0]) == forward(batch)`` that
+        tests/test_explain.py pins.
+        """
+        values = batch_get(batch, "x_labels")
+        if values is None:
+            raise KeyError(
+                "Batch is missing 'x_labels'; residual_base_columns needs the base prediction "
+                f"column(s) {sorted(set(self.residual_base_columns.values()))} that the sequence "
+                "datamodule collates."
+            )
+        values = values.to(device=device, dtype=dtype)
+        if values.size(-1) != len(self.auxiliary_available_names):
+            raise ValueError(
+                f"Batch carries {values.size(-1)} lab column(s) but this model resolved its base "
+                f"columns against {len(self.auxiliary_available_names)}; the data no longer matches "
+                "the checkpoint's label roster."
+            )
+
+        base = values.index_select(-1, self.residual_base_index)
+        base = base * self.residual_base_label_scale + self.residual_base_label_mean
+        if bool(self.targets_are_log1p):
+            # Mirrors SoilSequenceDataModule._apply_target_transform, clipping included: log1p is
+            # undefined below -1 and these targets are non-negative, so a base that came back
+            # slightly negative is clipped exactly as a measured value would be.
+            base = 10.0 * torch.log1p(base.clamp_min(0.0))
+        if bool(self.targets_are_standardized):
+            base = (base - self.target_mean) / self.target_scale
+
+        if not self.residual_base_validity_channels:
+            return base
+
+        validity = batch_get(batch, "x_label_validity")
+        if validity is None:
+            raise KeyError(
+                "Batch is missing 'x_label_validity'; set residual_base_validity_channels=False to "
+                "run without the measured-vs-filled flags."
+            )
+        validity = validity.to(device=device, dtype=dtype).index_select(-1, self.residual_base_index)
+        return torch.cat([base, validity], dim=-1)
+
+    def _head_from_base(self, fused: torch.Tensor, block: torch.Tensor) -> torch.Tensor:
+        """Widen the fused vector with the base block, run the head, and add the offset back.
+
+        Returns the readout in its raw shape, so ``_split_head_output`` still applies.
+        """
+        fused = torch.cat([fused, self.base_encoder(block)], dim=-1)
+        mean, log_variance = self._split_head_output(self.output_head(fused))
+        mean = mean + block[..., : self.target_dim]
+        if log_variance is None:
+            return mean
+        # The offset belongs to the MEAN half only. On a heteroscedastic head the readout is
+        # 2*target_dim wide, and adding it to the whole tensor would shift the log variances too -
+        # turning a base of 40 into a predicted variance of exp(40).
+        return torch.cat([mean, log_variance], dim=-1)
+
     def _rasterize(self, batch: Any, device, dtype) -> dict[str, tuple[torch.Tensor, torch.Tensor]]:
         """One ``(grid, cell_mask)`` per modality: the ragged sequences laid onto a calendar grid.
 
@@ -636,9 +1035,8 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
     def _fuse(self, batch: Any, *, device, dtype) -> torch.Tensor:
         """Every branch, concatenated into the vector the head reads. Everything but the readout.
 
-        Split out of :meth:`forward` so a subclass can reuse the trunk and change only what happens
-        to the fused vector. SoilResidualCNNLightningModule appends a block of its own here and
-        offsets the readout; copying this body instead is how the two silently drift apart.
+        Split out of :meth:`forward` so the readout - a plain head, or one anchored on the residual
+        base - is chosen in one place, over one trunk that every configuration shares.
         """
         x_static = batch_get(batch, "x_static")
         if x_static is None:
@@ -651,12 +1049,13 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
 
         static_features = self._encode_static(x_static, x_categorical)
         temporal_features = self._encode_temporal(batch, device=device, dtype=dtype)
-        # Inside the gate, not appended after it: the gate reads the whole concatenation, so giving
-        # it position lets it damp or admit the other branches conditioned on where the point is.
+        # Inside the fusion, not appended after it: the fusion reads every branch together, so
+        # giving it position lets it damp, admit or re-read the other branches conditioned on where
+        # the point is.
         coordinate_features = self._encode_coordinates(batch, device=device, dtype=dtype)
         fused = self.fusion(static_features, temporal_features, coordinate_features)
 
-        # Appended AFTER the gate, so a measured lab value reaches the head at full strength rather
+        # Appended AFTER the fusion, so a measured lab value reaches the head at full strength rather
         # than being traded off against the branches that had to infer it.
         auxiliary_features = self._encode_auxiliary(batch, device=device, dtype=dtype)
         if auxiliary_features is not None:
@@ -665,9 +1064,11 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
 
     def forward(self, batch: Any) -> torch.Tensor:
         reference = next(self.parameters())
-        return self.output_head(
-            self._fuse(batch, device=reference.device, dtype=reference.dtype)
-        )
+        device, dtype = reference.device, reference.dtype
+        fused = self._fuse(batch, device=device, dtype=dtype)
+        if not self.residual_enabled:
+            return self.output_head(fused)
+        return self._head_from_base(fused, self._residual_base(batch, device=device, dtype=dtype))
 
     # --- attribution seam ---------------------------------------------------
     # explanation_parts() splits a batch into the tensors an explainer perturbs, and
@@ -804,6 +1205,26 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
                     }
                 )
 
+        # Residual base: last, as one part carrying both the block and the offset - see
+        # _residual_base for why they cannot be split.
+        if self.residual_enabled:
+            block = self._residual_base(batch, device=device, dtype=dtype)
+            part_index = len(parts)
+            parts.append(block)
+            for index, name in enumerate(self.target_names):
+                columns = [index]
+                if self.residual_base_validity_channels:
+                    columns.append(self.target_dim + index)
+                groups.append(
+                    {
+                        "part": part_index,
+                        "kind": "residual_base",
+                        "name": self.residual_base_columns[name],
+                        "target": name,
+                        "columns": columns,
+                    }
+                )
+
         return parts, groups
 
     def forward_from_parts(self, parts: Sequence[torch.Tensor]) -> torch.Tensor:
@@ -817,18 +1238,22 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         ``cell_mask`` is therefore read back out of the grid rather than passed alongside it: the
         rasterizer already writes it as the ``cell_observed`` channel, so the grid is self-contained.
         """
-        fused, _cursor = self._fuse_from_parts(parts)
+        fused, cursor = self._fuse_from_parts(parts)
+        if self.residual_enabled:
+            raw = self._head_from_base(fused, parts[cursor])
+        else:
+            raw = self.output_head(fused)
         # The MEAN only. On a heteroscedastic head the readout is 2*target_dim wide, and returning
         # it whole would hand the explainer a second block of outputs that are log variances - which
         # it would attribute and label as targets, producing a SHAP plot with twice the targets the
         # model has, half of them explaining a quantity nobody asked about.
-        return self._split_head_output(self.output_head(fused))[0]
+        return self._split_head_output(raw)[0]
 
     def _fuse_from_parts(self, parts: Sequence[torch.Tensor]) -> tuple[torch.Tensor, int]:
         """``(fused, cursor)`` - :meth:`_fuse`'s counterpart over attribution parts.
 
-        Returns the cursor alongside the vector so a subclass that appended parts of its own knows
-        where its first one starts, without having to re-derive the parent's part count.
+        Returns the cursor alongside the vector so the caller knows where the residual base part,
+        when there is one, starts.
         """
         cursor = 0
         x_static = parts[cursor]

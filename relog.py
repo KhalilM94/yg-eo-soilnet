@@ -67,10 +67,25 @@ def resolve_model_class(class_path: str):
     return getattr(importlib.import_module(module_name), class_name)
 
 
+# Registry entries since folded into soil_cnn's switches. A run logged before that still carries the
+# old model_name, and its checkpoint's hyper_parameters lack the switches - the legacy class is what
+# supplies them, as its defaults. Used only when the registry no longer has the entry.
+LEGACY_MODEL_CLASSES = {
+    "soil_residual_cnn": (
+        "yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module."
+        "SoilResidualCNNLightningModule"
+    ),
+    "soil_residual_attention_cnn": (
+        "yg_eo_soilnet.models.lightningmodules.soil_residual_attention_cnn_lightning_module."
+        "SoilResidualAttentionCNNLightningModule"
+    ),
+}
+
+
 def infer_model_class_path(config, model_name: str) -> str:
     """The import path for a registry entry, so the checkpoint's architecture is not guesswork."""
     entry = (getattr(config, "LIGHTNING_MODEL_REGISTRY", None) or {}).get(model_name)
-    import_path = (entry or {}).get("import_path")
+    import_path = (entry or {}).get("import_path") or LEGACY_MODEL_CLASSES.get(model_name)
     if not import_path:
         raise SystemExit(
             f"Cannot infer the model class: the run's model_name is {model_name!r}, which is not in "

@@ -6,9 +6,8 @@ paid for: it asks each family which points it can actually use, reconciles the a
 configured ``population_policy``, and hands back a single plan.
 
 The reconciliation matters because the families genuinely disagree. The tabular preprocessor keeps
-every row; the sequence builder drops rows with non-finite covariates; the graph builder drops those
-*and* rows with no coordinates. Splitting each family's own population separately is exactly the bug
-this replaces.
+every row, while the sequence builder drops rows with non-finite covariates. Splitting each family's
+own population separately is exactly the bug this replaces.
 """
 
 from __future__ import annotations
@@ -26,16 +25,14 @@ from yg_eo_soilnet.datamodules.splitting import (
 
 SKLEARN = "sklearn"
 SEQUENCE = "sequence"
-GRAPH = "graph"
-KNOWN_FAMILIES = (SKLEARN, SEQUENCE, GRAPH)
+KNOWN_FAMILIES = (SKLEARN, SEQUENCE)
 
 
 class SplitPlanProvider:
     """Memoized source of truth for the run's split.
 
     `families` names the training families that will actually run, so a sklearn-only run never pays
-    to build the graph eligibility (which ordinal-encodes a copy of the frame). Pass ``None`` to
-    infer it from the enabled registry entries.
+    to build the sequence eligibility. Pass ``None`` to infer it from the enabled registry entries.
     """
 
     def __init__(self, config, logger, data_manager, families: Optional[Iterable[str]] = None):
@@ -87,7 +84,6 @@ class SplitPlanProvider:
         builders = {
             SKLEARN: self._sklearn_usable,
             SEQUENCE: self._sequence_usable,
-            GRAPH: self._graph_usable,
         }
         eligibility: dict[str, frozenset] = {}
         for family in self.families:
@@ -103,15 +99,6 @@ class SplitPlanProvider:
         from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 
         return SoilSequenceBuilder(self.config, self.logger, self.data_manager).usable_point_ids(tabular)
-
-    def _graph_usable(self, tabular: pd.DataFrame) -> pd.Index:
-        from yg_eo_soilnet.datamodules.lightning.spatiotemporal_graph_builder import (
-            SpatiotemporalGraphBuilder,
-        )
-
-        return SpatiotemporalGraphBuilder(self.config, self.logger, self.data_manager).usable_point_ids(
-            tabular
-        )
 
     def _population(self, all_ids: pd.Index, eligibility: Mapping[str, frozenset]) -> pd.Index:
         policy = str(getattr(self.config, "SPLIT_POPULATION_POLICY", INTERSECT)).lower()
@@ -283,7 +270,7 @@ class SplitPlanProvider:
             if name == "defaults" or not _enabled(entry):
                 continue
             kind = str((entry or {}).get("input_kind", SEQUENCE)).lower()
-            if kind in (SEQUENCE, GRAPH) and kind not in families:
+            if kind == SEQUENCE and kind not in families:
                 families.append(kind)
 
         # A run with nothing enabled still needs a population to split; sklearn's rule keeps
