@@ -377,6 +377,14 @@ def test_collect_eval_dfs_ignores_unlabeled_runs(monkeypatch) -> None:
     assert eval_dfs == []
 
 
+def _fake_pred_obs_panel(eval_df, *, target_name=None):
+    """A real but empty Figure, so log_figure can save and close it like the genuine one."""
+    import matplotlib.pyplot as plt
+
+    figure, _axis = plt.subplots()
+    return figure
+
+
 def test_log_pred_obs_artifact_separates_targets_by_directory(monkeypatch, tmp_path) -> None:
     """Two targets in one run must not overwrite each other - but they separate by DIRECTORY now.
 
@@ -388,15 +396,10 @@ def test_log_pred_obs_artifact_separates_targets_by_directory(monkeypatch, tmp_p
 
     logged: list[tuple[str, str]] = []
 
-    def fake_create_pred_obs_plot(eval_df, builtin_metrics, artifacts_dir):
-        artifact = Path(artifacts_dir) / "obs_pred_and_residual_plot.png"
-        artifact.write_text("plot", encoding="utf-8")
-        return {"obs_pred_and_residual_plot": str(artifact)}
-
     def fake_log_artifact(path, artifact_path=None):
         logged.append((path, artifact_path))
 
-    monkeypatch.setattr(mlflow_loggers_module, "create_pred_obs_plot", fake_create_pred_obs_plot)
+    monkeypatch.setattr(mlflow_loggers_module, "pred_obs_panel", _fake_pred_obs_panel)
     monkeypatch.setattr(mlflow_loggers_module.mlflow, "log_artifact", fake_log_artifact)
 
     eval_a = pd.DataFrame({"target_a": [1.0, 2.0], "prediction": [1.1, 1.9]})
@@ -419,12 +422,7 @@ def test_single_target_pred_obs_lands_on_the_flat_comparable_path(monkeypatch) -
     logger = ChildRunLogger()
     logged: list[tuple[str, str]] = []
 
-    def fake_create_pred_obs_plot(eval_df, builtin_metrics, artifacts_dir):
-        artifact = Path(artifacts_dir) / "obs_pred_and_residual_plot.png"
-        artifact.write_text("plot", encoding="utf-8")
-        return {"obs_pred_and_residual_plot": str(artifact)}
-
-    monkeypatch.setattr(mlflow_loggers_module, "create_pred_obs_plot", fake_create_pred_obs_plot)
+    monkeypatch.setattr(mlflow_loggers_module, "pred_obs_panel", _fake_pred_obs_panel)
     monkeypatch.setattr(
         mlflow_loggers_module.mlflow,
         "log_artifact",

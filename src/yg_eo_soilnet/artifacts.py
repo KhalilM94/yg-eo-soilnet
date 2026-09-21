@@ -43,6 +43,8 @@ import matplotlib.pyplot as plt
 import mlflow
 import pandas as pd
 
+from yg_eo_soilnet.plot_style import SAVE_DPI
+
 
 class ArtifactLayout:
     """Where each kind of artifact lives inside a run, and how its file is named."""
@@ -249,13 +251,17 @@ def log_figure(figure, filename: str, artifact_path: str) -> None:
     Closing here rather than at the call site is the point: every previous copy of this logic
     repeated ``savefig`` / ``log_artifact`` / ``plt.close`` and at least one forgot the close, which
     leaks figures across a multi-model run until matplotlib starts warning about open figures.
+
+    ``dpi`` is passed explicitly rather than inherited from ``savefig.dpi``. The figures are built
+    inside ``plot_style.style_context``, which has closed by the time they reach here, so the rcParam
+    that carries this number in the notebook cannot reach this call.
     """
     if figure is None:
         return
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = os.path.join(tmpdir, filename)
-            figure.savefig(path, bbox_inches="tight")
+            figure.savefig(path, dpi=SAVE_DPI, bbox_inches="tight")
             mlflow.log_artifact(path, artifact_path=artifact_path)
     finally:
         plt.close(figure)

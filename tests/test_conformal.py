@@ -158,3 +158,22 @@ def test_a_lower_alpha_gives_a_wider_interval():
     tight = fit_conformal(observed, mean, sigma, alpha=0.20)
     wide = fit_conformal(observed, mean, sigma, alpha=0.01)
     assert wide.q > tight.q
+
+
+def test_the_calibrator_round_trips_through_its_own_dict():
+    """replot.py rebuilds a finished run's calibrator from uncertainty_summary.json.
+
+    Without this the regenerated reliability curve grades Gaussian z-multiples of the raw sigma
+    instead of the conformal procedure the run actually used - a different claim, and a visibly
+    different line beside an unchanged PICP.
+    """
+    original = ConformalCalibrator(q=1.5, alpha=0.05, n_calib=100, normalized=False)
+    assert ConformalCalibrator.from_dict(original.to_dict()) == original
+
+
+def test_a_summary_that_is_not_conformal_yields_no_calibrator():
+    # A run whose interval came from SigmaInterval writes no conformal_* keys at all. The caller's
+    # fallback is a calibrator-less curve, so this returns None rather than raising.
+    assert ConformalCalibrator.from_dict({"target": "clay_pct", "mean_sigma": 2.0}) is None
+    assert ConformalCalibrator.from_dict(None) is None
+    assert ConformalCalibrator.from_dict({"conformal_q": "not a number"}) is None

@@ -1,9 +1,47 @@
-from yg_eo_soilnet.utils import rpiq_score
-from yg_eo_soilnet.uncertainty.columns import interval_columns, is_prediction_column, sigma_column
-from sklearn.metrics import r2_score, root_mean_squared_error
+"""Figures for a training run: predicted-vs-observed, the parent overlay, the leaderboard, CV sweeps.
+
+Every function here builds a Figure, styles it through :mod:`yg_eo_soilnet.plot_style`, and RETURNS
+it. The caller saves and closes - ``yg_eo_soilnet.artifacts.log_figure`` does both. That is now the
+whole repo's contract without exception; ``create_pred_obs_plot`` used to save itself to satisfy
+MLflow's custom-artifact hook, and that hook has been removed because the frame the evaluator handed
+it never carried the uncertainty columns, so it only ever produced a worse duplicate of a plot the
+logger was already writing.
+"""
+
+import math
+
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
+import matplotlib.patches as patches
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
+from matplotlib.lines import Line2D
+from matplotlib.path import Path
+from sklearn.metrics import r2_score, root_mean_squared_error
+
+from yg_eo_soilnet.plot_style import (
+    BASELINE,
+    CARBONATE_RAMP,
+    FIG_WIDTH_COLUMN,
+    FIG_WIDTH_FULL,
+    FERTIMAP_TINT,
+    INK,
+    INK_2,
+    MODEL_COLORS,
+    PROJECT_COLORS,
+    message_figure,
+    metric_box,
+    panel_letter,
+    panel_subtitle,
+    sequential_cmap,
+    square_panel,
+    styled,
+)
+from yg_eo_soilnet.uncertainty.columns import interval_columns, is_prediction_column, sigma_column
+from yg_eo_soilnet.utils import rpiq_score
+
+
 def _normalise_target_names(values):
     if values is None:
         return []
@@ -47,6 +85,7 @@ def _resolve_prediction_column(df, target_name=None, target_index=None):
     return None
 
 
+@styled
 def _create_parent_pred_obs_multitarget(eval_dfs):
     if not eval_dfs:
         return None
@@ -73,18 +112,35 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
     if not target_names:
         target_names = [None]
 
-    import math
-    import matplotlib.pyplot as plt
-    import numpy as np
-
     n_targets = len(target_names)
     n_cols = min(2, n_targets) if n_targets > 1 else 1
     n_rows = math.ceil(n_targets / n_cols)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        # One panel is a single column wide; two abreast fill the page. Square-ish, because every
+        # panel here is a pred-vs-obs scatter framed at a 1:1 aspect.
+        figsize=(FIG_WIDTH_FULL if n_cols > 1 else FIG_WIDTH_COLUMN, 3.1 * n_rows),
+        squeeze=False,
+        layout="constrained",
+    )
+
+    # One colour per MODEL, assigned once across the whole figure rather than per panel, so a model
+    # keeps its colour from one target to the next and the shared legend below means the same thing
+    # on every panel.
+    model_colors: dict[str, str] = {}
+
+    def color_for(model_name):
+        key = str(model_name)
+        if key not in model_colors:
+            model_colors[key] = MODEL_COLORS[len(model_colors) % len(MODEL_COLORS)]
+        return model_colors[key]
 
     for target_index, target_name in enumerate(target_names):
         axis = axes[target_index // n_cols][target_index % n_cols]
-        axis.set_title(str(target_name) if target_name is not None else "Predicted vs observed")
+        square_panel(axis)
+        panel_letter(axis, "abcdefghijklmnopqrstuvwxyz"[target_index % 26])
+        panel_subtitle(axis, str(target_name) if target_name is not None else "predicted vs observed")
         axis.set_xlabel("Observed")
         axis.set_ylabel("Predicted")
 
@@ -149,64 +205,79 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
                 continue
 
             model_name = frame["model_name"].iloc[0] if "model_name" in frame.columns and not frame["model_name"].empty else "model"
+            series_color = color_for(model_name)
             # Bars before the points, under them, and in the series' own colour so two models
             # overlaid on one axis stay distinguishable. Thinner and fainter than on the per-run
             # plot: this axis carries every model at once, so several models' bars overlap here
             # where only one model's do there.
             interval = interval_columns(frame, resolved_target_name)
-            series_color = None
             if interval is not None:
+                observed = x_values[valid_mask]
+                predicted = y_values[valid_mask]
                 lower = interval[0].to_numpy()[valid_mask]
                 upper = interval[1].to_numpy()[valid_mask]
-                bars = axis.errorbar(
-                    x_values[valid_mask],
-                    y_values[valid_mask],
+                # Thinned by the same rule the per-run panel uses, and for the same reason: a bar on
+                # every one of ~750 points merges into a solid curtain that hides the scatter
+                # underneath, which is the one thing the panel exists to show. Spread evenly across
+                # the x range rather than sampled at random, so the drawn bars still span the axis.
+                positions = _error_bar_positions(observed, cap=MAX_PARENT_ERROR_BARS)
+                axis.errorbar(
+                    observed[positions],
+                    predicted[positions],
                     yerr=[
-                        np.maximum(y_values[valid_mask] - lower, 0.0),
-                        np.maximum(upper - y_values[valid_mask], 0.0),
+                        np.maximum(predicted - lower, 0.0)[positions],
+                        np.maximum(upper - predicted, 0.0)[positions],
                     ],
                     fmt="none",
+                    ecolor=series_color,
                     elinewidth=0.6,
                     alpha=0.2,
                     capsize=0,
                     zorder=1,
                 )
-                series_color = bars.lines[2][0].get_color()[0] if bars.lines[2] else None
             axis.scatter(
                 x_values[valid_mask],
                 y_values[valid_mask],
-                alpha=0.5,
-                s=18,
+                s=5,
+                lw=0,
                 label=str(model_name),
                 color=series_color,
                 zorder=3,
+                rasterized=True,
             )
             all_values.extend([x_values[valid_mask], y_values[valid_mask]])
 
         if all_values:
             combined = np.concatenate(all_values)
-            min_value = np.nanmin(combined)
-            max_value = np.nanmax(combined)
-            axis.plot([min_value, max_value], [min_value, max_value], linestyle="--", color="black", linewidth=1)
-        axis.legend(loc="best")
+            # The same square framing the per-run panel gets, for the same reason: without one
+            # shared range and a 1:1 aspect the identity line is not a 45 degree diagonal and the
+            # cloud is stretched along whichever axis spans less.
+            low, high = _square_limits(combined, combined)
+            axis.plot(
+                [low, high], [low, high], linestyle="--", color=INK_2, linewidth=0.8, zorder=5
+            )
+            _frame_square(axis, low, high)
 
     for axis in axes.flatten()[n_targets:]:
         axis.set_visible(False)
 
-    fig.tight_layout()
+    # One legend for the whole figure, not one per panel. A model's colour is the same everywhere
+    # here, so repeating the key on every panel spends space saying the same thing several times -
+    # and an in-panel legend on a square scatter always covers data.
+    if model_colors:
+        fig.legend(
+            handles=[
+                Line2D([], [], ls="", marker="o", markersize=4, color=color, label=name)
+                for name, color in model_colors.items()
+            ],
+            loc="outside lower center",
+            ncol=min(len(model_colors), 4),
+            fontsize=7.5,
+        )
     return fig
 
 
-import matplotlib
-import matplotlib.pyplot as plt
-from matplotlib.path import Path
-import matplotlib.patches as patches
-import matplotlib.cm as cm
-import matplotlib.colors as mcolors
-from matplotlib.lines import Line2D
-
-import os
-
+@styled
 def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
     """
     Plot mean train/test CV scores with std bands, and highlight the best parameter.
@@ -220,13 +291,10 @@ def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
     Returns:
         matplotlib.figure.Figure: The figure object
     """
-    
+
     param_key, = [str(col) for col in cv_results.columns if str(col).startswith("param_")]
     param_name = param_key.rsplit("__", 1)[-1]
     param_values = np.array(cv_results[param_key], dtype=object)
-
-    #param_name = param_key[0].rsplit("__", 1)[-1]
-    #param_values = np.array(cv_results[param_key], dtype=object)
 
     # Handle categorical (non-numeric) params
     if not np.issubdtype(param_values.dtype, np.number):
@@ -246,37 +314,66 @@ def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
     best_idx = np.argmax(mean_test) if not scoring.startswith("neg_") else np.argmin(mean_test)
     best_param = param_values[best_idx]
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH_FULL, 3.0), layout="constrained")
 
-    # Plot mean train with std band
-    ax.plot(param_values, mean_train, color="blue", marker="o", linewidth=2.5, label="Mean Train")
-    if np.issubdtype(mean_train.dtype, np.number):
-        ax.fill_between(param_values, mean_train - std_train, mean_train + std_train,
-                        color="blue", alpha=0.15, label="CV_Train")
+    # Train is context and test is the focus, so train takes the pale tint and test the full colour.
+    for values, deviations, color, label in (
+        (mean_train, std_train, FERTIMAP_TINT, "train"),
+        (mean_test, std_test, PROJECT_COLORS["Al Moutmir"], "test"),
+    ):
+        ax.plot(
+            param_values,
+            values,
+            color=color,
+            marker="o",
+            markersize=3.5,
+            markeredgecolor="white",
+            markeredgewidth=0.5,
+            linewidth=1.6,
+            label=f"mean {label}",
+            zorder=3,
+        )
+        if np.issubdtype(values.dtype, np.number):
+            ax.fill_between(
+                param_values,
+                values - deviations,
+                values + deviations,
+                color=color,
+                alpha=0.15,
+                lw=0,
+                zorder=1,
+                label=f"±1 sd across folds ({label})",
+            )
 
-    # Plot mean test with std band
-    ax.plot(param_values, mean_test, color="red", marker="o", linewidth=2.5, label="Mean Test")
-    if np.issubdtype(mean_test.dtype, np.number):
-        ax.fill_between(param_values, mean_test - std_test, mean_test + std_test,
-                        color="red", alpha=0.15, label="CV_Test")
+    # Where the search landed, marked on both curves.
+    ax.scatter(
+        [best_param, best_param],
+        [mean_train[best_idx], mean_test[best_idx]],
+        color=[FERTIMAP_TINT, PROJECT_COLORS["Al Moutmir"]],
+        s=90,
+        marker="*",
+        edgecolor="white",
+        linewidth=0.5,
+        zorder=4,
+        label="best",
+    )
 
-    # Highlight best param point
-    ax.scatter([best_param], [mean_train[best_idx]], color="blue", s=120, marker="*", label="Best Train", edgecolor="black")
-    ax.scatter([best_param], [mean_test[best_idx]], color="red", s=120, marker="*", label="Best Test", edgecolor="black")
-
-    # Labels
     ylabel = scoring if not scoring.startswith("neg_") else scoring.replace("neg_", "")
     ax.set_xlabel(param_name)
-    ax.set_ylabel(ylabel)
-    ax.set_title(f"Best {param_name} = {best_param}")
-    ax.legend(loc="upper right")
-    ax.grid(True)
-    ax.set_axisbelow(True)
-
-    fig.tight_layout()
+    ax.set_ylabel(ylabel.replace("_", " "))
+    panel_subtitle(ax, f"best {param_name} = {best_param}")
+    # Below the axes rather than inside it. Five entries at `loc="best"` covered the very part of
+    # the sweep the plot is read for - where the train and test curves separate.
+    fig.legend(loc="outside lower center", ncol=3, fontsize=7.5)
     return fig
 
+
+@styled
 def cv_parallel_coordinates(cv_results):
+    # Copied before anything is written to it. The caller passes the same frame that is later saved
+    # as cv/cv_results.csv, and taking the absolute value in place silently rewrote that file's
+    # scores.
+    cv_results = cv_results.copy()
     cv_results['mean_test_score'] = cv_results['mean_test_score'].abs()
     best_index = cv_results['mean_test_score'].idxmin()
 
@@ -298,7 +395,7 @@ def cv_parallel_coordinates(cv_results):
     zs[:,1:] = (ys[:,1:] - ymins[1:]) / dys[1:] * dys[0] + ymins[0]
 
     # Main axes
-    fig, host = plt.subplots(figsize=(12,6))
+    fig, host = plt.subplots(figsize=(FIG_WIDTH_FULL, 3.6), layout="constrained")
 
     axes = [host] + [host.twinx() for _ in range(ys.shape[1]-1)]
     for i, ax in enumerate(axes):
@@ -307,12 +404,15 @@ def cv_parallel_coordinates(cv_results):
         ax.spines['bottom'].set_visible(False)
         if ax != host:
             ax.spines['left'].set_visible(False)
+            ax.spines["right"].set_visible(True)
+            ax.spines["right"].set_color(BASELINE)
             ax.yaxis.set_ticks_position('right')
             ax.spines["right"].set_position(("axes", i/(ys.shape[1]-1)))
+            ax.tick_params(axis="y", length=3, color=BASELINE, labelsize=8)
 
     # Colormap
     norm = mcolors.Normalize(vmin=cv_results['mean_test_score'].min(), vmax=cv_results['mean_test_score'].max())
-    cmap = matplotlib.colormaps['viridis']
+    cmap = sequential_cmap()
     # Draw other lines
     for j in range(parallels):
         verts = list(zip(np.linspace(0,len(ys[0])-1,len(ys[0])*3-2),
@@ -323,11 +423,15 @@ def cv_parallel_coordinates(cv_results):
             patch = patches.PathPatch(path, facecolor='none', lw=0.5,
                                       edgecolor=cmap(norm(cv_results['mean_test_score'].iloc[j])))
         else:
-            patch = patches.PathPatch(path, facecolor='none', lw=3, edgecolor='crimson', label = 'Best Model')
+            patch = patches.PathPatch(
+                path, facecolor='none', lw=2.5, edgecolor=PROJECT_COLORS["Al Moutmir"], label='best trial'
+            )
         host.add_patch(patch)
-    legend_line = Line2D([0], [0], color='crimson', lw=3, label='Best Model')
-    host.legend(handles=[legend_line], loc="lower left", bbox_to_anchor=(1.0, -0.1))
-    fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=host, anchor=(0.2, 0.5))
+    legend_line = Line2D([0], [0], color=PROJECT_COLORS["Al Moutmir"], lw=2.5, label='best trial')
+    host.legend(handles=[legend_line], loc="lower left", bbox_to_anchor=(1.0, -0.1), fontsize=7.5)
+    colorbar = fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=host, anchor=(0.2, 0.5))
+    colorbar.outline.set_visible(False)
+    colorbar.ax.tick_params(length=0, labelsize=8)
 
     best_params = cv_results.loc[best_index][param_cols].to_dict()
     best_params_str = ", ".join([f"{str(k).rsplit('__', 1)[-1]}={v}" for k, v in best_params.items()])
@@ -339,15 +443,23 @@ def cv_parallel_coordinates(cv_results):
     host.grid(True, which='major', axis='y')
     host.spines['top'].set_visible(True)
     host.spines['bottom'].set_visible(True)
+    host.spines['top'].set_color(BASELINE)
+    host.spines['bottom'].set_color(BASELINE)
     host.set_axisbelow(True)
-    host.set_title(f'Best Model: {best_params_str}', fontsize=10)
+    panel_subtitle(host, best_params_str)
     return fig
+
 
 # Most bars a pred-vs-obs panel will draw. Past roughly this many, neighbouring bars are less than
 # a pixel apart and merge into a solid grey curtain that hides the scatter underneath - which is
 # worse than showing fewer bars, because it hides the very thing the panel is about. The metrics and
 # the CSV always cover every point; only the picture is thinned.
 MAX_ERROR_BARS = 200
+
+# Fewer on the parent overlay. Its panels are half the width of a per-run panel and each one can
+# carry several models' bars at once, so the density at which they stop being readable arrives
+# sooner.
+MAX_PARENT_ERROR_BARS = 120
 
 
 def _error_bar_positions(x_values, cap=MAX_ERROR_BARS):
@@ -357,8 +469,6 @@ def _error_bar_positions(x_values, cap=MAX_ERROR_BARS):
     whole range of the axis instead of clustering wherever the data is dense. Deterministic, so the
     same run always produces the same picture.
     """
-    import numpy as np
-
     values = np.asarray(x_values, dtype=float)
     if values.size <= cap:
         return np.arange(values.size)
@@ -381,10 +491,28 @@ INTERVAL_CLIP_PERCENTILE = 2.0
 # directly - the points always keep at least ~1/(1 + 2*0.35) of the axis.
 MAX_INTERVAL_EXTENSION = 0.35
 
-# The error bars and their caps. Red because grey at low alpha was invisible against the scatter.
-ERROR_BAR_COLOR = "#d62728"
-ERROR_BAR_LINE_ALPHA = 0.35
-ERROR_BAR_CAP_ALPHA = 0.85
+# The error bars and their caps.
+#
+# COLOURED, not grey, and that is the whole point. The bars are DATA; the grid behind them is
+# chrome. In this palette chrome is the warm greys, so a grey bar is competing in the one register
+# the reader has learned to ignore - and a pale grey vertical is not merely quiet, it is
+# indistinguishable from a vertical gridline. A grey attempt measured out at luminance 0.866
+# against a grid of 0.877: a difference of 0.011, which is no difference at all. Darkening the grey
+# separates them tonally but still says "chrome" in a palette where every grey is chrome.
+#
+# Hue is what does the work here, so these sit on the project's accent instead, quietly: thin
+# verticals at low alpha and caps only a little stronger. The points keep the slate sigma ramp, so
+# bars and points stay distinct from each other as well as from the grid.
+ERROR_BAR_LINE_COLOR = PROJECT_COLORS["Al Moutmir"]
+ERROR_BAR_CAP_COLOR = PROJECT_COLORS["Al Moutmir"]
+ERROR_BAR_LINE_ALPHA = 0.30
+ERROR_BAR_CAP_ALPHA = 0.65
+# The caps have to read as ends rather than as more line, which is a question of RELATIVE weight -
+# a cap is found because it is heavier than the vertical it terminates, not because of any absolute
+# width. Keep the cap wider than the line if these are ever retuned.
+ERROR_BAR_LINE_WIDTH = 0.5
+ERROR_BAR_CAP_WIDTH = 0.8
+ERROR_BAR_CAP_SIZE = 2.0
 
 
 def _square_limits(observed, predicted, interval=None, percentile=INTERVAL_CLIP_PERCENTILE, margin=0.05):
@@ -399,8 +527,6 @@ def _square_limits(observed, predicted, interval=None, percentile=INTERVAL_CLIP_
     uncertain point has an interval several times the target's range, and letting it set the limits
     is exactly the blow-out that framing on the data alone was introduced to avoid.
     """
-    import numpy as np
-
     candidates = [np.asarray(observed, dtype=float), np.asarray(predicted, dtype=float)]
     finite = np.concatenate([values[np.isfinite(values)] for values in candidates])
     if finite.size == 0:
@@ -419,12 +545,7 @@ def _extend_range(low, high, interval, percentile=INTERVAL_CLIP_PERCENTILE):
     The percentile drops the few pathological bars. The extension ceiling handles the case the
     percentile cannot - a heavy-tailed sigma, where even the 98th percentile is far enough out to
     squash the data into the middle of the panel. Whichever binds first wins.
-
-    Shared by the predicted-vs-observed panel and the residual panel so their bars are clipped by
-    the same rule; without it one panel shows its caps and the other does not.
     """
-    import numpy as np
-
     if interval is None:
         return low, high
 
@@ -443,8 +564,8 @@ def _frame_square(ax, low, high):
     """Give an axes one shared range and a 1:1 aspect, so its diagonal is a real diagonal.
 
     ``adjustable="box"`` reshapes the axes box rather than the data limits, which is what keeps the
-    range exactly as asked. Call this AFTER every plotting call on the panel - seaborn autoscales on
-    draw and would otherwise overwrite the limits set here.
+    range exactly as asked. Call this AFTER every plotting call on the panel, so nothing that
+    autoscales on draw can overwrite the limits set here.
     """
     ax.set_xlim(low, high)
     ax.set_ylim(low, high)
@@ -457,14 +578,12 @@ def _draw_error_bars(ax, x_values, y_values, lower, upper, positions):
     The verticals and the caps are styled SEPARATELY, which a single ``alpha=`` on the errorbar call
     cannot do - it fades both by the same amount, and the setting that makes a few hundred
     overlapping verticals bearable is far too faint for the caps that mark where each interval
-    actually stops. Faint red lines, solid red caps.
+    actually stops. Faint accent lines, firmer accent caps.
 
     ``yerr`` takes the two half-widths rather than half of ``upper - lower``: a conformal interval is
     only symmetric when its calibrator is, and halving the width would bake in an assumption that
     need not hold.
     """
-    import numpy as np
-
     _plotline, caplines, barlinecols = ax.errorbar(
         np.asarray(x_values)[positions],
         np.asarray(y_values)[positions],
@@ -473,124 +592,133 @@ def _draw_error_bars(ax, x_values, y_values, lower, upper, positions):
             np.maximum(np.asarray(upper - y_values)[positions], 0.0),
         ],
         fmt="none",
-        ecolor=ERROR_BAR_COLOR,
-        elinewidth=0.6,
-        capsize=3,
+        ecolor=ERROR_BAR_LINE_COLOR,
+        elinewidth=ERROR_BAR_LINE_WIDTH,
+        capsize=ERROR_BAR_CAP_SIZE,
         zorder=1,
     )
     for bar in barlinecols:
         bar.set_alpha(ERROR_BAR_LINE_ALPHA)
     for cap in caplines:
         cap.set_alpha(ERROR_BAR_CAP_ALPHA)
-        cap.set_markeredgewidth(1.2)
-        cap.set_color(ERROR_BAR_COLOR)
+        cap.set_markeredgewidth(ERROR_BAR_CAP_WIDTH)
+        cap.set_color(ERROR_BAR_CAP_COLOR)
     return caplines, barlinecols
 
 
-def _frame_on_data(ax, x_values, y_values, x_margin=0.05, y_margin=0.05, y_interval=None):
-    """Set the axis limits from the POINTS, ignoring how far the error bars reach.
+def _least_squares_line(x_values, y_values):
+    """``(slope, intercept)`` of the OLS fit, or ``None`` when there is nothing to fit.
 
-    Matplotlib autoscales to include every artist, so one point with a very wide interval decides
-    the whole y-axis and squashes the scatter into an unreadable band. Framing on the data keeps the
-    picture about the predictions; the long bars run off the edge, which is the right reading.
-
-    Used by the RESIDUAL panel, whose axes are predicted against residual - two different
-    quantities, so it takes an independent range per axis and no aspect. The predicted-vs-observed
-    panel uses _square_limits and _frame_square instead.
-
-    ``y_interval`` widens the y range toward the bar ends under the same bounded rule the square
-    panel uses. Without it the residual axis stays tight on the residuals while the bars are as wide
-    as the whole target range, so every bar spans the full panel and not one cap is on-screen.
+    Closed-form rather than ``np.polyfit``, which warns on a poorly-conditioned fit - and this suite
+    turns warnings into errors, so a degenerate target would take the whole plot down.
     """
-    import numpy as np
+    x = np.asarray(x_values, dtype=float)
+    y = np.asarray(y_values, dtype=float)
+    finite = np.isfinite(x) & np.isfinite(y)
+    x, y = x[finite], y[finite]
+    if x.size < 2:
+        return None
+    variance = float(np.sum((x - x.mean()) ** 2))
+    if variance <= 0.0:
+        return None
+    slope = float(np.sum((x - x.mean()) * (y - y.mean())) / variance)
+    return slope, float(y.mean() - slope * x.mean())
 
-    for setter, values, margin, interval in (
-        (ax.set_xlim, np.asarray(x_values, dtype=float), x_margin, None),
-        (ax.set_ylim, np.asarray(y_values, dtype=float), y_margin, y_interval),
-    ):
-        finite = values[np.isfinite(values)]
-        if finite.size == 0:
-            continue
-        low, high = _extend_range(float(finite.min()), float(finite.max()), interval)
-        pad = (high - low) * margin or 1.0
-        setter(low - pad, high + pad)
 
+@styled
+def pred_obs_panel(eval_df, *, target_name=None):
+    """One square panel: predictions against observations, with the 1:1 line and the metrics.
 
-def create_pred_obs_plot(eval_df, builtin_metrics, artifacts_dir):
-    """
-    Create a 3- or 4-panel plot:
-      1. Scatter plot of Predicted vs Actual (with uncertainty bars when the frame has them)
-      2. Residuals vs Predicted
-      3. KDE density of Predicted vs Actual
-      4. Reliability curve — only when the frame carries a calibrated interval
+    This used to be three panels - the scatter, residuals against predicted, and a KDE of the same
+    two variables. Both extras were dropped: the residual panel is the scatter rotated onto the
+    identity line and says nothing the metric box does not, and the KDE redraws the first panel's
+    data with the individual points - the thing a reader is looking for - smoothed away.
 
     The uncertainty columns are OPTIONAL. Most frames reaching this function come from runs with
     uncertainty disabled and must render exactly as they always have, so every addition below is
-    guarded on the column being present rather than on a flag the caller would have to pass - which
-    also keeps the signature that MLflow's custom-artifact contract depends on.
+    guarded on the column being present rather than on a flag the caller would have to pass.
 
     Args:
         eval_df (DataFrame): must carry `target` and `prediction`; may carry `prediction_std`
-            and the `prediction_lower`/`prediction_upper` pair.
-        builtin_metrics (dict): supplied by MLflow's evaluator; unused.
-        artifacts_dir (str): directory this function SAVES into.
+            and the `prediction_lower`/`prediction_upper` pair, and may set `attrs["interval_label"]`.
+        target_name (str, optional): what to caption the panel with; defaults to the target column's
+            own name.
 
     Returns:
-        dict: {artifact_name: path}, MLflow's custom-artifact contract.
+        matplotlib.figure.Figure: the caller saves and closes it.
     """
     y_test = eval_df["target"]
     y_pred = eval_df["prediction"]
-    residuals = y_test - y_pred
 
     interval = interval_columns(eval_df)
     sigma = sigma_column(eval_df)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
 
-    # --- Panel 1: Predicted vs Actual ---
-    ax = axes[0]
+    fig, ax = plt.subplots(
+        figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN + 0.4), layout="constrained"
+    )
+    square_panel(ax)
+
     bar_positions = _error_bar_positions(y_test) if interval is not None else None
     if interval is not None:
         # Drawn FIRST and at zorder 1 so the bars sit under the points: bars painted on top hide the
         # very structure the plot exists to show.
         _draw_error_bars(ax, y_test, y_pred, interval[0], interval[1], bar_positions)
-    sns.regplot(x=y_test, y=y_pred, ax=ax,
-                scatter_kws={'alpha': 0.6, 'edgecolor': 'k', 'zorder': 3},
-                line_kws={'color': 'blue'}
-                )
+
     if sigma is not None:
-        # Colour by sigma over the bars. At this point count the bars overlap and stop being
-        # readable per point, while the colour survives - so "where is this model uncertain?" stays
-        # answerable from the picture rather than only from the CSV.
+        # Colour by sigma. At this point count the bars overlap and stop being readable per point,
+        # while the colour survives - so "where is this model uncertain?" stays answerable from the
+        # picture rather than only from the CSV.
         scatter = ax.scatter(
-            y_test, y_pred, c=sigma, cmap="viridis", s=22, alpha=0.85,
-            edgecolor="k", linewidth=0.3, zorder=4,
+            y_test, y_pred, c=sigma, cmap=sequential_cmap(), s=14,
+            edgecolor="white", linewidth=0.3, zorder=4, rasterized=True,
         )
         # An INSET axes, not `fig.colorbar(..., ax=ax)`. The `ax=` form makes room for the colorbar
-        # by shrinking the axes it is given, which left this panel about 9% narrower than the two
-        # beside it - one panel in a three-panel strip visibly out of proportion. inset_axes
-        # positions in axes-fraction coordinates and leaves the box alone, so the panel keeps the
-        # width and the 1:1 aspect set below.
-        colorbar = fig.colorbar(scatter, cax=ax.inset_axes([1.02, 0.0, 0.035, 1.0]))
-        colorbar.set_label("Predictive σ")
+        # by shrinking the axes it is given, which fights the 1:1 aspect set below. inset_axes
+        # positions in axes-fraction coordinates and leaves the box alone.
+        colorbar = fig.colorbar(scatter, cax=ax.inset_axes([1.03, 0.0, 0.035, 1.0]))
+        colorbar.set_label("predictive σ", fontsize=8, color=INK_2)
+        colorbar.outline.set_visible(False)
+        colorbar.ax.tick_params(length=0, labelsize=7.5, labelcolor=INK_2)
+    else:
+        # Slate when there are bars to stay clear of, the accent when the points are the only thing
+        # on the panel. The bars carry the accent colour, so orange points beside orange bars would
+        # reintroduce - between data and data this time - exactly the ambiguity the accent was
+        # chosen to remove. A frame with an interval but no sigma is unusual, since the interval is
+        # built from sigma, but it costs one branch to not draw it wrong.
+        ax.scatter(
+            y_test, y_pred,
+            color=CARBONATE_RAMP[-2] if interval is not None else PROJECT_COLORS["Al Moutmir"],
+            s=14, edgecolor="white", linewidth=0.3, zorder=4, rasterized=True,
+        )
 
     # One shared range for both axes, so the identity line below is a true 45 degree diagonal and
-    # the cloud is not stretched along whichever axis spans less. Applied whether or not the run
-    # carried uncertainty: the panel had never set an aspect, and a pred-vs-obs scatter that is not
-    # square misreads at a glance.
+    # the cloud is not stretched along whichever axis spans less.
     low, high = _square_limits(y_test, y_pred, interval)
 
     # Identity line across the WHOLE panel rather than the observed range, so it runs corner to
     # corner instead of stopping short inside a wider frame.
-    ax.plot([low, high], [low, high], 'r--', lw=2, zorder=5)
-    ax.set_xlabel("Actual")
+    ax.plot([low, high], [low, high], linestyle="--", color=INK_2, lw=0.8, zorder=5)
+
+    # The OLS fit, solid and darker against the dashed identity. The gap between the two is the
+    # regression to the mean every soil model shows, and it only reads when both are on the panel -
+    # so they are distinguished by weight and dash rather than by a second colour, which would
+    # compete with the sigma ramp the points are coloured on.
+    fit = _least_squares_line(y_test, y_pred)
+    if fit is not None:
+        slope, intercept = fit
+        ax.plot(
+            [low, high], [slope * low + intercept, slope * high + intercept],
+            color=INK, lw=1.4, zorder=5,
+        )
+
+    ax.set_xlabel("Observed")
     ax.set_ylabel("Predicted")
-    ax.set_title(f"{y_test.name}\nPredicted vs Actual")
-    ax.grid(True)
-    # After every plotting call: seaborn autoscales on draw and would overwrite these limits.
+    panel_subtitle(ax, str(target_name or y_test.name or ""))
+    # After every plotting call, so nothing that autoscales on draw overwrites these limits.
     _frame_square(ax, low, high)
 
     rmse = root_mean_squared_error(y_test, y_pred)
-    annotation = f"RMSE={rmse:.2f}\nR²={r2_score(y_test, y_pred):.2f}"
+    annotation = f"RMSE = {rmse:.2f}\nR² = {r2_score(y_test, y_pred):.2f}"
     if rmse > 0.0:
         # Skipped at rmse == 0 rather than divided anyway. RPIQ and RPD are ratios with rmse in the
         # denominator, so a model that fits its test split exactly - a degenerate estimator, or a
@@ -601,7 +729,7 @@ def create_pred_obs_plot(eval_df, builtin_metrics, artifacts_dir):
         # (predictions, targets), in that order: the IQR in the numerator is read off the
         # SECOND argument. Passing (y_test, y_pred) measures the spread of the predictions,
         # which under-reports RPIQ because predictions are systematically under-dispersed.
-        annotation += f"\nRPIQ={rpiq_score(y_pred, y_test):.2f}"
+        annotation += f"\nRPIQ = {rpiq_score(y_pred, y_test):.2f}"
     if interval is not None:
         lower, upper = interval
         covered = float(np.mean((y_test >= lower) & (y_test <= upper)))
@@ -611,111 +739,55 @@ def create_pred_obs_plot(eval_df, builtin_metrics, artifacts_dir):
         # Computed over EVERY point even when only a subset is drawn, so the number never describes
         # a different population from the metric of the same name in the run.
         annotation += (
-            f"\nPICP={covered:.3f}"
-            f"\nMPIW={float(np.mean(upper - lower)):.2f}"
+            f"\nPICP = {covered:.3f}"
+            f"\nMPIW = {float(np.mean(upper - lower)):.2f}"
         )
         # What KIND of bar this is, when the caller said. The same picture means different things
         # under conformal, gaussian and sigma - a reader cannot tell them apart by looking, and the
         # PICP beside it is only interpretable once you know which claim is being made. Carried on
-        # the frame's `attrs` because MLflow's custom-artifact contract fixes this signature.
+        # the frame's `attrs` so the caller need not widen this signature.
         label = eval_df.attrs.get("interval_label") if hasattr(eval_df, "attrs") else None
         if label:
             annotation += f"\nbar: {label}"
         if bar_positions is not None and len(bar_positions) < len(y_test):
             annotation += f"\nbars: {len(bar_positions)} of {len(y_test)}"
-    ax.text(0.05, 0.95, annotation,
-            transform=ax.transAxes,
-            verticalalignment='top',
-            bbox=dict(boxstyle='round', facecolor='white', alpha=0.8)
-        )
-
-    # --- Panel 2: Residuals vs Predicted ---
-    ax = axes[1]
-    if interval is not None:
-        lower, upper = interval
-        # Subsampled on the PREDICTED axis, which is this panel's x, so the bars spread across it
-        # rather than inheriting a selection made for a different axis. The interval is centred on
-        # the prediction, so around a residual it becomes `residual -+ the same half-widths`.
-        _draw_error_bars(
-            ax,
-            y_pred,
-            residuals,
-            residuals - (y_pred - lower),
-            residuals + (upper - y_pred),
-            _error_bar_positions(y_pred),
-        )
-    sns.scatterplot(
-        x=y_pred,
-        y=residuals,
-        ax=ax,
-        alpha=0.6,
-        edgecolor='k',
-        zorder=3,
-    )
-    ax.axhline(0, color="red", linestyle="--", lw=2)
-    ax.set_xlabel("Predicted")
-    ax.set_ylabel("Residuals")
-    ax.set_title(f"{y_test.name}\nResiduals vs Predicted")
-    ax.grid(True)
-    ax.set_axisbelow(True)
-    if interval is not None:
-        # The y range reaches toward the bar ends here too, so the caps are on-screen for most
-        # points. That turns the panel into a coverage picture: a bar that does not reach the zero
-        # line is a point the interval MISSED, which is the ~5% the PICP beside it is counting.
-        lower, upper = interval
-        _frame_on_data(
-            ax,
-            y_pred,
-            residuals,
-            x_margin=0.05,
-            y_interval=(residuals - (y_pred - lower), residuals + (upper - y_pred)),
-        )
-    # --- Panel 3: KDE density plot ---
-    ax = axes[2]
-    # np.isclose, not `!= 1`. A perfectly-fitting model gives a correlation of 0.9999999999999998
-    # rather than exactly 1, which slips past an equality test - and then seaborn cannot estimate a
-    # KDE over a degenerate covariance and warns, which under this project's warnings-as-errors
-    # setting takes the plot down. The guard is meant to catch that case; it just has to do it with
-    # a tolerance.
-    correlation = np.corrcoef(y_test, y_pred)[0, 1]
-    can_estimate_density = (
-        np.std(y_test) > 0
-        and np.std(y_pred) > 0
-        and np.isfinite(correlation)
-        and not np.isclose(abs(correlation), 1.0)
-    )
-    if can_estimate_density:
-        sns.kdeplot(x=y_test, y=y_pred, fill=True, cmap="gnuplot2", thresh=0.005, levels=200, ax=ax)
-    else:
-        ax.scatter(y_test, y_pred, alpha=0.6, edgecolor='k')
-    ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', lw=2)
-    ax.set_xlabel("Actual")
-    ax.set_ylabel("Predicted")
-    ax.set_title(f"{y_test.name}\nDensity KDE of Pred vs Actual")
-    ax.grid(True)
+    metric_box(ax, annotation)
 
     # No reliability panel here on purpose. Grading the interval needs the conformal calibrator, and
-    # this function is handed a frame and nothing else - MLflow's custom-artifact contract fixes its
-    # signature. A version that swept Gaussian z-multiples of the RAW sigma instead produced a curve
-    # far below the diagonal sitting next to an annotation reporting PICP=0.96, because those two
-    # grade different things. The reliability curve lives in uncertainty/reliability.png, which is
-    # written by log_uncertainty_artifacts and does have the calibrator.
+    # this function is handed a frame and nothing else. A version that swept Gaussian z-multiples of
+    # the RAW sigma instead produced a curve far below the diagonal sitting next to an annotation
+    # reporting PICP=0.96, because those two grade different things. The reliability curve lives in
+    # uncertainty/reliability.png, which is written by log_uncertainty_artifacts and does have the
+    # calibrator.
+    return fig
 
-    # Closed in a finally, and by identity rather than `plt.close()`'s "whatever is current". This
-    # function is called once per target inside a training loop, so a figure left open on an error
-    # path accumulates until matplotlib warns about it - and this suite turns warnings into errors,
-    # which turns one bad plot into a failed run several targets later.
-    try:
-        fig.tight_layout()
-        plot_path = os.path.join(artifacts_dir, "obs_pred_and_residual_plot.png")
-        fig.savefig(plot_path, bbox_inches="tight", dpi=100)
-    finally:
-        plt.close(fig)
-    return {"obs_pred_and_residual_plot": plot_path}
 
 def create_parent_pred_obs(eval_dfs):
     return _create_parent_pred_obs_multitarget(eval_dfs)
 
+
+# Metric column names as they should appear on an axis. Anything not listed falls through to a
+# readable default, so a new metric never renders as a raw column name in SHOUTING CAPS.
+_METRIC_LABELS = {
+    "rmse_test": "RMSE (test)",
+    "rmse_train": "RMSE (train)",
+    "r2_test": "R² (test)",
+    "r2_train": "R² (train)",
+    "rpiq_test": "RPIQ (test)",
+    "mae_test": "MAE (test)",
+}
+
+
+def _metric_label(metric: str) -> str:
+    if metric in _METRIC_LABELS:
+        return _METRIC_LABELS[metric]
+    stem, _, split = str(metric).rpartition("_")
+    if stem and split in {"test", "train", "val"}:
+        return f"{stem.replace('_', ' ').upper()} ({split})"
+    return str(metric).replace("_", " ")
+
+
+@styled
 def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_test",
                                         label_col="model", hue_col="target"):
     """
@@ -723,29 +795,13 @@ def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_
     with average RMSE and R² lines per target.
     """
     if leaderboard_df is None or leaderboard_df.empty:
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.text(0.5, 0.5, "No leaderboard rows available", ha="center", va="center")
-        ax.axis("off")
-        return fig
+        return message_figure("No leaderboard rows available")
 
     if metric_x not in leaderboard_df.columns or metric_y not in leaderboard_df.columns:
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.text(
-            0.5,
-            0.5,
+        return message_figure(
             f"Skipping leaderboard scatter: missing metric columns '{metric_x}' or '{metric_y}'",
-            ha="center",
-            va="center",
+            figsize=(FIG_WIDTH_FULL, 1.6),
         )
-        ax.axis("off")
-        return fig
-
-    # Defensive checks
-    if leaderboard_df is None or len(leaderboard_df) == 0:
-        fig, ax = plt.subplots(figsize=(3, 3))
-        ax.text(0.5, 0.5, "No leaderboard data available", ha='center', va='center')
-        ax.axis('off')
-        return fig
 
     # Fallback if expected hue column missing
     if hue_col not in leaderboard_df.columns:
@@ -768,45 +824,61 @@ def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_
             leaderboard_df[label_col] = range(len(leaderboard_df))
 
     targets = leaderboard_df[hue_col].dropna().unique()
-    models = leaderboard_df[label_col].dropna().unique()
-    if len(models) == 0:
-        models = ['models']
     n_targets = max(1, len(targets))
-    n_cols = max(1, len(models))
+    # Columns from the number of TARGETS, which is what a panel shows. Deriving them from the number
+    # of models built a grid with as many columns as the run had models and then deleted most of it.
+    n_cols = min(2, n_targets)
     n_rows = int(np.ceil(n_targets / n_cols)) or 1
 
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5*n_cols, 5*n_rows))
-    axes = np.atleast_1d(axes).flatten()
+    fig, axes = plt.subplots(
+        n_rows,
+        n_cols,
+        figsize=(FIG_WIDTH_FULL if n_cols > 1 else FIG_WIDTH_COLUMN, 2.8 * n_rows),
+        squeeze=False,
+        layout="constrained",
+    )
+    axes = axes.flatten()
 
-    for ax, target in zip(axes, targets):
+    for index, (ax, target) in enumerate(zip(axes, targets)):
         df_target = leaderboard_df[leaderboard_df[hue_col] == target]
 
         # Compute averages for this target
         avg_rmse = df_target[metric_x].mean()
         avg_r2 = df_target[metric_y].mean()
 
-        sns.scatterplot(data=df_target, x=metric_x,y=metric_y,
-                        hue=hue_col, s=100, ax=ax,legend=False
+        ax.scatter(
+            df_target[metric_x],
+            df_target[metric_y],
+            s=28,
+            color=PROJECT_COLORS["Al Moutmir"],
+            edgecolor="white",
+            linewidth=0.5,
+            zorder=4,
         )
 
         # Annotate points
         for _, row in df_target.iterrows():
-            ax.text(row[metric_x], row[metric_y], str(row[label_col]),
-                    horizontalalignment='left', size='small', color='black', weight='normal')
+            ax.text(row[metric_x], row[metric_y], f"  {row[label_col]}",
+                    horizontalalignment='left', verticalalignment='center',
+                    fontsize=7, color=INK_2)
 
         # Add average lines per target
-        ax.axvline(avg_rmse, color="blue", linestyle="--", label="Avg RMSE")
-        ax.axhline(avg_r2, color="red", linestyle="--", label="Avg R²")
+        ax.axvline(avg_rmse, color=BASELINE, linestyle="--", lw=0.8, zorder=1, label="mean RMSE")
+        ax.axhline(avg_r2, color=INK_2, linestyle="--", lw=0.8, zorder=1, label="mean R²")
 
-        ax.set_title(f"Target: {target}")
-        ax.set_xlabel(metric_x.upper())
-        ax.set_ylabel(metric_y.upper())
+        panel_letter(ax, "abcdefghijklmnopqrstuvwxyz"[index % 26])
+        panel_subtitle(ax, str(target))
+        ax.set_xlabel(_metric_label(metric_x))
+        ax.set_ylabel(_metric_label(metric_y))
+        # Room on the right for the model names, which are written to the RIGHT of their points and
+        # otherwise run off the panel - matplotlib autoscales to the points, not to their labels.
+        left, right = ax.get_xlim()
+        ax.set_xlim(left, right + (right - left) * 0.28)
+        if index == 0:
+            ax.legend(loc="lower right", fontsize=7.5)
 
     # Remove empty subplots
     for j in range(len(targets), len(axes)):
-        if j < len(axes):
-            fig.delaxes(axes[j])
+        fig.delaxes(axes[j])
 
-    plt.suptitle("Leaderboard: R² vs RMSE per Target", fontsize=16)
-    plt.tight_layout()
     return fig

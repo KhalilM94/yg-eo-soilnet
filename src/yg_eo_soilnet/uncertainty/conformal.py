@@ -79,6 +79,33 @@ class ConformalCalibrator:
             "conformal_normalized": bool(self.normalized),
         }
 
+    @classmethod
+    def from_dict(cls, payload: Any) -> Optional["ConformalCalibrator"]:
+        """Rebuild a calibrator from what :meth:`to_dict` wrote, or ``None`` if it is not in there.
+
+        Every value this class holds is a scalar and all four are written into
+        ``uncertainty/uncertainty_summary.json``, so a finished run carries enough to reconstruct
+        its calibrator exactly - the object itself is never serialised outside the logged model.
+        That is what lets ``replot.py`` redraw a reliability curve that grades the SAME conformal
+        procedure the run used. Without it the curve falls back to Gaussian z-multiples of the raw
+        sigma, which grades a different thing and draws a visibly different line.
+
+        Tolerant of a payload that is not a conformal summary - a run whose interval came from
+        ``SigmaInterval`` writes no ``conformal_q`` - because the caller's alternative is a
+        calibrator-less curve, not a failure.
+        """
+        if not isinstance(payload, dict) or "conformal_q" not in payload:
+            return None
+        try:
+            return cls(
+                q=float(payload["conformal_q"]),
+                alpha=float(payload["conformal_alpha"]),
+                n_calib=int(payload["conformal_n_calib"]),
+                normalized=bool(payload.get("conformal_normalized", True)),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
 
 def fit_conformal(
     y_calib: Any,

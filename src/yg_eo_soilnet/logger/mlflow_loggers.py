@@ -1,5 +1,5 @@
 from yg_eo_soilnet.utils import mlflow_rpiq_score
-from yg_eo_soilnet.plot_utils import plot_leaderboard_scatter, create_pred_obs_plot, create_parent_pred_obs
+from yg_eo_soilnet.plot_utils import plot_leaderboard_scatter, pred_obs_panel, create_parent_pred_obs
 from yg_eo_soilnet.artifacts import (
     ArtifactLayout,
     candidate_artifact_paths,
@@ -657,12 +657,11 @@ class ChildRunLogger:
     ) -> bool:
         """Write plots/pred_obs.png for ONE target, carrying its uncertainty columns.
 
-        Used by both families now. The sklearn path also runs ``mlflow.models.evaluate``, which
-        calls ``create_pred_obs_plot`` itself through its custom-artifacts hook - but the evaluator
-        hands that hook a frame it builds from the `targets` and `predictions` columns alone, so the
-        sigma and interval columns never reach it and the bars silently do not appear. Writing the
-        plot here as well is what puts them on the picture, and it incidentally files the sklearn
-        plot under the same plots/pred_obs.png path the Lightning one has always used.
+        The single writer of this plot for both families. The sklearn path used to get a second copy
+        from ``mlflow.models.evaluate``'s custom-artifacts hook, but the evaluator builds the frame
+        it passes that hook from the `targets` and `predictions` columns alone, so the sigma and
+        interval columns never reached it and the bars silently did not appear. The hook is gone;
+        this is the copy that has them.
         """
         if evaluation_df.empty or target not in evaluation_df.columns or "prediction" not in evaluation_df.columns:
             return False
@@ -688,27 +687,15 @@ class ChildRunLogger:
             # would end up in the CSV the evaluator writes.
             plot_eval_df.attrs["interval_label"] = interval_label
 
-        # create_pred_obs_plot follows MLflow's custom-artifact contract: it SAVES into the
-        # directory it is handed and returns {name: path}, rather than returning a Figure the way
-        # every other plotter in plot_utils does. Hence the temp dir here instead of log_figure.
-        with tempfile.TemporaryDirectory() as tmpdir:
-            artifacts = create_pred_obs_plot(plot_eval_df, builtin_metrics={}, artifacts_dir=tmpdir)
-            if not artifacts:
-                return False
-            # One stable name, so this plot lines up across runs in the compare view. It used to be
-            # suffixed with the target and model, which made every run's copy a different path.
-            # Multi-target runs separate by DIRECTORY instead - see plots_path - so two targets
-            # still cannot overwrite each other.
-            destination = artifact_path or ArtifactLayout.PLOTS
-            for index, (_artifact_key, source_path) in enumerate(artifacts.items()):
-                _stem, source_ext = os.path.splitext(os.path.basename(source_path))
-                stable_stem, stable_ext = os.path.splitext(ArtifactLayout.PRED_OBS_FILE)
-                suffix = "" if index == 0 else f"_{index}"
-                renamed_filename = f"{stable_stem}{suffix}{stable_ext or source_ext}"
-                renamed_path = os.path.join(tmpdir, renamed_filename)
-                if source_path != renamed_path:
-                    os.replace(source_path, renamed_path)
-                mlflow.log_artifact(renamed_path, artifact_path=destination)
+        # One stable name, so this plot lines up across runs in the compare view. It used to be
+        # suffixed with the target and model, which made every run's copy a different path.
+        # Multi-target runs separate by DIRECTORY instead - see plots_path - so two targets still
+        # cannot overwrite each other.
+        log_figure(
+            pred_obs_panel(plot_eval_df, target_name=target),
+            ArtifactLayout.PRED_OBS_FILE,
+            artifact_path or ArtifactLayout.PLOTS,
+        )
         return True
 
     def _log_checkpoint(self, best_model_path: str) -> None:
@@ -1562,6 +1549,12 @@ class ChildRunLogger:
 
         The frame carries exactly one prediction column here because the caller has already fanned
         it out per target, so the ambiguity that made this multi-output-unsafe is gone.
+
+        No `custom_artifacts` hook. It used to carry the pred-vs-obs plotter, but the evaluator
+        rebuilds the frame it passes that hook from `targets` and `predictions` alone - so the sigma
+        and interval columns never reached it, and every sklearn run ended up with a second,
+        bar-less copy of the plot under a different name beside the good one that
+        `_log_pred_obs_artifact` writes.
         """
         if frame is None or target_name not in frame.columns or "prediction" not in frame.columns:
             return
@@ -1572,7 +1565,6 @@ class ChildRunLogger:
             model_type="regressor",
             evaluators=["regressor"],
             extra_metrics=[mlflow_rpiq_score],
-            custom_artifacts=[create_pred_obs_plot]
         )
 
     def log_lightning_child_run(
@@ -2113,16 +2105,26 @@ class ParentRunLogger:
             "SPLIT_POPULATION_POLICY": getattr(trainer.config, "SPLIT_POPULATION_POLICY", None),
         })
 
-        # 1. Fetch child runs
+        self.log_parent_figures(parent_run_id)
+        self._log_point_prediction_export(parent_run_id, trainer.config)
+
+    def log_parent_figures(self, parent_run_id: str) -> None:
+        """The leaderboard CSV and the two parent figures, from MLflow state alone.
+
+        Split out of :meth:`log_parent_summary` because it is the only part of it that needs nothing
+        but the run tree - no live ``trainer``, no config, no source data. That is what lets
+        ``replot.py`` regenerate these figures for a run that finished months ago.
+
+        Writes into whatever run is ACTIVE, which is the parent during training and the run reopened
+        by ``mlflow.start_run(run_id=...)`` when replotting.
+        """
         leaderboard_df = self._collect_leaderboard(parent_run_id)
 
-        # Log as artifact
         with tempfile.TemporaryDirectory() as tmpdir:
             leaderboard_path = os.path.join(tmpdir, "leaderboard.csv")
             leaderboard_df.to_csv(leaderboard_path, index=False)
             mlflow.log_artifact(leaderboard_path)
 
-        # --- Plots ---
         # rmse_test against r2_test: both are in original target units for both families, so an
         # XGBoost point and a soil_cnn point on this axis now mean the same thing. The old pair was
         # (mean_test_score, r2_score), which put positive sklearn RMSEs and negative Lightning
@@ -2139,5 +2141,3 @@ class ParentRunLogger:
             "pred_error_plot.png",
             ArtifactLayout.LEADERBOARD_PLOTS,
         )
-
-        self._log_point_prediction_export(parent_run_id, trainer.config)

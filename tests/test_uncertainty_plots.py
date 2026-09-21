@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 from yg_eo_soilnet.plot_utils import (  # noqa: E402
     _resolve_prediction_column,
     create_parent_pred_obs,
-    create_pred_obs_plot,
+    pred_obs_panel,
 )
 from yg_eo_soilnet.uncertainty import attach_uncertainty_columns  # noqa: E402
 from yg_eo_soilnet.uncertainty.columns import (  # noqa: E402
@@ -213,34 +213,55 @@ def test_a_joint_frame_with_uncertainty_still_fans_out_per_target():
 # --- the plots -------------------------------------------------------------
 
 
-def test_the_pred_obs_plot_still_renders_without_any_uncertainty_columns(tmp_path):
+def test_the_pred_obs_plot_still_renders_without_any_uncertainty_columns():
     # The majority case: every frame from a run with uncertainty disabled.
-    artifacts = create_pred_obs_plot(_eval_frame(with_uncertainty=False), {}, str(tmp_path))
-    assert (tmp_path / "obs_pred_and_residual_plot.png").exists()
-    assert "obs_pred_and_residual_plot" in artifacts
-
-
-def test_the_pred_obs_plot_renders_with_uncertainty_columns(tmp_path):
-    artifacts = create_pred_obs_plot(_eval_frame(), {}, str(tmp_path))
-    assert (tmp_path / "obs_pred_and_residual_plot.png").exists()
-    assert "obs_pred_and_residual_plot" in artifacts
-
-
-def test_the_axis_is_framed_on_the_points_not_on_the_widest_bar():
-    """One very uncertain point must not squash every prediction into an unreadable band."""
     import matplotlib.pyplot as plt
 
-    from yg_eo_soilnet.plot_utils import _frame_on_data
-
-    figure, axis = plt.subplots()
+    figure = pred_obs_panel(_eval_frame(with_uncertainty=False))
     try:
-        axis.errorbar([0, 1], [0, 1], yerr=[500, 500], fmt="none")
-        _frame_on_data(axis, np.array([0.0, 1.0]), np.array([0.0, 1.0]))
-        low, high = axis.get_ylim()
+        assert figure is not None
+        assert figure.axes[0].collections, "nothing was drawn on the panel"
     finally:
         plt.close(figure)
 
-    assert high < 10.0 and low > -10.0
+
+def test_the_pred_obs_plot_renders_with_uncertainty_columns():
+    import matplotlib.pyplot as plt
+
+    figure = pred_obs_panel(_eval_frame())
+    try:
+        # The colorbar is an INSET of the panel, not a second entry in figure.axes - that is what
+        # keeps the panel's width and its 1:1 aspect intact.
+        assert figure.axes[0].child_axes, "no sigma colorbar on a frame that carries sigma"
+    finally:
+        plt.close(figure)
+
+
+def test_the_pred_obs_plot_is_one_panel_with_no_residual_or_density_companion():
+    """The residual scatter and the KDE were dropped; the square panel is the whole figure.
+
+    Both extras restated the first panel: the residuals are that scatter rotated onto the identity
+    line, and the KDE redrew the same two variables with the individual points - the thing a reader
+    is looking for - smoothed away.
+    """
+    import matplotlib.pyplot as plt
+
+    for frame in (_eval_frame(with_uncertainty=False), _eval_frame()):
+        figure = pred_obs_panel(frame)
+        try:
+            assert len(figure.axes) == 1
+        finally:
+            plt.close(figure)
+
+
+def test_the_pred_obs_panel_is_captioned_with_the_target_it_was_given():
+    import matplotlib.pyplot as plt
+
+    figure = pred_obs_panel(_eval_frame(with_uncertainty=False), target_name="clay_pct")
+    try:
+        assert figure.axes[0].get_title(loc="right") == "clay_pct"
+    finally:
+        plt.close(figure)
 
 
 def test_the_pred_obs_panel_shares_one_range_across_both_axes():
@@ -320,12 +341,16 @@ def test_frame_square_leaves_the_panel_at_a_one_to_one_aspect():
         plt.close(figure)
 
 
-def test_the_error_bars_are_red_with_ends_you_can_actually_see():
+def test_the_error_bars_have_ends_you_can_actually_see():
     """Caps and verticals are styled separately; one alpha on the container cannot do both."""
     import matplotlib.colors as mcolors
     import matplotlib.pyplot as plt
 
-    from yg_eo_soilnet.plot_utils import ERROR_BAR_COLOR, _draw_error_bars
+    from yg_eo_soilnet.plot_utils import (
+        ERROR_BAR_CAP_COLOR,
+        ERROR_BAR_LINE_WIDTH,
+        _draw_error_bars,
+    )
 
     figure, axis = plt.subplots()
     try:
@@ -334,14 +359,39 @@ def test_the_error_bars_are_red_with_ends_you_can_actually_see():
             axis, np.arange(3.0), y, y - 1.0, y + 1.0, np.arange(3)
         )
         assert caplines, "no caps drawn, so the interval ends are invisible"
-        expected = mcolors.to_rgba(ERROR_BAR_COLOR)[:3]
+        expected = mcolors.to_rgba(ERROR_BAR_CAP_COLOR)[:3]
         for cap in caplines:
             assert mcolors.to_rgba(cap.get_color())[:3] == expected
-            assert cap.get_markeredgewidth() > 1.0
+            # Heavier than the vertical it terminates. The absolute width is a free parameter; the
+            # RATIO is what makes a cap read as an end rather than as more line.
+            assert cap.get_markeredgewidth() > ERROR_BAR_LINE_WIDTH
         # The ends have to stand out from the verticals, not fade with them.
         assert caplines[0].get_alpha() > barlinecols[0].get_alpha()
     finally:
         plt.close(figure)
+
+
+def test_the_bars_are_not_drawn_in_a_colour_the_grid_also_uses():
+    """The bars are data and the grid is chrome, so they must not share a register.
+
+    A pale grey bar is not merely quiet against this palette's warm-grey grid - it is
+    indistinguishable from a vertical gridline. Measured, the grey the bars once used sat at
+    luminance 0.866 against a grid at 0.877.
+    """
+    import matplotlib.colors as mcolors
+
+    from yg_eo_soilnet.plot_style import BASELINE, GRID
+    from yg_eo_soilnet.plot_utils import ERROR_BAR_CAP_COLOR, ERROR_BAR_LINE_COLOR
+
+    def saturation(color):
+        red, green, blue = mcolors.to_rgb(color)
+        return max(red, green, blue) - min(red, green, blue)
+
+    chrome = max(saturation(GRID), saturation(BASELINE))
+    for bar_color in (ERROR_BAR_LINE_COLOR, ERROR_BAR_CAP_COLOR):
+        assert bar_color not in (GRID, BASELINE)
+        # Carries real hue, which is what separates it from chrome at any lightness.
+        assert saturation(bar_color) > chrome * 3
 
 
 def test_the_bars_are_thinned_but_the_metrics_still_cover_every_point():
@@ -361,22 +411,32 @@ def test_a_small_split_keeps_a_bar_on_every_point():
     assert len(_error_bar_positions(np.arange(50.0))) == 50
 
 
-def test_the_plot_closes_every_figure_it_opens(tmp_path):
+def test_the_plot_opens_exactly_one_figure_for_its_caller_to_close():
     # Called once per target inside a training loop, so a leak here accumulates until matplotlib
-    # warns - and with warnings as errors that fails a run several targets later.
+    # warns - and with warnings as errors that fails a run several targets later. The panel returns
+    # its figure now instead of saving it, so closing is log_figure's job; what this checks is that
+    # nothing EXTRA is left behind.
     import matplotlib.pyplot as plt
 
     before = set(plt.get_fignums())
     for frame in (_eval_frame(with_uncertainty=False), _eval_frame()):
-        create_pred_obs_plot(frame, {}, str(tmp_path))
+        figure = pred_obs_panel(frame)
+        assert set(plt.get_fignums()) - before == {figure.number}
+        plt.close(figure)
     assert set(plt.get_fignums()) == before
 
 
-def test_the_plot_survives_a_model_that_fits_its_test_split_exactly(tmp_path):
+def test_the_plot_survives_a_model_that_fits_its_test_split_exactly():
     # RPIQ and RPD divide by rmse. A degenerate estimator makes that a divide-by-zero, which used to
     # take the plot - and the artifact logging around it - down with it.
+    import matplotlib.pyplot as plt
+
     exact = pd.DataFrame({"target": [1.0, 2.0, 3.0, 4.0], "prediction": [1.0, 2.0, 3.0, 4.0]})
-    assert create_pred_obs_plot(exact, {}, str(tmp_path))
+    figure = pred_obs_panel(exact)
+    try:
+        assert figure is not None
+    finally:
+        plt.close(figure)
 
 
 def test_the_parent_overlay_renders_with_and_without_intervals():
@@ -488,10 +548,12 @@ def test_a_categorical_first_column_no_longer_crashes_the_parent_overlay():
 
 
 def _panel_x(figure, title):
+    # The target name lives in the RIGHT title slot: the house style reserves the left slot for the
+    # bold panel letter, so a panel carries both without either crowding the other.
     import numpy as np
 
     for axis in figure.axes:
-        if axis.get_title() == title:
+        if axis.get_title(loc="right") == title:
             chunks = [c.get_offsets()[:, 0] for c in axis.collections if len(c.get_offsets())]
             return np.concatenate(chunks) if chunks else np.array([])
     raise AssertionError(f"no panel titled {title!r}")

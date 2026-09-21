@@ -1,8 +1,7 @@
 """Diagnostics that say whether the bars on the pred-vs-obs plot are honest.
 
-Repo convention, the same one explain/plots.py and hpo/plots.py follow: build the Figure, call
-tight_layout, and RETURN it. The caller saves and closes. (plot_utils.create_pred_obs_plot is the
-documented exception, because MLflow's custom-artifact contract makes it save itself.)
+Repo convention, the same one plot_utils.py, explain/plots.py and hpo/plots.py follow: build the
+Figure, style it through plot_style, and RETURN it. The caller saves and closes.
 
 The pred-vs-obs bars show what the model claims. These two panels are how you check the claim:
 
@@ -22,11 +21,22 @@ from typing import Any, Optional
 import matplotlib.pyplot as plt
 import numpy as np
 
+from yg_eo_soilnet.plot_style import (
+    FERTIMAP_AREA_FILL,
+    FIG_WIDTH_COLUMN,
+    INK_2,
+    PROJECT_COLORS,
+    panel_subtitle,
+    square_panel,
+    styled,
+)
+
 # Nominal levels swept by the reliability curve. Dense enough to show the shape, coarse enough that
 # each point is a distinct empirical fraction on an ~900-row test split.
 NOMINAL_LEVELS = np.linspace(0.05, 0.95, 19)
 
 
+@styled
 def reliability_curve(
     y_true: Any,
     y_pred: Any,
@@ -55,34 +65,49 @@ def reliability_curve(
 
     figure = None
     if axis is None:
-        figure, axis = plt.subplots(figsize=(6, 5))
+        figure, axis = plt.subplots(
+            figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
+        )
+    # Both axes are coverages on the same 0-1 scale, so this panel is read against its diagonal the
+    # same way the pred-vs-obs scatter is.
+    square_panel(axis)
 
     empirical = [
         _empirical_coverage(observed, predicted, sigma_values, level, calibrator)
         for level in NOMINAL_LEVELS
     ]
 
-    axis.plot([0, 1], [0, 1], linestyle="--", color="black", linewidth=1, label="perfect")
-    axis.plot(NOMINAL_LEVELS, empirical, marker="o", markersize=4, linewidth=1.5, label="observed")
+    axis.plot([0, 1], [0, 1], linestyle="--", color=INK_2, linewidth=0.8, label="perfect", zorder=2)
+    axis.plot(
+        NOMINAL_LEVELS,
+        empirical,
+        color=PROJECT_COLORS["Al Moutmir"],
+        marker="o",
+        markersize=3.5,
+        markeredgecolor="white",
+        markeredgewidth=0.5,
+        linewidth=1.6,
+        label="observed",
+        zorder=3,
+    )
     # Shading the gap makes the DIRECTION of the miscalibration readable at a glance, which is the
     # thing that determines what to do about it: below the diagonal is over-confident (intervals too
     # narrow), above is over-cautious (too wide, and the bars are not saying much).
-    axis.fill_between(NOMINAL_LEVELS, NOMINAL_LEVELS, empirical, alpha=0.15, color="tab:blue")
+    axis.fill_between(
+        NOMINAL_LEVELS, NOMINAL_LEVELS, empirical, color=FERTIMAP_AREA_FILL, alpha=0.5, lw=0, zorder=1
+    )
 
     axis.set_xlabel("Nominal coverage")
     axis.set_ylabel("Empirical coverage")
-    axis.set_title(f"{target_name}\nReliability" if target_name else "Reliability")
+    panel_subtitle(axis, f"{target_name} reliability" if target_name else "reliability")
     axis.set_xlim(0, 1)
     axis.set_ylim(0, 1)
-    axis.grid(True)
-    axis.set_axisbelow(True)
-    axis.legend(loc="upper left", fontsize=8)
+    axis.legend(loc="upper left", fontsize=7.5)
 
-    if figure is not None:
-        figure.tight_layout()
     return figure
 
 
+@styled
 def sigma_vs_error(
     y_true: Any,
     y_pred: Any,
@@ -106,25 +131,35 @@ def sigma_vs_error(
 
     figure = None
     if axis is None:
-        figure, axis = plt.subplots(figsize=(6, 5))
+        figure, axis = plt.subplots(
+            figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
+        )
+    # Both axes are in the target's units, and the whole reading is "how far off the diagonal".
+    square_panel(axis)
 
     bin_sigmas, bin_rmses = _bin_by_sigma(absolute_residuals, sigma_values, n_bins)
 
     if bin_sigmas.size:
-        axis.scatter(bin_sigmas, bin_rmses, s=45, zorder=3, edgecolor="k", linewidth=0.5)
         limit = float(max(bin_sigmas.max(), bin_rmses.max())) * 1.05
-        axis.plot([0, limit], [0, limit], linestyle="--", color="red", linewidth=1.5)
+        axis.plot([0, limit], [0, limit], linestyle="--", color=INK_2, linewidth=0.8, zorder=2)
+        axis.scatter(
+            bin_sigmas,
+            bin_rmses,
+            s=28,
+            color=PROJECT_COLORS["Al Moutmir"],
+            edgecolor="white",
+            linewidth=0.5,
+            zorder=3,
+        )
         axis.set_xlim(0, limit)
         axis.set_ylim(0, limit)
 
     axis.set_xlabel("Predicted σ (bin mean)")
     axis.set_ylabel("Observed RMSE (bin)")
-    axis.set_title(f"{target_name}\nσ vs realised error" if target_name else "σ vs realised error")
-    axis.grid(True)
-    axis.set_axisbelow(True)
+    panel_subtitle(
+        axis, f"{target_name} σ vs realised error" if target_name else "σ vs realised error"
+    )
 
-    if figure is not None:
-        figure.tight_layout()
     return figure
 
 
