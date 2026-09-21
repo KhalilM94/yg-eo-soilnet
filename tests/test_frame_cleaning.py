@@ -1,8 +1,4 @@
-"""The cleaning helpers the sequence builder cleans its inputs with.
-
-They were first lifted out of the since-deleted graph builder so two paths could share them; these
-tests pin the behaviour the sequence path depends on.
-"""
+"""The cleaning helpers the sequence builder cleans its inputs with."""
 
 from __future__ import annotations
 
@@ -13,7 +9,6 @@ import pytest
 from yg_eo_soilnet.datamodules.frame_cleaning import (
     build_finite_row_mask,
     drop_non_finite_rows,
-    encode_categorical_features,
     sanitize_numeric_columns,
 )
 
@@ -39,30 +34,6 @@ def test_sanitize_ignores_columns_that_are_absent(logger) -> None:
     frame = pd.DataFrame({"present": [1.0, 2.0]})
     cleaned = sanitize_numeric_columns(frame, ["present", "missing"], logger=logger)
     assert list(cleaned.columns) == ["present"]
-
-
-def test_encode_categorical_features_ordinal_encodes_and_keeps_numerics(logger) -> None:
-    frame = pd.DataFrame({"texture": ["clay", "sand", "clay"], "slope": [1.0, 2.0, 3.0]})
-    encoded, feature_columns = encode_categorical_features(frame, ["texture", "slope"], logger=logger)
-
-    assert feature_columns == ["texture", "slope"]
-    assert encoded["texture"].tolist() == [0.0, 1.0, 0.0]
-    assert encoded["slope"].tolist() == [1.0, 2.0, 3.0]
-
-
-def test_encode_categorical_features_marks_missing_as_nan(logger) -> None:
-    """factorize's -1 sentinel would read as a real category; NaN defers to the row-drop pass."""
-    frame = pd.DataFrame({"texture": ["clay", None, "sand"]})
-    encoded, _ = encode_categorical_features(frame, ["texture"], logger=logger)
-
-    assert encoded["texture"].isna().tolist() == [False, True, False]
-    assert -1.0 not in encoded["texture"].dropna().tolist()
-
-
-def test_encode_categorical_features_drops_a_column_with_no_categories(logger) -> None:
-    frame = pd.DataFrame({"empty": [None, None], "slope": [1.0, 2.0]})
-    _, feature_columns = encode_categorical_features(frame, ["empty", "slope"], logger=logger)
-    assert feature_columns == ["slope"]
 
 
 def test_build_finite_row_mask_flags_missing_and_non_finite(logger) -> None:

@@ -72,7 +72,7 @@ def test_two_runs_with_different_targets_and_models_share_every_artifact_path(
         logger, monkeypatch, target="organic_matter_pct", model_name="soil_cnn", checkpoint=first_ckpt
     )
     second = _run(
-        logger, monkeypatch, target="clay_pct", model_name="soil_sequence", checkpoint=second_ckpt
+        logger, monkeypatch, target="clay_pct", model_name="soil_cnn_small", checkpoint=second_ckpt
     )
 
     assert first, "the first run wrote no artifacts at all"

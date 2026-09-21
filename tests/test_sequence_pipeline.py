@@ -241,9 +241,7 @@ def test_datamodule_batch_length_follows_the_batch_not_a_global_axis(tmp_path: P
     assert short_batch["sequences"]["s2"].shape[1] == 2
 
 
-def test_datamodule_exposes_the_factory_contract_without_graph_or_step_attributes(
-    tmp_path: Path, logger
-) -> None:
+def test_datamodule_exposes_the_factory_contract(tmp_path: Path, logger) -> None:
     bundle = _build_bundle(tmp_path, logger)
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, target_transform="log1p")
     datamodule.setup("fit")
@@ -252,9 +250,6 @@ def test_datamodule_exposes_the_factory_contract_without_graph_or_step_attribute
     assert datamodule.target_dim == 1
     assert datamodule.modality_dims == {"s1": 1, "s2": 2}
     assert datamodule.target_mean_ is not None and datamodule.target_scale_ is not None
-    # A length-agnostic, graph-free model must never be handed these by the factory.
-    assert not hasattr(datamodule, "temporal_steps")
-    assert not hasattr(datamodule, "edge_attr_dim")
 
 
 def test_datamodule_fits_standardization_on_the_train_split_only(tmp_path: Path, logger) -> None:

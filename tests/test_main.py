@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from pathlib import Path
 
 import pandas as pd
 import pytest

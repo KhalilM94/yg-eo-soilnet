@@ -21,7 +21,7 @@ def test_lightning_factory_rejects_non_dl_entries() -> None:
                 "enabled": True,
                 "modeltype": "ml",
                 "import_path": "fake.module.FakeModel",
-                "datamodule_import_path": "fake.module.FakeGraphDataModule",
+                "datamodule_import_path": "fake.module.FakeDataModule",
             },
         )
     except ValueError as exc:
@@ -34,9 +34,9 @@ def _factory(registry: dict) -> LightningConfigFactory:
     return LightningConfigFactory(registry, SimpleNamespace())
 
 
-@pytest.mark.parametrize("input_kind", ["tabular", "graph"])
+@pytest.mark.parametrize("input_kind", ["tabular", None])
 def test_factory_rejects_an_input_kind_other_than_sequence(input_kind) -> None:
-    """The tabular and graph datamodules are gone; an entry asking for either must fail loudly."""
+    """Sequence is the only datamodule; an entry asking for another, or for none, must fail loudly."""
     factory = _factory({})
     spec = {
         "enabled": True,
@@ -45,9 +45,13 @@ def test_factory_rejects_an_input_kind_other_than_sequence(input_kind) -> None:
         "import_path": "fake.module.FakeModel",
         "datamodule_import_path": "fake.module.Whatever",
     }
+    if input_kind is None:
+        del spec["input_kind"]
 
-    with pytest.raises(ValueError, match=f"Unsupported input_kind '{input_kind}'"):
+    with pytest.raises(ValueError, match=f"Unsupported input_kind {input_kind!r}"):
         factory._build_datamodule(target="target_a", spec=spec, data={})
+    # The predicate must agree with what gets built.
+    assert _factory({"soil_cnn": spec}).has_sequence_input() is False
 
 
 def test_has_sequence_input_finds_an_enabled_sequence_entry() -> None:
@@ -57,15 +61,8 @@ def test_has_sequence_input_finds_an_enabled_sequence_entry() -> None:
     assert factory.sequence_spec()["input_kind"] == "sequence"
 
 
-def test_explicit_input_kind_wins_over_datamodule_type() -> None:
-    """The factory builds on input_kind, so the predicate must agree with what gets built."""
-    factory = _factory({"soil_cnn": {"enabled": True, "input_kind": "tabular", "datamodule_type": "sequence"}})
-
-    assert factory.has_sequence_input() is False
-
-
 class FakeSequenceDataModule:
-    """Mirrors the real sequence datamodule's contract: no temporal_steps, no edge_attr_dim."""
+    """Mirrors the real sequence datamodule's contract."""
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
@@ -107,11 +104,9 @@ def test_factory_builds_a_sequence_datamodule_from_a_supplied_bundle() -> None:
     assert datamodule.sequence_bundle == {"marker": 1}
     assert datamodule.kwargs["batch_size"] == 8
     assert datamodule.did_setup == "fit"
-    assert "spatiotemporal_graph" not in datamodule.kwargs
 
 
-def test_factory_does_not_inject_graph_or_step_shapes_into_a_sequence_model() -> None:
-    """A length-agnostic, graph-free model must never receive temporal_steps or edge_attr_dim."""
+def test_factory_resolves_shapes_and_target_stats_from_the_datamodule() -> None:
     factory = _factory({})
     datamodule = factory._build_datamodule(
         target="target_a", spec=_sequence_spec(), data={"sequence_bundle": {}}
@@ -120,8 +115,6 @@ def test_factory_does_not_inject_graph_or_step_shapes_into_a_sequence_model() ->
 
     assert model.kwargs["static_dim"] == 3
     assert model.kwargs["modality_dims"] == {"s1": 4, "s2": 5}
-    assert "temporal_steps" not in model.kwargs
-    assert "edge_attr_dim" not in model.kwargs
     # Target stats still arrive as plain floats so the checkpoint stays weights_only-loadable.
     assert model.kwargs["target_mean"] == [2.0]
     assert model.kwargs["target_transform"] == "log1p"
@@ -135,7 +128,7 @@ def test_sequence_bundle_requires_a_data_manager_when_none_is_supplied() -> None
 
 
 def test_has_sequence_input_ignores_a_disabled_entry() -> None:
-    factory = _factory({"soil_sequence": {"enabled": False, "input_kind": "sequence"}})
+    factory = _factory({"soil_cnn": {"enabled": False, "input_kind": "sequence"}})
     assert factory.has_sequence_input() is False
     assert factory.sequence_spec() is None
 
@@ -188,9 +181,8 @@ class FakeGridDataModule(FakeSequenceDataModule):
 def test_grid_years_is_injected_only_into_models_that_accept_it() -> None:
     """Two entries share one datamodule; what it can offer is not what each model wants.
 
-    Regression test: the factory used to inject every datamodule attribute unconditionally, so
-    enabling the CNN and the sequence model together crashed the sequence model with an unexpected
-    'grid_years' keyword.
+    Regression test: the factory used to inject every datamodule attribute unconditionally, so a
+    model that does not rasterise crashed with an unexpected 'grid_years' keyword.
     """
     factory = _factory({})
     datamodule = FakeGridDataModule(sequence_bundle={})

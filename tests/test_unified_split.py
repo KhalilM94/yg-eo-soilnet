@@ -376,8 +376,8 @@ def test_a_small_overlap_between_healthy_families_names_the_overlap_not_a_family
     provider.logger = logger
     all_ids = _ids(100)
     eligibility = {
-        "sequence": frozenset(all_ids[:60]),
-        "graph": frozenset(all_ids[40:]),
+        "sklearn": frozenset(all_ids[:60]),
+        "sequence": frozenset(all_ids[40:]),
     }
 
     with pytest.raises(ValueError, match="it is the OVERLAP between them that is small"):

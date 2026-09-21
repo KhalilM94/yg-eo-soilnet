@@ -281,13 +281,13 @@ def test_forward_from_parts_reproduces_forward_exactly(static_tokens, readout) -
 
 
 def test_the_attention_settings_survive_a_weights_only_checkpoint_round_trip(tmp_path: Path) -> None:
-    """Saved by a THIRD save_hyperparameters() call; losing them would rebuild the default fusion."""
+    """Losing them from hparams would rebuild the default fusion on load."""
     module = _module(attention_static_tokens="per_feature", attention_readout="mean", attention_num_layers=2)
     hparams = dict(module.hparams)
     assert hparams["attention_static_tokens"] == "per_feature"
     assert hparams["attention_readout"] == "mean"
     assert hparams["attention_num_layers"] == 2
-    # The two earlier calls still merged in, not replaced.
+    # The residual and shape settings sit beside them rather than being replaced.
     assert hparams["residual_base_columns"] == {"target_a": "lab_b"}
     assert hparams["static_dim"] == 5
 

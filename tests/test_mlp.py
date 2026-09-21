@@ -75,7 +75,7 @@ def test_the_cnn_head_layout_is_reproduced() -> None:
     assert [type(module) for module in head] == [nn.Linear, nn.GELU, nn.Linear]
 
 
-def test_the_sequence_and_graph_head_layout_is_reproduced() -> None:
+def test_the_default_layout_norms_and_drops_only_the_first_blocks() -> None:
     head = build_mlp_stack(10, [64, 32], 1, dropout=0.1)
 
     assert [type(module) for module in head] == [
@@ -115,7 +115,7 @@ def test_dropout_final_makes_every_block_a_full_block() -> None:
 
 
 def test_the_static_encoder_layout_is_reproduced() -> None:
-    """What TabularStaticEncoder and the graph module used to hand-build, projection included."""
+    """What TabularStaticEncoder used to hand-build, projection included."""
     modules = list(
         build_mlp_stack(16, [64], 32, dropout=0.1, norm_final=True, dropout_final=True)
     )

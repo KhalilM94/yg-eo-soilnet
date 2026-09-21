@@ -136,17 +136,17 @@ def test_fixed_values_are_applied_to_every_trial():
 def test_a_when_guard_suppresses_the_parameter_when_it_does_not_match():
     mapping = {
         "params": {
-            "model.temporal_encoder": {"type": "categorical", "choices": ["time_transformer", "time_lstm"]},
-            "model.nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.temporal_encoder": "time_transformer"}},
+            "model.fusion": {"type": "categorical", "choices": ["attention", "gated"]},
+            "model.attention_nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.fusion": "attention"}},
         }
     }
     space = SearchSpace.from_mapping("fake_entry", mapping)
 
-    transformer = space.suggest(optuna.trial.FixedTrial({"model.temporal_encoder": "time_transformer", "model.nhead": 4}))
-    lstm = space.suggest(optuna.trial.FixedTrial({"model.temporal_encoder": "time_lstm"}))
+    attention = space.suggest(optuna.trial.FixedTrial({"model.fusion": "attention", "model.attention_nhead": 4}))
+    gated = space.suggest(optuna.trial.FixedTrial({"model.fusion": "gated"}))
 
-    assert transformer["model.nhead"] == 4
-    assert "model.nhead" not in lstm
+    assert attention["model.attention_nhead"] == 4
+    assert "model.attention_nhead" not in gated
 
 
 def test_a_when_guard_may_name_a_pinned_value():
@@ -204,7 +204,7 @@ def test_a_derive_guard_is_part_of_the_fingerprint():
 
 
 def test_derive_hook_repairs_d_model_to_divide_by_nhead():
-    """TimeAwareTransformerEncoder raises unless d_model % nhead == 0."""
+    """Multi-head attention raises unless d_model % nhead == 0. Bare, the hook targets model.d_model/nhead."""
     mapping = {
         "params": {
             "model.nhead": {"type": "categorical", "choices": [8]},
@@ -231,7 +231,7 @@ def _attention_pair_space(derive) -> SearchSpace:
 
 
 def test_the_divisibility_hook_repairs_whichever_pair_it_is_pointed_at():
-    """The residual attention CNN names its own pair; the sequence transformer keeps the default."""
+    """The CNN's attention fusion names its own pair instead of the default model.d_model/nhead."""
     space = _attention_pair_space(
         [
             {
@@ -528,12 +528,6 @@ def test_editing_the_space_changes_the_fingerprint(overrides):
 def test_the_sampler_and_the_pruner_are_not_part_of_the_fingerprint(overrides):
     """They change HOW the space is searched, not what a recorded value means, so resuming is fine."""
     assert _space(**overrides).fingerprint() == _space().fingerprint()
-
-
-def test_the_shipped_spaces_fingerprint_distinctly():
-    digests = {SearchSpace.from_yaml(SEARCH_SPACES_PATH, entry).fingerprint() for entry in SHIPPED_ENTRIES}
-
-    assert len(digests) == len(SHIPPED_ENTRIES)
 
 
 # --- dims_pyramid targets any list-valued key --------------------------------

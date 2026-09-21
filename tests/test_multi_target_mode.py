@@ -1,7 +1,7 @@
 """MULTI_TARGET_MODE: how several targets become models, in both families.
 
 Before this switch existed the two families sat at opposite hard-coded extremes. Lightning always
-fitted one model with a target_dim-wide head - the sequence and graph builders read the whole of
+fitted one model with a target_dim-wide head - the sequence builder read the whole of
 TARGET_COLUMNS and nothing ever narrowed `y` - while sklearn always fitted one model per target.
 Neither could be told to do the other thing.
 """

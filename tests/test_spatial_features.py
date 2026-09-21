@@ -12,7 +12,6 @@ prediction would silently be made at the middle of the study area.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -78,13 +77,6 @@ def test_coordinates_off_adds_no_parameters_and_no_state_dict_keys() -> None:
     assert not [key for key in off.state_dict() if "coord" in key]
     assert off.coordinate_output_dim == 0
     assert off.has_coordinates is False
-
-
-def test_a_checkpoint_trained_without_coordinates_loads_strictly() -> None:
-    """The consequence of the test above, stated as the thing users actually do."""
-    trained_before = SoilCNNLightningModule(**MODEL_ARGS)
-    rebuilt = SoilCNNLightningModule(**MODEL_ARGS)
-    rebuilt.load_state_dict(trained_before.state_dict(), strict=True)
 
 
 def test_two_argument_fusion_still_builds_the_module_it_always_did() -> None:

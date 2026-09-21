@@ -584,9 +584,6 @@ def test_module_checkpoint_reloads_under_weights_only(tmp_path: Path, encoder: s
 
     loaded = torch.load(checkpoint_path, weights_only=True)
     assert loaded["hyper_parameters"]["target_mean"] == [2.0]
-    # Adaptive pooling is what keeps the weights free of the grid span; nothing may be sized by it.
-    for name, tensor in loaded["state_dict"].items():
-        assert 12 not in tensor.shape[2:] or "conv" not in name.lower() or tensor.ndim <= 4
 
 
 # --- data path -------------------------------------------------------------

@@ -416,31 +416,14 @@ class ChildRunLogger:
         scalar_keys = [
             "static_dim",
             "target_dim",
-            "hidden_dim",
             "static_hidden_dims",
-            "head_hidden_dims",
-            "use_layer_norm",
-            "fusion_input_dim",
-            "temporal_hidden_dim",
-            "edge_attr_dim",
             "learning_rate",
             "temporal_enabled",
-            "temporal_steps",
-            "temporal_lstm_hidden_dim",
-            "temporal_lstm_num_layers",
-            "temporal_lstm_dropout",
-            "temporal_lstm_bidirectional",
-            "temporal_pooling",
-            "spatial_graph_enabled",
         ]
         for key in scalar_keys:
             value = getattr(model, key, None)
             if value is not None:
                 params[f"architecture.{key}"] = value
-
-        graph_blocks = getattr(model, "graph_blocks", None)
-        if graph_blocks is not None:
-            params["architecture.num_graph_layers"] = len(graph_blocks)
 
         for attribute_name, param_name in (("static_encoder", "static_encoder"), ("output_head", "output_head")):
             block = getattr(model, attribute_name, None)
@@ -451,15 +434,6 @@ class ChildRunLogger:
                 params[f"architecture.{param_name}_in_features"] = in_features
                 params[f"architecture.{param_name}_out_features"] = out_features
 
-        temporal_encoders = getattr(model, "temporal_encoders", None)
-        if temporal_encoders is not None:
-            for modality_name, encoder in temporal_encoders.items():
-                prefix = f"architecture.temporal_encoder.{modality_name}"
-                params[f"{prefix}.input_size"] = getattr(encoder, "input_size", None)
-                params[f"{prefix}.hidden_size"] = getattr(encoder, "hidden_size", None)
-                params[f"{prefix}.num_layers"] = getattr(encoder, "num_layers", None)
-                params[f"{prefix}.bidirectional"] = getattr(encoder, "bidirectional", None)
-
         modality_dims = getattr(model, "modality_dims", None)
         if isinstance(modality_dims, dict):
             for modality_name, dim in modality_dims.items():
@@ -468,7 +442,7 @@ class ChildRunLogger:
         if bundle is not None:
             datamodule = getattr(bundle, "datamodule", None)
             if datamodule is not None:
-                for key in ("static_dim", "target_dim", "temporal_steps", "edge_attr_dim", "feature_dim"):
+                for key in ("static_dim", "target_dim"):
                     value = getattr(datamodule, key, None)
                     if value is not None:
                         params[f"architecture.datamodule.{key}"] = value

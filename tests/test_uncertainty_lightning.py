@@ -94,7 +94,7 @@ def _config(**overrides) -> SimpleNamespace:
 
 def _bundle(datamodule) -> LightningModelBundle:
     return LightningModelBundle(
-        name="soil_tabular",
+        name="soil_cnn",
         target="target_a",
         model=SimpleNamespace(),
         datamodule=datamodule,
@@ -113,7 +113,7 @@ def _run(monkeypatch, config, target_names=("target_a",)):
 
     def bundle_builder(seed):
         built.append(seed)
-        return {"soil_tabular": _bundle(datamodule)}
+        return {"soil_cnn": _bundle(datamodule)}
 
     fake_trainers = [
         FakeTrainer(offset=float(index + 1), n_targets=len(target_names)) for index in range(10)
@@ -150,7 +150,7 @@ def _run(monkeypatch, config, target_names=("target_a",)):
     trainer.train(
         target="__".join(target_names),
         data={},
-        model_bundles={"soil_tabular": bundle},
+        model_bundles={"soil_cnn": bundle},
         bundle_builder=bundle_builder,
     )
 
@@ -167,12 +167,12 @@ def test_each_member_gets_its_own_child_run_tagged_as_a_member(monkeypatch):
     members = [(name, tags) for name, tags in run_names if tags.get("run_kind") == "ensemble_member"]
     assert len(members) == 3
     assert [name for name, _ in members] == [
-        "target_a_soil_tabular_member0",
-        "target_a_soil_tabular_member1",
-        "target_a_soil_tabular_member2",
+        "target_a_soil_cnn_member0",
+        "target_a_soil_cnn_member1",
+        "target_a_soil_cnn_member2",
     ]
     # And one model run wrapping them.
-    assert ("target_a_soil_tabular", {}) in run_names
+    assert ("target_a_soil_cnn", {}) in run_names
 
 
 def test_the_factory_is_asked_for_a_fresh_bundle_at_each_strided_seed(monkeypatch):
@@ -191,7 +191,7 @@ def test_uncertainty_disabled_takes_the_single_fit_path(monkeypatch):
 
 def test_a_skipped_entry_takes_the_single_fit_path(monkeypatch):
     _call, run_names, built, _trainers, _lg = _run(
-        monkeypatch, _config(UNCERTAINTY_SKIP_MODELS=["soil_tabular"])
+        monkeypatch, _config(UNCERTAINTY_SKIP_MODELS=["soil_cnn"])
     )
     assert built == []
     assert not any(tags.get("run_kind") == "ensemble_member" for _name, tags in run_names)

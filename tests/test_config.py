@@ -539,13 +539,13 @@ def test_every_neighbouring_file_becomes_an_entry(base_config_paths: dict) -> No
         {
             "defaults.yml": "defaults:\n  modeltype: dl\n",
             "soil_cnn.yml": "soil_cnn:\n  enabled: true\n",
-            "soil_graph.yml": "soil_graph:\n  enabled: false\n",
+            "soil_cnn_small.yml": "soil_cnn_small:\n  enabled: false\n",
         },
     )
 
     registry = Config(**paths).LIGHTNING_MODEL_REGISTRY
 
-    assert set(registry) == {"soil_cnn", "soil_graph"}
+    assert set(registry) == {"soil_cnn", "soil_cnn_small"}
     assert all(entry["modeltype"] == "dl" for entry in registry.values())
 
 

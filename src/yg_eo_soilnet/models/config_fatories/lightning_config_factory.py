@@ -100,9 +100,9 @@ class LightningConfigFactory:
         return bundles
 
     @staticmethod
-    def _input_kind(spec: Mapping[str, Any]) -> str:
-        """The datamodule shape an entry declares. An explicit `input_kind` wins."""
-        return spec.get("input_kind", spec.get("datamodule_type", "tabular"))
+    def _input_kind(spec: Mapping[str, Any]) -> str | None:
+        """The datamodule shape an entry declares. Only 'sequence' is buildable; None if undeclared."""
+        return spec.get("input_kind")
 
     def sequence_spec(self) -> dict[str, Any] | None:
         """The enabled registry entry that needs a sequence bundle, if any."""
@@ -258,8 +258,6 @@ class LightningConfigFactory:
             "static_dim": getattr(datamodule, "static_dim", None),
             "target_dim": getattr(datamodule, "target_dim", None),
             "modality_dims": getattr(datamodule, "modality_dims", None),
-            "temporal_steps": getattr(datamodule, "temporal_steps", None),
-            "edge_attr_dim": getattr(datamodule, "edge_attr_dim", None),
             # Calendar-grid span, inferred from the data by the sequence datamodule. Only the CNN
             # rasterises, so only it declares this argument.
             "grid_years": getattr(datamodule, "grid_years", None),

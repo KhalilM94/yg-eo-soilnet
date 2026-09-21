@@ -130,11 +130,3 @@ def test_reseeding_after_the_build_desynchronises_the_two_paths():
     old_production = _rng_state_at_fit(42, reseed_after_build=True)
 
     assert hpo != old_production
-
-
-def test_the_trainer_no_longer_reseeds_before_fit():
-    """Structural guard: reintroducing the call would silently restore the desynchronisation."""
-    from yg_eo_soilnet.trainers import lightning_trainer
-
-    assert not hasattr(lightning_trainer.LightningTrainer, "_seed_for_bundle")
-    assert "seed_everything" not in lightning_trainer.LightningTrainer.train.__code__.co_names

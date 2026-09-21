@@ -7,8 +7,7 @@ no torch, no Lightning, no bundle or graph concept - so that any datamodule can 
 and any model can consume the integer codes it produces. The torch side lives in
 ``models.lightningmodules.tabular_encoders``.
 
-Three properties distinguish this from ``frame_cleaning.encode_categorical_features``, which it
-replaces on the sequence path and which survives only for the disabled graph path:
+Three properties distinguish this from the ordinal ``pd.factorize`` encoding it replaced:
 
 * **The vocabulary is fitted, not derived.** ``pd.factorize`` re-derives its mapping from whatever
   frame it is handed, so the same category takes a different integer in training and in inference and

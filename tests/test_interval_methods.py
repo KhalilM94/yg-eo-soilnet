@@ -10,7 +10,6 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from scipy import stats
 
 from yg_eo_soilnet.uncertainty.conformal import ConformalCalibrator
 from yg_eo_soilnet.uncertainty.intervals import (

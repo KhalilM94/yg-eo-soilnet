@@ -167,37 +167,20 @@ def test_log_lightning_child_run_logs_architecture_dimensions(monkeypatch, tmp_p
     monkeypatch.setattr(mlflow.pytorch, "save_model", MagicMock())
     monkeypatch.setattr(logger, "_log_plots", MagicMock())
 
-    model = SimpleNamespace(
-        static_dim=12,
+    from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
+
+    # No modalities: the CNN's static branch alone, so the head reads the 4-wide static encoding.
+    model = SoilCNNLightningModule(
+        static_dim=3,
         target_dim=1,
-        hidden_dim=64,
-        temporal_hidden_dim=64,
-        edge_attr_dim=4,
+        target_names=["target_a"],
+        static_hidden_dims=[4],
+        head_hidden_dims=[5],
         learning_rate=0.0015,
-        temporal_enabled=True,
-        temporal_steps=8,
-        temporal_lstm_hidden_dim=32,
-        temporal_lstm_num_layers=2,
-        temporal_lstm_dropout=0.0,
-        temporal_lstm_bidirectional=False,
-        temporal_pooling="last",
-        spatial_graph_enabled=True,
-        graph_blocks=[object(), object(), object(), object()],
-        static_encoder=SimpleNamespace(in_features=12, out_features=64),
-        output_head=SimpleNamespace(in_features=128, out_features=1),
-        temporal_encoders={"modis": SimpleNamespace(input_size=5, hidden_size=32, num_layers=2, bidirectional=False)},
-        modality_dims={"modis": 5},
     )
 
     bundle = SimpleNamespace(
-        datamodule=SimpleNamespace(
-            static_dim=12,
-            target_dim=1,
-            temporal_steps=8,
-            edge_attr_dim=4,
-            feature_dim=76,
-            modality_dims={"modis": 5},
-        ),
+        datamodule=SimpleNamespace(static_dim=3, target_dim=1, modality_dims={"s2": 2}),
         trainer_kwargs={"max_epochs": 100, "accelerator": "cuda", "devices": 1},
         registry_entry={"modeltype": "dl"},
     )
@@ -228,10 +211,21 @@ def test_log_lightning_child_run_logs_architecture_dimensions(monkeypatch, tmp_p
 
     architecture_calls = [call for call in log_params.call_args_list if any(key.startswith("architecture.") for key in call.args[0])]
     assert architecture_calls, "Expected architecture dimensions to be logged"
-    logged_architecture = architecture_calls[0].args[0]
-    assert logged_architecture["architecture.num_graph_layers"] == 4
-    assert logged_architecture["architecture.output_head_in_features"] == 128
-    assert logged_architecture["architecture.temporal_encoder.modis.hidden_size"] == 32
+    assert architecture_calls[0].args[0] == {
+        "architecture.static_dim": 3,
+        "architecture.target_dim": 1,
+        "architecture.static_hidden_dims": [4],
+        "architecture.learning_rate": 0.0015,
+        "architecture.temporal_enabled": False,
+        "architecture.output_head_in_features": 4,
+        "architecture.output_head_out_features": 1,
+        "architecture.datamodule.static_dim": 3,
+        "architecture.datamodule.target_dim": 1,
+        "architecture.datamodule.modality_dim.s2": 2,
+        "architecture.training.max_epochs": 100,
+        "architecture.training.accelerator": "cuda",
+        "architecture.training.devices": 1,
+    }
 
 
 def test_log_lightning_child_run_skips_pred_obs_for_multi_output(monkeypatch) -> None:
@@ -388,7 +382,7 @@ def _fake_pred_obs_panel(eval_df, *, target_name=None):
 def test_log_pred_obs_artifact_separates_targets_by_directory(monkeypatch, tmp_path) -> None:
     """Two targets in one run must not overwrite each other - but they separate by DIRECTORY now.
 
-    They used to separate by filename (`..._target_a_soil_graph.png`), which kept them apart within
+    They used to separate by filename (`..._target_a_soil_cnn.png`), which kept them apart within
     a run at the cost of giving every run a different artifact path, so MLflow's compare view found
     nothing in common. Nesting under `plots/<target>/` keeps both properties.
     """
@@ -406,10 +400,10 @@ def test_log_pred_obs_artifact_separates_targets_by_directory(monkeypatch, tmp_p
     eval_b = pd.DataFrame({"target_b": [3.0, 4.0], "prediction": [3.1, 3.9]})
 
     assert logger._log_pred_obs_artifact(
-        eval_a, target="target_a", model_name="soil_graph", artifact_path="plots/target_a"
+        eval_a, target="target_a", model_name="soil_cnn", artifact_path="plots/target_a"
     )
     assert logger._log_pred_obs_artifact(
-        eval_b, target="target_b", model_name="soil_graph", artifact_path="plots/target_b"
+        eval_b, target="target_b", model_name="soil_cnn", artifact_path="plots/target_b"
     )
 
     assert len(logged) == 2

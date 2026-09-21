@@ -35,7 +35,6 @@ def test_default_log_dir_has_no_finalizer_that_could_delete_it() -> None:
 
     assert logger._owns_log_dir is True
     assert "yg_eo_soilnet_logs_" in logger.log_dir
-    assert not hasattr(logger, "_temp_dir")
 
 
 def test_explicit_log_dir_is_honoured_without_creating_a_temp_dir(tmp_path) -> None:

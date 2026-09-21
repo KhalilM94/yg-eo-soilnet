@@ -1,13 +1,12 @@
 """DataFrame cleaning shared by every datamodule builder.
 
-These helpers are deliberately free of any graph or sequence concept: they repair and filter raw
-CSV frames and nothing else, so the graph path and the sequence path clean their inputs the same
-way instead of drifting apart.
+These helpers are deliberately free of any sequence concept: they repair and filter raw CSV frames
+and nothing else, so any builder cleans its inputs the same way.
 """
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Tuple
+from typing import Any, Iterable
 
 import numpy as np
 import pandas as pd
@@ -178,50 +177,6 @@ def worst_non_finite_columns(
             counts.append((column, lost))
     counts.sort(key=lambda item: item[1], reverse=True)
     return counts[:limit]
-
-
-def encode_categorical_features(
-    frame: pd.DataFrame,
-    columns: Iterable[str],
-    *,
-    logger: Any,
-) -> Tuple[pd.DataFrame, list[str]]:
-    """Ordinal-encode non-numeric static features so every model sees them.
-
-    LEGACY - kept only for the graph path. New code should use
-    :mod:`yg_eo_soilnet.datamodules.categorical`, which fits a real vocabulary on the training split,
-    reserves an index for unknown and missing, and produces embedding lookups rather than magnitudes.
-
-    Without this the numeric-dtype filter silently dropped every categorical covariate, giving the
-    network fewer predictors than the sklearn path. Codes are assigned over the whole column, so
-    category identity is global; the values are standardized train-only downstream by the
-    datamodule, so this is a label mapping rather than a fitted statistic.
-    """
-    columns = [column for column in columns if column in frame.columns]
-    encoded = frame.copy()
-    feature_columns: list[str] = []
-    encoded_report: dict[str, int] = {}
-
-    for column in columns:
-        if pd.api.types.is_numeric_dtype(encoded[column]):
-            feature_columns.append(column)
-            continue
-        codes, uniques = pd.factorize(encoded[column], use_na_sentinel=True)
-        if len(uniques) == 0:
-            logger.warning(f"Static feature '{column}' has no usable categories; dropping it")
-            continue
-        # factorize marks missing values as -1; NaN lets drop_non_finite_rows handle them
-        # consistently with every other feature instead of inventing a category.
-        encoded[column] = pd.Series(codes, index=encoded.index, dtype="float64").replace(-1.0, np.nan)
-        feature_columns.append(column)
-        encoded_report[column] = int(len(uniques))
-
-    if encoded_report:
-        logger.info(
-            "Ordinal-encoded static categorical feature(s): "
-            + ", ".join(f"{name} ({count} categories)" for name, count in encoded_report.items())
-        )
-    return encoded, feature_columns
 
 
 def sanitize_numeric_columns(
