@@ -1,11 +1,8 @@
-"""The fitted ensemble, as one estimator that behaves like the single model it replaces.
+"""The fitted :term:`ensemble`, presented as one model that behaves like a single one.
 
-The design constraint that shapes this whole class: ``predict`` must keep returning a plain array of
-means, in exactly the shape one member returns. Three separate things downstream depend on it -
-``infer_signature`` when the model is logged, ``mlflow.models.evaluate`` when the sklearn family is
-scored, and champion promotion when ``rmse_test`` is compared across versions. Returning a wide
-frame of pred/std/lower/upper here would have broken all three, and none of them would have failed
-loudly. The uncertainty is reached through the extra methods instead.
+Its ``predict`` returns plain predictions, exactly as one member would, because everything
+downstream - the saved model's signature, the scoring, the results table - reads it that way. The
+uncertainty is asked for separately.
 """
 
 from __future__ import annotations
@@ -21,13 +18,22 @@ from yg_eo_soilnet.uncertainty.ensemble import EnsemblePrediction, aggregate
 
 
 class EnsembleRegressor(BaseEstimator, RegressorMixin):
-    """N fitted pipelines and their conformal calibrators, presented as one regressor.
+    """Several fitted models and their interval calibrators, behaving as one model.
 
-    Already fitted on construction: the members are trained by the caller, which is what lets each
-    one open its own MLflow child run and be seeded and resampled independently. ``fit`` therefore
-    does nothing but return self, so that a stray ``clone().fit()`` somewhere in sklearn's machinery
-    cannot silently discard the ensemble and leave one untrained estimator behind.
-    """
+    Already trained when it is built: the members are trained by the trainer, which is what lets each
+    one have its own sub-run and its own seed. :meth:`fit` therefore does nothing.
+
+    Parameters
+    ----------
+    members : sequence
+        The fitted models.
+    target_names : sequence of str
+        The targets they predict.
+    member_seeds : sequence of int, optional
+        The seed each member was trained at.
+    bootstrapped : bool, default False
+        Whether the members were trained on resampled rows.
+        """
 
     def __init__(
         self,
@@ -37,6 +43,7 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
         member_seeds: Optional[Sequence[int]] = None,
         bootstrapped: bool = False,
     ):
+        """Hold the fitted members and record how they were made."""
         if not len(members):
             raise ValueError("An EnsembleRegressor needs at least one fitted member")
         self.members = list(members)
@@ -48,16 +55,11 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
     # --- the single-model contract -----------------------------------------
 
     def fit(self, X, y=None):  # noqa: N803 - sklearn's argument name
-        """No-op: the members arrive fitted. Present so the estimator API is complete."""
+        """Does nothing: the members arrive already trained. Present so this looks like any model."""
         return self
 
     def predict(self, X):  # noqa: N803 - sklearn's argument name
-        """The ensemble mean, in the same shape a single member returns.
-
-        1-D for a single target and ``(n_rows, n_targets)`` for a group, matching what the wrapped
-        pipeline would have returned on its own. Every existing reader of this model's output -
-        the MLflow signature, the evaluator, the eval frame builder - sees no difference.
-        """
+        """The ensemble's prediction - the members' average - shaped as one member's would be."""
         mean = self.predict_uncertainty(X).mean
         return mean.reshape(-1) if len(self.target_names) <= 1 else mean
 
@@ -68,21 +70,22 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
         return [np.asarray(member.predict(X)) for member in self.members]
 
     def predict_uncertainty(self, X) -> EnsemblePrediction:  # noqa: N803
-        """Mean plus the epistemic/aleatoric decomposition, always ``(n_rows, n_targets)``.
+        """The average and how much the members disagree.
 
-        No aleatoric component here: a sklearn regressor predicts a point, not a distribution, so
-        the only uncertainty an ensemble of them can measure is the members' disagreement. The
-        conformal calibrator is what turns that into an interval that nevertheless covers - see
-        yg_eo_soilnet.uncertainty.conformal.
-        """
+        No noise component: a scikit-learn model predicts a value, not a distribution, so the only
+        uncertainty an ensemble of them can measure is their disagreement.
+
+        Returns
+        -------
+        EnsemblePrediction
+                """
         return aggregate(self.predict_members(X))
 
     def predict_frame(self, X) -> pd.DataFrame:  # noqa: N803
-        """The wide output: mean, sigma and interval per target, as named columns.
+        """The wide form: prediction, spread and interval per target, as named columns.
 
-        This is what serving returns when asked for uncertainty, and it is deliberately NOT what
-        ``predict`` returns.
-        """
+        What serving returns when asked for uncertainty.
+                """
         prediction = self.predict_uncertainty(X)
         frame = pd.DataFrame(index=getattr(X, "index", None))
 
@@ -104,7 +107,7 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
     # --- provenance ---------------------------------------------------------
 
     def describe(self) -> dict[str, Any]:
-        """Log-friendly provenance; every value is an MLflow-loggable scalar."""
+        """The ensemble's settings as plain values, to record with the run."""
         payload: dict[str, Any] = {
             "uncertainty_n_members": len(self.members),
             "uncertainty_bootstrapped": self.bootstrapped,

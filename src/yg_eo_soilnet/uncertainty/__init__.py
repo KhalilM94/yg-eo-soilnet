@@ -1,18 +1,17 @@
-"""Predictive uncertainty for both training families.
+"""Give every prediction a "plus or minus", and a range it should fall in.
 
-Every model in this project emits a point estimate. This package turns an ensemble of them into a
-mean, a standard deviation split into its epistemic and aleatoric parts, and a conformally
-calibrated interval - one contract, whichever framework produced the members.
+Switched on with ``uncertainty.enabled``. Each model is then trained several times from different
+seeds - an :term:`ensemble` - and what the members disagree about becomes the uncertainty. A model
+with a :term:`variance head` also predicts how noisy each point is, and the two are kept apart:
+disagreement between members shrinks as more data is collected (:term:`epistemic uncertainty`),
+noise in the measurement does not (:term:`aleatoric uncertainty`).
 
-The entry points the logger and the trainers use:
+The spread is then turned into a :term:`prediction interval` - the range a measurement should fall
+in, so often. ``conformal`` calibration measures how far the predictions actually fall from the
+measurements on held-back points and scales the intervals to match, which is what makes the promised
+coverage mean something.
 
-* :func:`uncertainty_enabled_for` - the switch, checked before any of the work below is set up;
-* :func:`attach_uncertainty_columns` - write a group's predictions and intervals onto an eval frame;
-* :func:`log_uncertainty_artifacts` - the ``uncertainty/`` artifacts and the run-summary block.
-
-Unlike ``explain``, this package is safe to import at module scope: it depends on numpy, pandas,
-scipy and matplotlib, all of which are already imported by the training path. The switch exists
-because the members cost N training runs, not because the import costs anything.
+The same for both model families, so an interval means the same thing whichever model produced it.
 """
 
 from __future__ import annotations
@@ -73,12 +72,11 @@ __all__ = [
 
 
 def uncertainty_enabled_for(config: Any, model_name: str) -> bool:
-    """Whether this registry entry should be trained as an ensemble.
+    """Whether this model should be trained as an :term:`ensemble`.
 
-    Same allowlist-beats-denylist rule ``ChildRunLogger._shap_gate`` applies, and for the
-    same reason: the cost of uncertainty is per model, not per run, so naming an entry explicitly
-    has to be able to override a blanket exclusion.
-    """
+    ``uncertainty.models`` names the models to do it for; ``uncertainty.exclude_models`` names ones to
+    leave out. Naming a model explicitly beats a blanket exclusion, since the cost is per model.
+        """
     if not bool(getattr(config, "UNCERTAINTY_ENABLED", False)):
         return False
 
@@ -98,12 +96,28 @@ def fit_calibrators(
     alpha: float = 0.05,
     logger: Any = None,
 ) -> dict[str, ConformalCalibrator]:
-    """One calibrator per target, fitted on the held-out calibration split.
+    """Fit one :term:`conformal` calibrator per target, on the held-back points.
 
-    Per target rather than pooled: the multiplier that makes a pH interval cover is not the one that
-    makes a g/kg interval cover, and a single q fitted across both would be wrong for each. Same
-    rule ``regression_metrics`` follows for the point metrics.
-    """
+    One per target, never pooled: the amount by which a pH interval has to be widened is not the amount
+    a g/kg interval needs.
+
+    Parameters
+    ----------
+    prediction : EnsemblePrediction
+        The ensemble's predictions for the held-back points.
+    y_calib : pandas.DataFrame
+        Their measured values.
+    target_names : sequence of str
+        The targets, in the order the predictions hold them.
+    alpha : float, default 0.05
+        The share of points allowed to fall outside the interval; 0.05 promises 95% coverage.
+    logger : logging.Logger, optional
+        Where a target that could not be calibrated is reported.
+
+    Returns
+    -------
+    dict of str to :class:`~yg_eo_soilnet.uncertainty.conformal.ConformalCalibrator`
+        """
     calibrators: dict[str, ConformalCalibrator] = {}
     for index, target_name in enumerate(target_names):
         observed = (
@@ -127,15 +141,11 @@ def attach_uncertainty_columns(
     target_names: Sequence[str],
     calibrators: Optional[Mapping[str, ConformalCalibrator]] = None,
 ) -> pd.DataFrame:
-    """Write the sigma and interval columns onto an evaluation frame, in place.
+    """Add the spread and interval columns to a results table, in place.
 
-    ``prediction`` carries ``(n_rows, n_targets)`` arrays whose column order matches
-    ``target_names``. The frame keeps whatever ``prediction`` / ``prediction_<t>`` columns it
-    already has - those are written by the family's own frame builder and are the ensemble mean.
-
-    The naming follows :mod:`yg_eo_soilnet.uncertainty.columns`: unsuffixed for a lone target,
-    suffixed for one of several, matching the prediction columns exactly so one reader handles both.
-    """
+    Writes ``prediction_std``, ``prediction_lower`` and ``prediction_upper`` - suffixed with the target
+    name when there are several. The predictions already in the table are left alone.
+        """
     multi_target = len(target_names) > 1
     calibrators = calibrators or {}
 
@@ -164,12 +174,13 @@ def log_uncertainty_artifacts(
     calibrator: Optional[ConformalCalibrator] = None,
     artifact_path: Optional[str] = None,
 ) -> dict:
-    """Write the ``uncertainty/`` diagnostics for one target and describe what was written.
+    """Write one target's uncertainty figures and summary, and say what was written.
 
-    Returns the dict embedded in ``run_summary.json`` under ``"uncertainty"``, in the same shape
-    ``log_shap_artifacts`` returns for ``"explain"``. An empty dict when the frame carries no sigma,
-    so a caller does not have to check first.
-    """
+    Returns
+    -------
+    dict
+        What went into the run summary; empty when the table carries no uncertainty.
+        """
     from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error
 
     sigma = sigma_column(frame, target_name)

@@ -1,7 +1,7 @@
-"""The shape a SHAP explanation takes once both backends have finished with it.
+"""What an explanation looks like once either family has finished with it.
 
-Both the sklearn and the Lightning explainer return a list of these, one per target, so everything
-downstream - plots, the parquet sidecar, the run summary - is written once rather than per backend.
+Both explainers return a list of these, one per target, so the figures, the table and the summary
+are written once rather than once per family.
 """
 
 from __future__ import annotations
@@ -22,7 +22,27 @@ STANDARDIZED_LOG1P = "standardized_log1p"
 
 @dataclass
 class ShapResult:
-    """Per-sample SHAP values for one target, already folded down to one column per feature."""
+    """One target's :term:`SHAP` contributions: one number per input per point.
+
+    Attributes
+    ----------
+    target : str
+        Which target this explains.
+    values : numpy.ndarray of shape (n_points, n_features)
+        Each input's contribution to each point's prediction. They add up to that prediction minus the
+        average prediction.
+    feature_names : list of str
+        The inputs, in the order of the columns.
+    blocks : list of str
+        Which kind of input each column is - covariate, category, time series, and so on - so the
+        contributions can be reported by group.
+    base_value : float
+        The average prediction the contributions are measured from.
+    explainer : str
+        Which method produced them.
+    feature_values : numpy.ndarray, optional
+        The inputs' own values, which colour the figures.
+        """
 
     values: np.ndarray  # (n_samples, n_features)
     data: np.ndarray  # (n_samples, n_features), the beeswarm colour values; NaN where meaningless
@@ -39,6 +59,7 @@ class ShapResult:
     explainer: str = "unknown"
 
     def __post_init__(self) -> None:
+        """Check the names, blocks and values describe the same inputs."""
         self.values = np.asarray(self.values, dtype=np.float64)
         self.data = np.asarray(self.data, dtype=np.float64)
         if self.values.shape != self.data.shape:
@@ -58,28 +79,29 @@ class ShapResult:
 
     @property
     def n_samples(self) -> int:
+        """How many points were explained."""
         return int(self.values.shape[0])
 
     @property
     def n_features(self) -> int:
+        """How many inputs each point was explained by."""
         return int(self.values.shape[1])
 
     def mean_abs(self) -> np.ndarray:
-        """Mean |SHAP| per feature - the height of each bar in the bar plot."""
+        """How much each input matters on average - the height of each bar."""
         return np.abs(self.values).mean(axis=0)
 
     def ranking(self) -> list[int]:
-        """Feature indices ordered by mean |SHAP|, most important first."""
+        """The inputs ordered by how much they matter, most first."""
         return list(np.argsort(-self.mean_abs()))
 
     def block_mean_abs(self) -> dict[str, float]:
-        """Mean |summed contribution| per block.
+        """How much each *group* of inputs matters on average.
 
-        Summed WITHIN a block per sample before taking the absolute value, not the sum of the
-        per-feature mean |SHAP|. The distinction matters: two features in one block that cancel each
-        other out on the same sample contribute nothing jointly, and the block view is meant to
-        answer "how much does this branch move the prediction", which is the joint quantity.
-        """
+        The contributions are added up within a group for each point before their size is taken, so two
+        inputs in one group that cancel each other out count as the small contribution they jointly make,
+        not as two large ones.
+                """
         totals: dict[str, float] = {}
         for block in dict.fromkeys(self.blocks):
             columns = [index for index, name in enumerate(self.blocks) if name == block]
@@ -87,12 +109,11 @@ class ShapResult:
         return totals
 
     def to_frame(self) -> pd.DataFrame:
-        """The COMPLETE per-sample matrix, uncapped, for the parquet sidecar.
+        """The complete table of contributions, one row per point per input.
 
-        Long rather than wide because the feature count runs into the hundreds once every band of
-        every modality has its own row, and a long frame keeps the block and colour value attached
-        to each number instead of needing three parallel wide tables.
-        """
+        Long rather than wide: with every band of every data source having its own row, there are hundreds
+        of inputs.
+                """
         n_samples, n_features = self.values.shape
         return pd.DataFrame(
             {
@@ -107,7 +128,7 @@ class ShapResult:
         )
 
     def summary(self, top_n: int | None = None) -> dict:
-        """Ranking plus provenance, for the JSON sidecar and the run summary."""
+        """The ranking and where it came from, for the run summary."""
         mean_abs = self.mean_abs()
         order = self.ranking()
         if top_n is not None:

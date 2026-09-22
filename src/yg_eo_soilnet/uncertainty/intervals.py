@@ -1,25 +1,17 @@
-"""How a predictive standard deviation becomes a lower and an upper bound.
+"""Turn a predicted spread into a lower and an upper bound.
 
-Three ways, chosen by ``uncertainty.interval.method``, and they are not interchangeable:
+Three ways, set by ``uncertainty.interval.method``, and they do not mean the same thing:
 
 ``conformal``
-    ``mean +- q * sigma`` with ``q`` fitted on held-out residuals. The only one whose coverage is
-    guaranteed rather than assumed, and the only one whose intervals mean the same thing across the
-    two training families - which is why it is the default. See :mod:`yg_eo_soilnet.uncertainty.conformal`.
-
+    The spread times a factor measured on held-back points, so the promised share of measurements
+    really does fall inside. The only one whose coverage is checked rather than assumed, and the
+    only one that means the same thing across both model families. The default.
 ``gaussian``
-    ``mean +- z(1 - alpha/2) * sigma``. Looks like a confidence interval and is one only if the
-    predictive distribution really is Normal AND sigma is on the right scale. On a run where the
-    ensemble spread understates the error - the Ridge case, where the fitted conformal q was 50.3
-    against a Gaussian 1.96 - this covers a small fraction of what it claims.
-
+    The spread times the factor a bell curve implies for the promised coverage. Right only if the
+    errors really are bell-shaped and the spread is their true size.
 ``sigma``
-    ``mean +- k * sigma``. Makes no claim beyond "this is k standard deviations", which is the
-    honest thing to plot when you want to see the model's own spread rather than a calibrated band.
-    Its nominal coverage is the Gaussian implication of k (0.683 at k=1), not 1 - alpha.
-
-All three present the interface ``attach_uncertainty_columns`` already consumes - ``intervals``,
-``to_dict`` and ``nominal_coverage`` - so choosing between them changes nothing downstream.
+    The spread times a number you choose. It makes no coverage claim at all: a one-sigma band claims
+    about 68%, not 95%, and the scores grade it against that.
 """
 
 from __future__ import annotations
@@ -42,12 +34,12 @@ METHODS_NEEDING_CALIBRATION = (CONFORMAL,)
 
 
 def needs_calibration_set(method: str) -> bool:
-    """Whether this method has to be fitted on held-out data before it can produce an interval."""
+    """Whether this method has to be fitted on held-back points before it can be used."""
     return normalize_method(method) in METHODS_NEEDING_CALIBRATION
 
 
 def normalize_method(method: Any) -> str:
-    """Resolve a configured name, including the legacy ``split_conformal`` spelling."""
+    """Resolve a configured method name, including the older ``split_conformal`` spelling."""
     name = str(method or CONFORMAL).strip().lower()
     if name == "split_conformal":
         return CONFORMAL
@@ -61,28 +53,39 @@ def normalize_method(method: Any) -> str:
 
 @dataclass(frozen=True)
 class GaussianInterval:
-    """``mean +- z(1 - alpha/2) * sigma``: a normal-theory band, calibrated by nothing.
+    """The spread times what a bell curve implies for the promised coverage.
 
-    Frozen and made of plain floats for the same reason ConformalCalibrator is: it is pickled into
-    the logged model.
-    """
+    Calibrated by nothing: right only if the errors really are bell-shaped and the spread is their true
+    size.
+
+    Attributes
+    ----------
+    alpha : float
+        The share of points allowed to fall outside.
+    target : str
+        Which target it belongs to.
+        """
 
     alpha: float = 0.05
 
     @property
     def z(self) -> float:
+        """How many standard deviations wide the band is, for the promised coverage."""
         return float(stats.norm.ppf(1.0 - float(self.alpha) / 2.0))
 
     @property
     def nominal_coverage(self) -> float:
+        """The share of measurements this interval claims to contain."""
         return 1.0 - float(self.alpha)
 
     def intervals(self, mean: Any, sigma: Any) -> tuple[np.ndarray, np.ndarray]:
+        """The lower and upper bounds for these predictions."""
         mean_array = np.asarray(mean, dtype=float)
         half_width = self.z * np.maximum(np.asarray(sigma, dtype=float), 0.0)
         return mean_array - half_width, mean_array + half_width
 
     def to_dict(self) -> dict[str, Any]:
+        """The interval settings as plain values, to record with the run."""
         return {
             "interval_method": GAUSSIAN,
             "interval_alpha": float(self.alpha),
@@ -92,26 +95,34 @@ class GaussianInterval:
 
 @dataclass(frozen=True)
 class SigmaInterval:
-    """``mean +- k * sigma``: the model's own spread, with no coverage claim attached.
+    """The spread times a number you choose, with no coverage promise attached.
 
-    ``nominal_coverage`` is what k would mean under a Normal - 0.683 at k=1, 0.954 at k=2 - because
-    the metrics need SOMETHING to compare picp against, and 1 - alpha is emphatically not it. Read
-    it as "what this band would cover if sigma were right", which is exactly the question a
-    coverage_error against it answers.
-    """
+    ``nominal_coverage`` is what that number would mean if the errors were bell-shaped - about 68% at
+    one, 95% at two - because the scores need something to compare the real coverage against.
+
+    Attributes
+    ----------
+    k : float
+        What the spread is multiplied by.
+    target : str
+        Which target it belongs to.
+        """
 
     k: float = 1.0
 
     @property
     def nominal_coverage(self) -> float:
+        """The share this band would contain if the errors were bell-shaped."""
         return float(2.0 * stats.norm.cdf(float(self.k)) - 1.0)
 
     def intervals(self, mean: Any, sigma: Any) -> tuple[np.ndarray, np.ndarray]:
+        """The lower and upper bounds for these predictions."""
         mean_array = np.asarray(mean, dtype=float)
         half_width = float(self.k) * np.maximum(np.asarray(sigma, dtype=float), 0.0)
         return mean_array - half_width, mean_array + half_width
 
     def to_dict(self) -> dict[str, Any]:
+        """The interval settings as plain values, to record with the run."""
         return {
             "interval_method": SIGMA,
             "interval_k": float(self.k),
@@ -120,17 +131,17 @@ class SigmaInterval:
 
 
 def effective_alpha(method: Any, alpha: float = 0.05, k: float = 1.0) -> float:
-    """The miscoverage the configured interval actually implies.
+    """The share of points the configured interval really expects to fall outside.
 
-    ``alpha`` for conformal and gaussian; ``1 - (2*Phi(k) - 1)`` for sigma. The metrics take this
-    rather than the configured alpha, so a ±1σ band is graded against the ~0.683 it claims instead
-    of against 0.95 - which would report a perfectly good band as under-covering by 0.27.
-    """
+    ``alpha`` for the calibrated and bell-curve methods; for a plain spread band, whatever that
+    multiple implies. The scores use this, so a one-sigma band is graded against the 68% it claims
+    rather than against 95%.
+        """
     return 1.0 - SigmaInterval(k).nominal_coverage if normalize_method(method) == SIGMA else float(alpha)
 
 
 def describe(estimator: Any) -> str:
-    """A short label for the plot, so a picture says which claim its bars are making."""
+    """A short label for a figure, so it says which claim its bars are making."""
     if estimator is None:
         return ""
     if isinstance(estimator, SigmaInterval):
@@ -151,11 +162,14 @@ def build_interval_estimators(
     y_calib: Any = None,
     logger: Any = None,
 ) -> Mapping[str, Any]:
-    """One interval estimator per target, for whichever method the run asked for.
+    """Build one interval estimator per target, for the configured method.
 
-    ``prediction`` and ``y_calib`` are read only by the conformal branch - the other methods need no
-    data at all, which is what lets the sklearn family keep its val split under them.
-    """
+    ``prediction`` and ``y_calib`` are read by the calibrated method only; the others need no data.
+
+    Returns
+    -------
+    dict of str to object
+        """
     resolved = normalize_method(method)
     if resolved == NONE:
         return {}
@@ -176,7 +190,7 @@ def build_interval_estimators(
 
 
 def estimator_from_config(config: Any, target_names: Sequence[str], **kwargs) -> Mapping[str, Any]:
-    """``build_interval_estimators`` with the method, alpha and k read off the run's config."""
+    """Like :func:`build_interval_estimators`, with the settings read from the run's configuration."""
     return build_interval_estimators(
         getattr(config, "UNCERTAINTY_INTERVAL_METHOD", CONFORMAL),
         target_names,

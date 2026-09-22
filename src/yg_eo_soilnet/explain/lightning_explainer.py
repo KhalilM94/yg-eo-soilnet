@@ -1,22 +1,14 @@
-"""SHAP for the Lightning path, by expected gradients over the model's own attribution seam.
+"""Explaining the deep-learning model.
 
-The CNN takes a dict batch of ragged, date-stamped observations, so there is no flat feature matrix
-to hand a masking explainer. What there is, is a clean cut: ``CalendarGridRasterizer`` scatters the
-ragged sequences onto a ``(years x months)`` grid, and everything downstream of that grid -
-convolutions, pooling, the fusion gate, the head - is differentiable. So the grids become explainer
-inputs, and ``shap.GradientExplainer`` attributes straight through the CNNs to individual channels.
+It reads dated readings rather than a table of numbers, so there is no plain list of inputs to hide
+one at a time. Instead the contributions are traced back through the model, from the point where
+the readings have been laid out on the :term:`calendar grid`: the model says which tensors an
+explanation should vary (``explanation_parts``) and how to predict from exactly those
+(``forward_from_parts``), and the contributions are added up per input.
 
-Cutting there rather than at the encoder outputs is what makes the beeswarm useful. Encoder outputs
-would give one row per modality, so ``S2`` would appear as a single opaque bar next to sixty
-individually named static features - and it would out-rank all of them for structural reasons,
-because it aggregates ten bands' worth of contribution. Cutting at the grid gives every band its own
-row, so static features, categorical features, temporal bands and auxiliary lab columns all sit in
-one flat, comparable feature space.
-
-Attribution is summed within each group (over embedding dimensions, over a band's value and validity
-channels, and over the year and month axes). Summing is the correct reduction: SHAP values are
-additive, so a group's contribution is the sum of its parts', and the additivity check in
-tests/test_explain_lightning.py is what pins that.
+Each band of each :term:`data source` therefore gets its own contribution, as does each covariate,
+each category and the location, so a figure can say the July Sentinel-2 red band mattered rather
+than only that "the time series" did.
 """
 
 from __future__ import annotations
@@ -33,7 +25,7 @@ from yg_eo_soilnet.explain.result import STANDARDIZED_LOG1P, ShapResult
 
 
 def _collect_batches(datamodule, limit: int) -> list[dict]:
-    """Test batches until ``limit`` samples are gathered, or the loader is exhausted."""
+    """Read batches until enough points have been gathered, or the data runs out."""
     loader_factory = getattr(datamodule, "test_dataloader", None)
     if loader_factory is None:
         raise TypeError("The datamodule has no test_dataloader(); nothing to explain.")
@@ -56,13 +48,11 @@ def _collect_batches(datamodule, limit: int) -> list[dict]:
 
 
 def _concatenate_parts(per_batch: list[list], torch) -> list:
-    """Stack each part across batches, requiring the trailing dimensions to agree.
+    """Join each input across batches, checking the shapes agree.
 
-    They can disagree only when ``grid_years`` was left unset, in which case the rasterizer sizes the
-    grid from each batch's own longest history. Falling back to the first batch is better than
-    padding: a padded grid would carry fabricated empty years that the attribution would then spread
-    importance across.
-    """
+    They can disagree only when the grid was left to size itself per batch, in which case the run is
+    told to fix ``grid_years`` rather than being given a quietly wrong explanation.
+        """
     if len(per_batch) == 1:
         return per_batch[0]
 
@@ -75,12 +65,11 @@ def _concatenate_parts(per_batch: list[list], torch) -> list:
 
 
 def _group_values(part_values: list[np.ndarray], groups: list[dict]) -> np.ndarray:
-    """Fold raw per-element SHAP values into one column per feature group.
+    """Add up the raw contributions into one number per input.
 
-    Each array in ``part_values`` is ``(n_samples, *part_dims)``. A group names one part and a set of
-    column indices along that part's first non-sample axis; everything after it (the year and month
-    axes of a grid) is summed out entirely.
-    """
+    Every cell of a band's grid has its own raw contribution; the band's contribution is their sum, and
+    adding them is valid because SHAP contributions add.
+        """
     columns = []
     for group in groups:
         array = part_values[group["part"]]
@@ -91,24 +80,18 @@ def _group_values(part_values: list[np.ndarray], groups: list[dict]) -> np.ndarr
 
 
 def _destandardize(values: np.ndarray, mean: list[float], scale: list[float]) -> np.ndarray:
-    """Undo the datamodule's train-only standardization so colours read in real units."""
+    """Put the covariates back in their own units, so the figures' colours mean something."""
     if len(mean) != values.shape[-1] or len(scale) != values.shape[-1]:
         return values
     return values * np.asarray(scale, dtype=np.float64) + np.asarray(mean, dtype=np.float64)
 
 
 def _colour_values(model, parts, groups: list[dict], categorical_codes, state: dict, torch) -> np.ndarray:
-    """One scalar per (sample, feature) for the beeswarm's colour axis.
+    """One value per point per input, for the figures' colour axis.
 
-    A group that spans several columns has no single value of its own, so each kind gets the scalar
-    that actually means something for it: the de-standardized reading for a static feature, the
-    integer code for a categorical one, the point's mean observed value for a temporal band, the raw
-    lab value for an auxiliary column, and the coordinate in DEGREES for a spatial one. The month
-    positional pair gets NaN, which shap renders grey - it is a coordinate, not a measurement.
-
-    ``context`` is coloured exactly like ``static`` because that is exactly what it is: the group
-    lives in the same part, standardized by the same statistics, and differs only in being named.
-    """
+    An input spanning many columns has no single value of its own, so each kind gets whatever means
+    something for it: a band gets its average reading, a category its code.
+        """
     n_samples = int(parts[0].shape[0])
     colours = np.full((n_samples, len(groups)), np.nan, dtype=np.float64)
 
@@ -206,11 +189,24 @@ def _colour_values(model, parts, groups: list[dict], categorical_codes, state: d
 
 
 def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapResult]:
-    """One ShapResult per model output, in output order.
+    """Explain a trained deep-learning model, for every target it predicts.
 
-    ``target`` is only a naming fallback for when the model carries no ``target_names``: a joint
-    module is explained once and every one of its outputs comes back. See ``build_shap_results``.
-    """
+    Parameters
+    ----------
+    model : SoilCNNLightningModule
+        The trained model.
+    datamodule : SoilSequenceDataModule
+        Its data, used for the points to explain and their background.
+    target : str
+        The :term:`target group`, used to name outputs when the model carries no target names.
+    config : Config, optional
+        Read for ``explain.max_samples`` and the background size.
+
+    Returns
+    -------
+    list of ShapResult
+        One per target.
+        """
     import shap
     import torch
     from torch import nn
@@ -266,13 +262,15 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
             categorical_codes = categorical_codes[split : split + max_samples]
 
         class _PartsModule(nn.Module):
-            """Makes forward_from_parts look like an ordinary multi-input nn.Module to shap."""
+            """Presents the model's explanation entry point as an ordinary network."""
 
             def __init__(self, wrapped):
+                """Hold the model this wraps."""
                 super().__init__()
                 self.wrapped = wrapped
 
             def forward(self, *inputs):
+                """Predict from the varied inputs alone."""
                 return self.wrapped.forward_from_parts(list(inputs))
 
         explainer = shap.GradientExplainer(_PartsModule(model), background)
@@ -320,12 +318,11 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
 
 
 def _output_count(raw_values: list, parts: list) -> int:
-    """How many model outputs shap returned values for.
+    """How many targets the contributions cover.
 
-    Decided by comparing against the INPUT shape rather than by counting dimensions: shap appends a
-    trailing output axis only for multi-output models, and the parts themselves are a mix of 2-D
-    (static, embeddings, auxiliary) and 4-D (grids), so a bare ndim test cannot tell the two apart.
-    """
+    Worked out by comparing against the inputs' shape rather than by counting dimensions: the library
+    adds a trailing axis only for a model with several outputs.
+        """
     reference = np.asarray(raw_values[0])
     part_shape = tuple(parts[0].shape)
     if reference.shape == part_shape:
@@ -336,6 +333,7 @@ def _output_count(raw_values: list, parts: list) -> int:
 
 
 def _slice_output(array: Any, part, output_index: int) -> np.ndarray:
+    """One target's contributions."""
     values = np.asarray(array, dtype=np.float64)
     if values.shape == tuple(part.shape):
         return values

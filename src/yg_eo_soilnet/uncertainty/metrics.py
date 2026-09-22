@@ -1,18 +1,12 @@
-"""The metric set that says whether a prediction interval is honest.
+"""Scores that say whether a :term:`prediction interval` is honest.
 
-Companion to yg_eo_soilnet.metrics and bound by the same three rules: one target at a time, no
-metric negated to express "higher is better", and every name registered in METRIC_DIRECTION and
-METRIC_SPACE so a reader of an MLflow run never has to guess what a number means.
+The companion to :mod:`yg_eo_soilnet.metrics`, and bound by the same rules: one target at a time,
+nothing negated, and every name recorded so a reader never has to guess what a number means.
 
-The reason this module exists separately is that an interval can fail in two independent ways and a
-single number cannot catch both. An interval spanning the entire target range covers 100% of
-observations and tells you nothing; an interval of width zero is maximally sharp and covers nothing.
-So coverage (picp) and width (mpiw) are always read together, and interval_score is the one number
-that penalises both at once when a single ranking is needed.
-
-Everything here is in ORIGINAL TARGET UNITS, computed from the same evaluation frame the point
-metrics come from - so a sigma is comparable to an rmse on the same target, which is the comparison
-that makes uncertainty interpretable at all.
+An interval can be wrong in two different ways, and one score cannot catch both. A band spanning the
+whole range of the data contains every measurement and says nothing; a band of zero width says a
+great deal and contains nothing. So coverage is reported beside width, and beside whether the
+model's uncertainty is actually larger where its errors are larger.
 """
 
 from __future__ import annotations
@@ -49,22 +43,29 @@ def uncertainty_metrics(
     split: str = "test",
     suffix: str = "",
 ) -> dict[str, float]:
-    """Interval and distributional metrics for one target, in original units.
+    """Score one target's intervals, in the target's own units.
 
-    Args:
-        y_true: observed values.
-        y_pred: predicted mean, same length and order.
-        sigma: predictive standard deviation, same length and order.
-        lower / upper: the calibrated interval. When omitted, the interval metrics are skipped and
-            only the distributional ones (crps, nll, ence, sigma_error_corr) are returned - which is
-            what an uncalibrated run should report rather than inventing a Gaussian interval and
-            grading itself against it.
-        alpha: the miscoverage rate the interval was built at, used by coverage_error.
-        split / suffix: key construction, identical to regression_metrics.
+    Parameters
+    ----------
+    y_true : array-like
+        The measured values.
+    y_pred : array-like
+        The predictions, in the same order.
+    sigma : array-like
+        The predicted spread, in the same order.
+    lower, upper : array-like, optional
+        The interval bounds. Without them the interval scores are left out.
+    split : str, default "test"
+        Added to every score name.
+    nominal_coverage : float, optional
+        The share the interval claims to contain, which coverage is compared against.
 
-    Returns an empty dict when there are fewer than two finite rows, matching regression_metrics
-    rather than emitting NaNs that would poison the leaderboard.
-    """
+    Returns
+    -------
+    dict of str to float
+        ``picp`` the share of measurements inside the interval, ``coverage_error`` how far that is from
+        what was promised, ``mpiw`` the average width, and the rest.
+        """
     observed, predicted, sigma_values, lower_values, upper_values = _finite_rows(
         y_true, y_pred, sigma, lower, upper
     )
@@ -74,6 +75,7 @@ def uncertainty_metrics(
         return {}
 
     def key(stem: str) -> str:
+        """One score name with the split appended, as it is recorded."""
         return f"{stem}_{split}{suffix}"
 
     residuals = observed - predicted
@@ -115,13 +117,11 @@ def uncertainty_metrics(
 
 
 def _interval_score(observed: np.ndarray, lower: np.ndarray, upper: np.ndarray, alpha: float) -> float:
-    """Winkler / interval score: width, plus a penalty for each miss proportional to how far.
+    """Width, plus a penalty for every measurement that falls outside, in proportion to how far.
 
-    The one number that ranks intervals honestly. Coverage alone rewards a band spanning the whole
-    target range; width alone rewards a band of zero width. This charges for width always and for
-    misses at rate 2/alpha, so at alpha=0.05 an observation just outside the band costs 40x its
-    distance. Lower is better.
-    """
+    The one number that ranks intervals fairly: coverage alone rewards a band spanning everything, and
+    width alone rewards a band of nothing.
+        """
     widths = upper - lower
     below = np.maximum(lower - observed, 0.0)
     above = np.maximum(observed - upper, 0.0)
@@ -129,15 +129,10 @@ def _interval_score(observed: np.ndarray, lower: np.ndarray, upper: np.ndarray, 
 
 
 def _gaussian_crps(residuals: np.ndarray, sigma: np.ndarray) -> float:
-    """Continuous ranked probability score under a Gaussian predictive law, in closed form.
+    """How well the whole predicted distribution matches the single measured value.
 
-    CRPS grades the WHOLE predicted distribution against the single observed value, and unlike NLL
-    it is bounded in how badly one point can score - a single observation far in the tail sends NLL
-    to a number that dominates the mean, while CRPS grows only linearly. That makes it the more
-    readable of the two on real soil data, where a handful of outliers is normal.
-
-    Closed form for a Gaussian: sigma * [ z(2*Phi(z) - 1) + 2*phi(z) - 1/sqrt(pi) ], z = (y - mu)/sigma.
-    """
+    Unlike the likelihood score below, one badly missed point cannot dominate it.
+        """
     standardized = residuals / sigma
     return float(
         np.mean(
@@ -152,25 +147,20 @@ def _gaussian_crps(residuals: np.ndarray, sigma: np.ndarray) -> float:
 
 
 def _gaussian_nll(residuals: np.ndarray, sigma: np.ndarray) -> float:
-    """Mean negative log likelihood under a Gaussian predictive law.
+    """How likely the measurements are under the predicted distribution; lower is better.
 
-    Positive by construction here in the sense that nothing is negated to change its direction: it
-    is the NLL itself, lower is better, and it may legitimately be negative when the intervals are
-    genuinely tight. That is the quantity being negative, not a sign flipped for convenience - the
-    distinction yg_eo_soilnet.metrics draws in its header.
-    """
+    It can legitimately be negative when the intervals are genuinely tight.
+        """
     return float(np.mean(0.5 * np.log(2.0 * np.pi * sigma**2) + (residuals**2) / (2.0 * sigma**2)))
 
 
 def _ence(absolute_residuals: np.ndarray, sigma: np.ndarray) -> Optional[float]:
-    """Expected normalized calibration error: does sigma match the error AT EACH LEVEL of sigma?
+    """Does the predicted spread match the real error *at each level* of spread?
 
-    picp is a single global number and a model can hit it while being badly wrong locally - too
-    confident on its easy points and too humble on its hard ones, with the two errors cancelling.
-    This bins the points by predicted sigma and compares each bin's RMSE against its mean sigma, so
-    that cancellation cannot hide. Zero is perfect. Returns None when there are too few points to
-    bin meaningfully.
-    """
+    Coverage is one number for the whole test set, and a model can hit it while being over-confident on
+    its easy points and over-cautious on its hard ones, the two cancelling out. This compares them
+    level by level instead.
+        """
     count = int(sigma.shape[0])
     if count < ENCE_BINS * 2:
         return None
@@ -191,16 +181,10 @@ def _ence(absolute_residuals: np.ndarray, sigma: np.ndarray) -> Optional[float]:
 
 
 def _sigma_error_correlation(absolute_residuals: np.ndarray, sigma: np.ndarray) -> Optional[float]:
-    """Spearman correlation between predicted sigma and realised |error|.
+    """Is the model actually less accurate where it says it is less certain?
 
-    The question every uncertainty estimate should have to answer: is the model actually less
-    accurate where it says it is less certain? A conformal interval can be perfectly calibrated on
-    average and still rank its points at random, in which case this sits near zero and the per-point
-    bar carries no information even though picp looks excellent. Rank correlation rather than
-    Pearson because only the ORDERING is claimed, not a linear relationship.
-
-    None when either input is constant, where the correlation is undefined rather than zero.
-    """
+    An interval can be perfectly calibrated on average and still rank its points the wrong way round.
+        """
     if np.ptp(sigma) <= 0.0 or np.ptp(absolute_residuals) <= 0.0:
         return None
     correlation = stats.spearmanr(sigma, absolute_residuals).statistic
@@ -214,11 +198,7 @@ def _finite_rows(
     lower: Optional[Any],
     upper: Optional[Any],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
-    """Every input as a float array, keeping only rows finite in ALL of them.
-
-    Masking on the conjunction, like metrics._finite_pairs: dropping per-array would misalign the
-    columns and silently score one point's observation against another's interval.
-    """
+    """Every input as an array, keeping only the points that are usable in all of them."""
     for name, values in (("y_true", y_true), ("y_pred", y_pred), ("sigma", sigma)):
         _reject_multi_column(name, values)
 
@@ -256,6 +236,7 @@ def _finite_rows(
 
 
 def _to_float(values: Any) -> np.ndarray:
+    """One value as a plain float, or NaN when it cannot be one."""
     return pd.to_numeric(
         pd.Series(np.asarray(values).reshape(-1)), errors="coerce"
     ).to_numpy(dtype=float)

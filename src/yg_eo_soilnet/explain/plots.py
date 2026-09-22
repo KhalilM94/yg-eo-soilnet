@@ -1,15 +1,8 @@
-"""SHAP figures, following the project's plotting convention.
+"""The :term:`SHAP` figures.
 
-As in plot_utils and hpo.plots: build a Figure, style it through plot_style, and RETURN it - callers
-save and close (yg_eo_soilnet.artifacts.log_figure does both). When there is nothing to draw, hand
-back a figure carrying a message rather than None, so a caller never has to branch on the return
-value.
-
-Two of the three figures here are drawn by shap itself, so the only lever on their style is the
-rcParams in force while shap draws - hence the ``style_context()`` inside ``_capture`` rather than a
-``@styled`` decorator that would have closed before shap ran.
-
-``import shap`` stays inside the functions so the module is cheap to import with SHAP disabled.
+As everywhere else here, each function builds a figure and returns it; the caller saves it. With
+nothing to draw, a figure carrying a message comes back rather than nothing, so no caller has to
+check.
 """
 
 from __future__ import annotations
@@ -33,6 +26,7 @@ from yg_eo_soilnet.plot_style import (
 
 
 def _explanation(result: ShapResult):
+    """Package the values in the form the SHAP plotting library expects."""
     import shap
 
     return shap.Explanation(
@@ -44,15 +38,10 @@ def _explanation(result: ShapResult):
 
 
 def _capture(draw, title: str):
-    """Run a shap plotting call that draws on the current axes and hand back its Figure.
+    """Run a SHAP plotting call and hand back the figure it drew.
 
-    shap's plotting helpers draw into pyplot state and return None, which is the opposite of this
-    project's convention, so the figure is created here and reclaimed with gcf() afterwards.
-
-    The style context wraps the DRAW, not just the figure creation: shap sets its own colours on the
-    artists it makes, and the fonts, spines and tick colours it does not set are read from rcParams
-    at draw time.
-    """
+    The library draws into the current figure and returns nothing, so one is made here first.
+        """
     with style_context():
         figure = plt.figure()
         try:
@@ -72,7 +61,15 @@ def _capture(draw, title: str):
 
 
 def shap_beeswarm(result: ShapResult, max_display: int = 25):
-    """Per-feature beeswarm: one row per feature, one dot per sample, coloured by feature value."""
+    """One row per input, one dot per point: how much that input moved that prediction.
+
+    The dots are coloured by the input's own value, so a row reading "high values on the right" means
+    more of that input predicts more of the target.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     import shap
 
     if result.n_samples == 0 or result.n_features == 0:
@@ -85,7 +82,7 @@ def shap_beeswarm(result: ShapResult, max_display: int = 25):
 
 
 def shap_bar(result: ShapResult, max_display: int = 25):
-    """Per-feature mean |SHAP| bar. shap folds the tail into a 'sum of N other features' row."""
+    """A bar per input: how much it matters on average. The rest are folded into one row."""
     import shap
 
     if result.n_samples == 0 or result.n_features == 0:
@@ -99,13 +96,12 @@ def shap_bar(result: ShapResult, max_display: int = 25):
 
 @styled
 def shap_block_bar(result: ShapResult):
-    """Rolled-up mean |SHAP| per block: static, categorical, auxiliary, and one bar per modality.
+    """A bar per *group* of inputs: covariates, categories, each data source, and so on.
 
-    The per-feature plots are capped at the top N, and with every band of every modality holding its
-    own row the temporal branch can dominate in aggregate while no single band ranks highly enough to
-    be displayed. This view is the antidote, and the direct quantitative answer to the question of
-    what the time series actually buys over the static features.
-    """
+    The per-input figures show only the top rows, and with every band of every data source having its
+    own row the time series can fill them all. This is the view that says how much each kind of input
+    contributes in total.
+        """
     blocks = result.block_mean_abs()
     if not blocks:
         return _message_figure("No SHAP blocks to plot")

@@ -1,17 +1,13 @@
-"""SHAP explainability for both training families.
+"""Work out how much each input pushed each prediction up or down - :term:`SHAP`.
 
-The two entry points the logger uses:
+Switched on with ``explain.enabled``. For every point, each input gets a contribution, and those
+contributions add up to the difference between that point's prediction and the average prediction.
+So a figure can say "this point is predicted high mainly because of its July greenness and its
+elevation", rather than only reporting which inputs matter on average.
 
-* :func:`build_shap_results` dispatches to the backend explainer and returns one
-  :class:`~yg_eo_soilnet.explain.result.ShapResult` per MODEL OUTPUT;
-* :func:`log_shap_artifacts` turns those into the ``explain/`` artifacts.
-
-**Nothing in this package imports ``shap`` at module scope, and nothing outside it imports this
-package at module scope.** ``shap`` pulls in numba and is slow to import, so a run with
-``EXPLAIN_ENABLED: false`` must not pay for it - and, because the test suite runs with
-``filterwarnings = ["error"]``, must not risk a warning from a library it never asked for.
-``ChildRunLogger._shap_gate`` checks the switch before this module is imported;
-``tests/test_explain_logging.py`` asserts ``"shap" not in sys.modules`` after a disabled run.
+Both model families are handled, and the results take the same shape either way, so the figures and
+the tables are written once. Nothing here is imported unless explanations are switched on: the
+library is slow to load.
 """
 
 from __future__ import annotations
@@ -35,13 +31,22 @@ __all__ = [
 
 
 def build_shap_results(*, config, backend: str, **payload) -> list[ShapResult]:
-    """Explain one fitted model. ``backend`` is ``"sklearn"`` or ``"lightning"``.
+    """Explain one trained model, for every target it predicts.
 
-    One contract for both backends: this returns one :class:`ShapResult` per model OUTPUT, in output
-    order. A joint fit is explained ONCE and yields every target; the caller routes each output to
-    the run that holds that target's evaluation. The ``target`` in the payload is only a naming
-    fallback, used when the model's own target names are missing or do not match the output count.
-    """
+    Parameters
+    ----------
+    backend : {"sklearn", "lightning"}
+        Which family the model belongs to.
+    target : str
+        The :term:`target group`, used to name outputs when the model carries no target names.
+    **kwargs
+        Passed to that family's explainer.
+
+    Returns
+    -------
+    list of ShapResult
+        One per target the model predicts, in order. A model predicting several is explained once.
+        """
     if backend == "sklearn":
         from yg_eo_soilnet.explain.sklearn_explainer import sklearn_shap_results
 
@@ -56,16 +61,16 @@ def build_shap_results(*, config, backend: str, **payload) -> list[ShapResult]:
 
 
 def log_shap_artifacts(results: list[ShapResult], *, max_display: int = 25) -> dict:
-    """Write the ``explain/`` artifacts for one child run and describe what was written.
+    """Write one target's explanation into the current run, and say what was written.
 
-    Per target: a beeswarm, a mean-|SHAP| bar, a per-block bar, and the COMPLETE per-sample value
-    table. The plots are capped at ``max_display`` rows because the flat feature space runs to a
-    hundred-plus entries once every band has its own row; the parquet is never capped, so the cap
-    only ever limits the picture and not the data.
+    Per target: a figure showing each input's contribution for every point, a bar chart of what matters
+    on average, a bar chart grouped by input type, and the complete table of contributions.
 
-    Takes no target or model name: they used to be baked into every filename, which is exactly what
-    made two runs share no artifact paths. The run's tags carry that identity instead.
-    """
+    Returns
+    -------
+    dict
+        What went into the run summary.
+        """
     from yg_eo_soilnet.explain.plots import shap_bar, shap_beeswarm, shap_block_bar
 
     written: dict = {"targets": [], "artifacts": []}
