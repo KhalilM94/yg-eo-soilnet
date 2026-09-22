@@ -1,3 +1,5 @@
+"""Take the scikit-learn family's rows out of the run's shared split."""
+
 from __future__ import annotations
 
 import os
@@ -13,20 +15,24 @@ from yg_eo_soilnet.datamodules.splitting import SplitPlan, TEST, TRAIN, VAL
 
 
 class SklearnDataSplitter:
-    """Selects this family's rows out of the run's shared :class:`SplitPlan`.
+    """Take this family's rows out of the run's shared split.
 
-    This class used to *decide* the split - a 70/30 ``train_test_split``, or a ``GroupShuffleSplit``
-    over spatial clusters. It no longer does. The decision moved to
-    :mod:`yg_eo_soilnet.datamodules.splitting`, ahead of the family fork, so the Lightning
-    datamodules hold out exactly the same points. Both strategies survive there, and
-    ``ENABLE_CLUSTERING``/``CLUSTERING_STRATEGY`` are honoured as the legacy spelling of
-    ``split.strategy: spatial_group``.
+    It does not decide the split - :mod:`yg_eo_soilnet.datamodules.splitting` does that, before
+    either family sees the data, so both hold out the same points.
 
-    One thing to know when reading the returned dict: **``X_train`` is the FIT POOL, train ∪ val.**
-    sklearn selects hyperparameters by k-fold *inside* that pool (see ``CVSplitter``), so it has no
-    use for a separate validation holdout, while Lightning early-stops on ``val``. Both then score
-    on the same ``X_test``. ``X_train_only``/``X_val`` are returned alongside for the audit
-    artifacts, and nothing in the training path reads them.
+    One thing to know when reading what :meth:`split_data` returns: **``X_train`` is the**
+    :term:`fit pool` - the training *and* validation points together. The scikit-learn models choose
+    their hyperparameters by cross-validation inside that pool, so they have no use for a separate
+    validation set, while the deep-learning model early-stops on one. Both are then scored on the
+    same ``X_test``. ``X_train_only`` and ``X_val`` are returned as well, for the saved split files
+    only.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    logger : logging.Logger
+        Where the split sizes go.
     """
 
     def __init__(self, config, logger):
@@ -41,6 +47,35 @@ class SklearnDataSplitter:
         model_config_factory: Any = None,
         split_plan: Optional[SplitPlan] = None,
     ) -> Dict[str, Any]:
+        """Return the covariates and targets of each split, and save the split with the run.
+
+        Parameters
+        ----------
+        processed_data : dict
+            What
+            :meth:`TabularPreprocessor.preprocess_data
+            <yg_eo_soilnet.datamodules.scikit.tabular_preprocessor.TabularPreprocessor.preprocess_data>`
+            returned: ``X``, ``y``, ``lat``, ``lon`` and ``point_ids``.
+        sanitize_features : callable, optional
+            Applied to ``X`` first, to drop anything that is not a model input.
+        model_config_factory : object, optional
+            Unused; kept so older callers still work.
+        split_plan : SplitPlan
+            The run's shared split. Required.
+
+        Returns
+        -------
+        dict
+            ``X_train``/``y_train`` (the :term:`fit pool`), ``X_test``/``y_test``, the coordinates of
+            each, ``X_train_only``/``X_val`` and their targets, ``point_ids``, ``split_labels``,
+            ``split_plan``, ``X_all`` (every point, for the per-point export) and, for a spatial
+            split, ``groups_train``/``groups_test``.
+
+        Raises
+        ------
+        ValueError
+            If no split plan is given, or the plan leaves this family no test rows.
+        """
         X: pd.DataFrame = processed_data["X"]
         y: pd.DataFrame = processed_data["y"]
         lat = processed_data["lat"]
@@ -63,7 +98,7 @@ class SklearnDataSplitter:
         train_pos = np.flatnonzero(labels == TRAIN)
         val_pos = np.flatnonzero(labels == VAL)
         test_pos = np.flatnonzero(labels == TEST)
-        # train ∪ val, in the frame's own order so the fit pool is not silently reordered.
+        # Training and validation points together, kept in the table's own order.
         fit_pos = np.sort(np.concatenate([train_pos, val_pos])) if len(val_pos) else train_pos
         unassigned = int(len(labels) - (len(train_pos) + len(val_pos) + len(test_pos)))
 
@@ -91,8 +126,8 @@ class SklearnDataSplitter:
         lon_train, lon_test = lon.iloc[fit_pos], lon.iloc[test_pos]
 
         if split_plan.clusters is not None:
-            # GroupKFold inside the fit pool needs a group per row; it is the same clustering the
-            # holdout was blocked on, so the inner folds respect the same spatial structure.
+            # Cross-validation inside the fit pool keeps these groups whole too, so its folds
+            # respect the same spatial grouping the test points were held out by.
             groups = split_plan.clusters.reindex(pd.Index(point_ids))
             groups.index = X.index
             split_data["groups_train"] = groups.iloc[fit_pos]
@@ -126,8 +161,8 @@ class SklearnDataSplitter:
         split_data["lat_test"] = lat_test
         split_data["lon_train"] = lon_train
         split_data["lon_test"] = lon_test
-        # Audit-only, so the fit pool can be decomposed after the fact. Nothing in the sklearn
-        # training path reads these; GridSearchCV's k-fold is the validation mechanism.
+        # For the saved files only, so the fit pool can be taken apart afterwards. Training reads
+        # neither: cross-validation inside the pool is what chooses the hyperparameters.
         split_data["X_train_only"] = X.iloc[train_pos]
         split_data["y_train_only"] = y.iloc[train_pos]
         split_data["X_val"] = X.iloc[val_pos]
@@ -135,14 +170,14 @@ class SklearnDataSplitter:
         split_data["point_ids"] = point_id_series
         split_data["split_labels"] = pd.Series(labels, index=X.index, name="split")
         split_data["split_plan"] = split_plan
-        # The WHOLE featurized population, split labels and all. Read only by the per-point
-        # prediction export, which scores every point rather than only the holdout. Kept as the
-        # same object the splits were carved from so its index still keys into `point_ids`.
+        # Every point, not just the holdout: read by the per-point prediction export. The same
+        # object the splits were taken from, so its row numbers still match `point_ids`.
         split_data["X_all"] = X
 
         return split_data
 
     def _point_ids(self, processed_data: Dict[str, Any], X: pd.DataFrame) -> np.ndarray:
+        """The point id of every covariate row, in order; the split is keyed on it."""
         point_ids = processed_data.get("point_ids")
         if point_ids is None:
             raise KeyError(
@@ -150,8 +185,8 @@ class SklearnDataSplitter:
                 "it; a hand-built dict must too, because the shared split is keyed on point id."
             )
         if isinstance(point_ids, pd.Series):
-            # sanitize_features drops columns, not rows, so the labels still line up - but reindex
-            # rather than assume it, since a mismatch here would silently mis-key the whole split.
+            # Matched on row labels rather than assumed to line up: a mismatch here would key the
+            # whole split to the wrong points.
             return point_ids.reindex(X.index).to_numpy()
         point_ids = np.asarray(point_ids)
         if len(point_ids) != len(X):
@@ -164,12 +199,10 @@ class SklearnDataSplitter:
     def _log_split_artifacts(
         self, split_plan: SplitPlan, *, point_ids: pd.Series, frames: Dict[str, pd.DataFrame]
     ) -> None:
-        """Write the split to MLflow, with a join key this time.
+        """Save the split with the run, under ``data_splits/``.
 
-        The previous version wrote four parquet files with ``index=False``, and ``filter_schema``
-        had already stripped the id column out of X - so the artifacts named no rows and the split
-        could not be reconstructed from a finished run. Every frame now carries ``point_id``, and
-        the plan itself is written as one assignment table.
+        One file per split, each with a ``point_id`` column, plus ``split_assignments.parquet``:
+        the whole plan, which is what lets a finished run be matched back to its source data.
         """
         with tempfile.TemporaryDirectory() as tmpdir:
             split_start = time.perf_counter()

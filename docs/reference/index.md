@@ -7,5 +7,6 @@ docstring.
 :maxdepth: 1
 
 scripts
+data
 utilities
 ```

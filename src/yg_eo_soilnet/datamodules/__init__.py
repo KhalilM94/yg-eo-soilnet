@@ -1,3 +1,5 @@
+"""Turn the loaded data into model inputs, and make the split every model shares."""
+
 from yg_eo_soilnet.datamodules.scikit import (
     ScikitDataModule,
     SklearnDataSplitter,

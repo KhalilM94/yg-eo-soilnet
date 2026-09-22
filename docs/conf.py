@@ -29,9 +29,21 @@ myst_heading_anchors = 3
 napoleon_google_docstring = False
 napoleon_numpy_docstring = True
 napoleon_use_rtype = False
+# An "Attributes" section becomes a field list on the class rather than a second entry for each
+# attribute, which would collide with the property of the same name.
+napoleon_use_ivar = True
 
 autodoc_member_order = "bysource"
-autodoc_default_options = {"members": True, "show-inheritance": True}
+autodoc_default_options = {
+    "members": True,
+    "show-inheritance": True,
+    # Methods scikit-learn adds to every estimator. Their docstrings link into scikit-learn's own
+    # documentation, which is not part of this build.
+    "exclude-members": (
+        "set_fit_request, set_transform_request, set_predict_request, set_score_request, "
+        "set_inverse_transform_request, get_metadata_routing"
+    ),
+}
 
 # The heavy libraries are installed in the pixi environments, so a local build imports the real
 # thing. Where they are missing (for example on readthedocs.org) they are replaced by stand-ins, so

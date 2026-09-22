@@ -1,18 +1,13 @@
-"""DataLoaders whose results do not depend on how they are served.
+"""Build DataLoaders whose batch order does not depend on how many processes load them.
 
-A DataLoader left to its defaults draws from the GLOBAL torch generator - the same stream dropout
-draws from - and how often it draws depends on its serving settings. Every new iterator draws a
-worker base seed. A non-persistent loader builds a new iterator every epoch, while a persistent one
-builds it once and then resets it. So flipping `persistent_workers` shifted the global stream from
-epoch 1 onward, giving a different shuffle order and different dropout masks. That is how a tuned
-config trained to val_loss 0.5566 against its trial's 0.5405 from an identical epoch 0: the study
-ran with `persistent_workers: true`, and the export restored the registry's `false`.
+A DataLoader left to itself shuffles using the same global random stream the model's dropout draws
+from, and how many numbers it draws depends on ``num_workers`` and ``persistent_workers``. Those
+settings then change the training itself, and a run no longer reproduces one made with the same seed
+but different loading settings.
 
-Here the loader and its sampler each get a private generator, seeded from the global stream once,
-when the loader is built. After that, iterating the loader never touches the global stream, so
-num_workers and persistent_workers change only how fast batches arrive. The run seed still reaches
-the shuffle, because the private seeds are drawn from the seeded global stream, so a different run
-seed or ensemble member still sees a different order.
+Every loader built here gets its own generators, seeded once from the global stream. The run seed
+still decides the order - a different seed, or a different ensemble member, still shuffles
+differently - while the loading settings change only how fast batches arrive.
 """
 
 from __future__ import annotations
@@ -24,7 +19,7 @@ from torch.utils.data import DataLoader, Dataset, RandomSampler
 
 
 def _private_generator() -> torch.Generator:
-    """A generator seeded by exactly one draw from the global stream."""
+    """A random generator seeded by a single draw from the global stream."""
     seed = int(torch.empty((), dtype=torch.int64).random_().item())
     return torch.Generator().manual_seed(seed)
 
@@ -40,14 +35,38 @@ def build_loader(
     persistent_workers: bool = False,
     collate_fn: Callable[[Any], Any] | None = None,
 ) -> DataLoader:
-    """A DataLoader that draws from the global torch stream here, and never while it is iterated.
+    """Build a DataLoader with its own random generators.
 
-    Two generators rather than one. The sampler draws a permutation per epoch, and the iterator draws
-    a worker base seed per new iterator. If they shared a generator, the base-seed draws - whose
-    count depends on persistent_workers - would shift every later permutation.
+    Parameters
+    ----------
+    dataset : torch.utils.data.Dataset
+        What to load from.
+    batch_size : int
+        Points per batch.
+    shuffle : bool, default False
+        Draw the points in a new order each epoch. Used for training, not for scoring.
+    drop_last : bool, default False
+        Throw away the last batch when it is smaller than the others.
+    num_workers : int, default 0
+        Background processes preparing batches; 0 prepares them in the main process.
+    pin_memory : bool, default False
+        Speeds up copying batches to a GPU.
+    persistent_workers : bool, default False
+        Keep the worker processes alive between epochs instead of starting them again.
+    collate_fn : callable, optional
+        How single points are combined into a batch.
+
+    Returns
+    -------
+    torch.utils.data.DataLoader
+
+    Notes
+    -----
+    The sampler and the loader get one generator each: they draw at different moments, and sharing
+    one would let the loading settings shift the shuffling again.
     """
-    # Both drawn whether or not this loader shuffles, so the number of global draws a build makes
-    # does not depend on its arguments either.
+    # Drawn whether or not this loader shuffles, so the number of draws from the global stream
+    # never depends on the settings either.
     sampler_generator = _private_generator()
     loader_generator = _private_generator()
     return DataLoader(

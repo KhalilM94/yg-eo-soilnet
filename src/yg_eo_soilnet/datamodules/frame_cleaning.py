@@ -1,7 +1,7 @@
-"""DataFrame cleaning shared by every datamodule builder.
+"""Repair and filter raw data tables: fill small gaps, refuse columns that are too empty.
 
-These helpers are deliberately free of any sequence concept: they repair and filter raw CSV frames
-and nothing else, so any builder cleans its inputs the same way.
+Both model families clean their inputs through these helpers, so a column is judged the same way
+whichever model reads it.
 """
 
 from __future__ import annotations
@@ -18,6 +18,29 @@ def build_finite_row_mask(
     required_columns: Iterable[str] = (),
     numeric_columns: Iterable[str] = (),
 ) -> pd.Series:
+    """Mark the rows whose values are all present and finite.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to check.
+    required_columns : iterable of str, optional
+        Columns that must not be blank, such as ids, dates and targets.
+    numeric_columns : iterable of str, optional
+        Columns that must hold a finite number; text that is not a number counts as missing.
+
+    Returns
+    -------
+    pandas.Series of bool
+        True for the rows to keep, in the table's own order.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> frame = pd.DataFrame({"uuid": ["a", "b", None], "clay_pct": [22.0, float("nan"), 30.0]})
+    >>> list(build_finite_row_mask(frame, required_columns=["uuid"], numeric_columns=["clay_pct"]))
+    [True, False, False]
+    """
     mask = pd.Series(True, index=frame.index)
 
     required_columns = [column for column in required_columns if column in frame.columns]
@@ -34,7 +57,13 @@ def build_finite_row_mask(
 
 
 class SparseColumnError(ValueError):
-    """A covariate is too empty to impute honestly. Carries the offenders for tests and callers."""
+    """Raised when a covariate is missing on too many rows to be filled in honestly.
+
+    Attributes
+    ----------
+    offenders : list of tuple
+        ``(column, missing_rows, missing_ratio)`` for every column over the limit, worst first.
+    """
 
     def __init__(self, message: str, offenders: "list[tuple[str, int, float]]"):
         super().__init__(message)
@@ -42,10 +71,26 @@ class SparseColumnError(ValueError):
 
 
 def column_missing_ratios(frame: pd.DataFrame, columns: Iterable[str]) -> "dict[str, float]":
-    """Fraction of rows on which each column is absent or non-finite.
+    """Measure the share of rows on which each column is missing or not a finite number.
 
-    Uses the same finiteness rule as :func:`build_finite_row_mask`, so what the gate measures and
-    what the cleaner acts on cannot diverge.
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to measure.
+    columns : iterable of str
+        The columns to measure; names not in the table are skipped.
+
+    Returns
+    -------
+    dict of str to float
+        One share per column, between 0 (never missing) and 1 (always missing).
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> frame = pd.DataFrame({"clay_pct": [22.0, float("nan"), 30.0]})
+    >>> round(column_missing_ratios(frame, ["clay_pct"])["clay_pct"], 2)
+    0.33
     """
     if frame.empty:
         return {column: 0.0 for column in columns if column in frame.columns}
@@ -69,17 +114,40 @@ def assert_columns_are_dense_enough(
     allow: Iterable[str] = (),
     fail: bool = True,
 ) -> "list[tuple[str, int, float]]":
-    """Refuse to train on a covariate too empty to impute honestly.
+    """Stop the run when a covariate is missing on too many rows to be filled in honestly.
 
-    Imputing a column that is 99% blank does not recover information - it fabricates a constant and
-    presents it as a measurement. Both training families used to do something silent and wrong with
-    such a column: sklearn median-filled it and handed it to the model as a feature, while the
-    Lightning builders deleted every affected row and trained on whatever survived (on one real
-    dataset, 17 points out of 5761). This is the single place that decides a column is past saving,
-    so the families cannot drift apart on it again.
+    Gaps are filled with the column's median, which repairs a few rows but invents the column when
+    most of it is blank. The limit is ``common.data_quality.max_missing_column_ratio`` (20% as
+    shipped) and ``allow_sparse_columns`` exempts named columns.
 
-    Returns the offenders as ``(column, missing_rows, missing_ratio)``, worst first, so a caller
-    running in warn-only mode can still report them.
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to check.
+    columns : iterable of str
+        The covariates to check.
+    max_missing_ratio : float
+        The largest share of missing rows a covariate may have, between 0 and 1.
+    label : str
+        What this table is, named in the message.
+    logger : logging.Logger
+        Where the warning goes when ``fail`` is false.
+    allow : iterable of str, optional
+        Covariates exempted from the check.
+    fail : bool, default True
+        Raise on an offending column; false only warns and carries on.
+
+    Returns
+    -------
+    list of tuple
+        ``(column, missing_rows, missing_ratio)`` for every column over the limit, worst first.
+        Empty when they all pass.
+
+    Raises
+    ------
+    SparseColumnError
+        If a covariate is over the limit and ``fail`` is true. The message names the columns and how
+        to let them through.
     """
     allowed = set(allow or ())
     ratios = column_missing_ratios(frame, columns)
@@ -120,6 +188,26 @@ def drop_non_finite_rows(
     required_columns: Iterable[str] = (),
     numeric_columns: Iterable[str] = (),
 ) -> pd.DataFrame:
+    """Remove the rows holding a missing or non-finite value, and report how many went.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to filter.
+    logger : logging.Logger
+        Where the count of dropped rows goes.
+    label : str
+        What this table is, named in the message.
+    required_columns : iterable of str, optional
+        Columns that must not be blank.
+    numeric_columns : iterable of str, optional
+        Columns that must hold a finite number.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A copy holding the rows that passed.
+    """
     if frame.empty:
         return frame.copy()
 
@@ -137,10 +225,8 @@ def drop_non_finite_rows(
         f"Dropped {dropped_count} row(s) with non-finite values from {label}; remaining rows: {len(kept_frame)}"
     )
     if dropped_count and dropped_count > len(frame) // 2:
-        # A row dies if ANY required column is non-finite, so one nearly-empty covariate can take
-        # most of the dataset with it. Naming the worst offenders turns "the bundle has 17 points"
-        # into "these three columns are 99% empty", which is the difference between an unexplained
-        # collapse and a one-line fix in the schema config.
+        # A row goes if any one of its required values is missing, so a nearly empty covariate can
+        # take most of the dataset with it. Name the worst offenders, which is what to fix.
         logger.warning(
             f"That is most of {label}. Worst columns by rows lost: "
             + ", ".join(
@@ -162,7 +248,31 @@ def worst_non_finite_columns(
     numeric_columns: Iterable[str] = (),
     limit: int = 5,
 ) -> list[tuple[str, int]]:
-    """The columns responsible for the most dropped rows, worst first."""
+    """List the columns costing the most rows, worst first.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table being filtered.
+    required_columns : iterable of str, optional
+        Columns that must not be blank.
+    numeric_columns : iterable of str, optional
+        Columns that must hold a finite number.
+    limit : int, default 5
+        How many columns to name.
+
+    Returns
+    -------
+    list of tuple
+        ``(column, rows_lost)``, worst first.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> frame = pd.DataFrame({"uuid": ["a", "b", None], "clay_pct": [22.0, float("nan"), 30.0]})
+    >>> worst_non_finite_columns(frame, required_columns=["uuid"], numeric_columns=["clay_pct"])
+    [('uuid', 1), ('clay_pct', 1)]
+    """
     counts: list[tuple[str, int]] = []
     for column in dict.fromkeys([*required_columns, *numeric_columns]):
         if column not in frame.columns:
@@ -186,16 +296,37 @@ def sanitize_numeric_columns(
     logger: Any,
     return_validity: bool = False,
 ):
-    """Make the named columns numeric and finite, without discarding rows.
+    """Make the named columns numeric and finite without dropping any rows.
 
-    Handles three defects seen in the source data: decimal-comma strings ('0,00005') that make a
-    band column object-dtype, infinities from ratio indices, and sparse columns whose NaNs would
-    otherwise take the whole row down. Missing cells are median-filled per column.
+    Repairs three things real files contain: numbers written with a decimal comma (``"0,05"``),
+    infinities from ratio indices such as NDVI, and missing cells - filled with the column's median.
 
-    With ``return_validity`` the function also returns a boolean frame that is True where the cell
-    was finite **before** the fill. Median-filling is a repair, not a measurement: without this the
-    imputed value is indistinguishable from a real reading, which on this dataset silently affects
-    ~11% of the soil and climate records. Consumers that can act on the difference should ask for it.
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to repair.
+    columns : iterable of str
+        The columns to repair; names not in the table are skipped.
+    logger : logging.Logger
+        Where the counts of repaired values go.
+    return_validity : bool, default False
+        Also return the :term:`validity flags <validity flag>`.
+
+    Returns
+    -------
+    sanitized : pandas.DataFrame
+        A copy with those columns as 32-bit floats.
+    validity : pandas.DataFrame of bool
+        Only with ``return_validity``: True where the cell held a real value **before** the median
+        fill, so a model can tell a measurement from a filled-in gap.
+
+    Examples
+    --------
+    >>> import logging, pandas as pd
+    >>> frame = pd.DataFrame({"S2_B4": ["0,05", "0,07"]})
+    >>> repaired = sanitize_numeric_columns(frame, ["S2_B4"], logger=logging.getLogger("demo"))
+    >>> [round(float(value), 3) for value in repaired["S2_B4"]]
+    [0.05, 0.07]
     """
     columns = [column for column in dict.fromkeys(columns) if column in frame.columns]
     if not columns:
@@ -219,7 +350,7 @@ def sanitize_numeric_columns(
             series = pd.to_numeric(series, errors="coerce")
 
         series = series.replace([np.inf, -np.inf], np.nan)
-        # Captured before the fill below - afterwards the information is gone for good.
+        # Recorded before the fill below, after which a filled cell is indistinguishable.
         validity[column] = series.notna().to_numpy(dtype=bool)
         missing = int(series.isna().sum())
         if missing:

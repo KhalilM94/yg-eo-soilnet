@@ -1,3 +1,5 @@
+"""The parts a scikit-learn model is assembled from: its pipeline, its folds, its row filter."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,9 +18,18 @@ from yg_eo_soilnet.utils import LogTransformer
 
 @dataclass
 class CVSplitter:
-    """
-    A class to create cross-validation splits compatible with ModelTrainer.
-    Supports 'kfold', 'groupkfold', and 'stratifiedshuffle' strategies.
+    """Make the cross-validation folds the hyperparameter search uses.
+
+    Attributes
+    ----------
+    cv_strategy : {"kfold", "groupkfold"}, default "kfold"
+        ``groupkfold`` keeps each spatial group inside one fold, matching a spatial split.
+    n_splits : int, default 5
+        How many folds.
+    random_state : int, default 42
+        The random seed.
+    shuffle : bool, default True
+        Shuffle the rows before making the folds.
     """
 
     cv_strategy: str = 'kfold'
@@ -27,6 +38,26 @@ class CVSplitter:
     shuffle: bool = True
 
     def create_splits(self, X, y=None, groups=None):
+        """Return the folds as a list of ``(train positions, validation positions)`` pairs.
+
+        Parameters
+        ----------
+        X : array-like
+            The covariates of the :term:`fit pool`.
+        y : array-like, optional
+            The targets.
+        groups : array-like, optional
+            One group per row; required for ``groupkfold``.
+
+        Returns
+        -------
+        list of tuple
+
+        Raises
+        ------
+        ValueError
+            If ``groupkfold`` is asked for without groups, or the strategy is unknown.
+        """
         strategy = self.cv_strategy.lower()
         if strategy == 'kfold':
             cv = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
@@ -40,18 +71,23 @@ class CVSplitter:
 
 
 class TargetNanFilter(BaseEstimator, TransformerMixin):
+    """Drop the rows whose target was not measured, so a model only sees usable rows."""
+
     def fit(self, X, y=None):
+        """Nothing to learn; returns itself."""
         return self
 
     def transform(self, X, y=None, groups=None):
+        """Return ``(X, y, groups)`` with the unmeasured rows removed.
+
+        When ``y`` holds several targets - one model predicting them all - a row is kept only where
+        every one of them was measured. That is the cost of fitting one model to several targets;
+        one model per target keeps every row it has a measurement for.
+        """
         if y is None:
             return X
-        # A DataFrame y is a joint fit over several targets. `pd.notna` on it is a 2-D boolean
-        # frame, which is not a row selector - `X.loc[mask]` on one either raises or silently
-        # misaligns. Reduced with `.all(axis=1)`: one design matrix is shared by every target in the
-        # group, so a row is usable only where ALL of them were measured. That is stricter than the
-        # per-target loop, which keeps each row for whichever targets it has, and it is the
-        # unavoidable cost of a single fit rather than an oversight.
+        # Several targets: one row of covariates serves them all, so a row is usable only where
+        # every target was measured.
         if isinstance(y, pd.DataFrame):
             mask = y.notna().all(axis=1)
         else:
@@ -64,27 +100,41 @@ class TargetNanFilter(BaseEstimator, TransformerMixin):
 
 @dataclass
 class PipelineBuilder:
+    """Wrap an estimator in the steps that prepare its inputs.
+
+    The result is one scikit-learn :class:`~sklearn.pipeline.Pipeline`: fill gaps, scale, encode
+    categories, then the model. Saved as one object, so new points are prepared exactly like the
+    training points were. Every step is fitted inside each cross-validation fold, so nothing learned
+    from held-out rows reaches the model.
+
+    Attributes
+    ----------
+    seed : int, default 42
+        The random seed.
+    tree_categorical_encoding : {"ordinal", "onehot"}, default "ordinal"
+        How categories are encoded for tree-based models. Linear models always get one-hot columns.
+    tree_onehot_max_categories : int, optional
+        With ``onehot``, keep this many categories and group the rest together.
+    """
+
     seed: int = 42
-    # Wired from config; these keys existed in YAML but nothing read them, so setting
-    # TREE_CATEGORICAL_ENCODING: onehot silently did nothing.
     tree_categorical_encoding: str = "ordinal"
     tree_onehot_max_categories: Optional[int] = None
 
     def _is_tree_based_model(self, model: BaseEstimator) -> bool:
+        """Whether this estimator is a tree or an ensemble of trees, judged by its class name."""
         model_name = model.__class__.__name__.lower()
         model_module = model.__class__.__module__.lower()
         tree_markers = ("tree", "forest", "boost", "xgb", "lightgbm", "catboost")
         return any(marker in model_name or marker in model_module for marker in tree_markers)
 
     def _build_preprocessor(self, model: BaseEstimator, categorical_cols: List[str], numeric_cols: List[str]) -> ColumnTransformer:
+        """Build the input-preparation step: fill gaps, scale numbers, encode categories."""
         is_tree_model = self._is_tree_based_model(model)
 
-        # add_indicator appends a measured-vs-filled flag, matching the validity channels the
-        # Lightning datamodules carry - so a gap means the same thing to both families instead of
-        # being silently indistinguishable from a real measurement on this side. Its default
-        # features='missing-only' emits a flag ONLY for columns that had gaps in the fold it was
-        # fitted on, which is the same "only where there is something to flag" rule. Staying inside
-        # the Pipeline keeps it fitted per fold under GridSearchCV, so it cannot leak.
+        # add_indicator adds a measured-or-filled flag next to each column that had gaps, so the
+        # model can tell a filled-in value from a measured one - as the deep-learning side does.
+        # Trees are not scaled; they split on values and do not care about their range.
         numeric_steps: List[Tuple[str, BaseEstimator]] = [
             ('imputer', SimpleImputer(strategy='median', add_indicator=True))
         ]
@@ -113,10 +163,8 @@ class PipelineBuilder:
             transformers.append((
                 'cat',
                 Pipeline([
-                    # No add_indicator here: OrdinalEncoder already maps a missing category to its
-                    # own reserved value, and OneHotEncoder gives it its own column, so the flag
-                    # would duplicate information the encoding already carries. That matches the
-                    # Lightning side, where a blank category becomes the reserved embedding index.
+                    # No flag here: a missing category already gets a code, or a column, of its
+                    # own, so the flag would say the same thing twice.
                     ('imputer', SimpleImputer(strategy='most_frequent')),
                     ('encoder', categorical_encoder),
                 ]),
@@ -132,6 +180,24 @@ class PipelineBuilder:
         categorical_cols: Optional[List[str]] = None,
         numeric_cols: Optional[List[str]] = None,
     ) -> Pipeline:
+        """Return the estimator wrapped in its input-preparation steps.
+
+        Parameters
+        ----------
+        model : estimator
+            The scikit-learn estimator to wrap.
+        is_log_target : bool, default False
+            Train on 10·ln(1 + *y*) and convert the predictions back, for the targets listed in
+            ``COLUMNS_TO_TRANSFORM``.
+        categorical_cols : list of str, optional
+            The category columns.
+        numeric_cols : list of str, optional
+            The numeric columns. Anything in neither list is dropped.
+
+        Returns
+        -------
+        sklearn.pipeline.Pipeline
+        """
         categorical_cols = categorical_cols or []
         numeric_cols = numeric_cols or []
         preprocessor = self._build_preprocessor(model, categorical_cols, numeric_cols)

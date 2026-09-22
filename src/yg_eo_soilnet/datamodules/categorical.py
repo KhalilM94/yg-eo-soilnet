@@ -1,24 +1,13 @@
-"""Fitted categorical vocabularies for the PyTorch path.
+"""Number the labels of a category column, so a deep-learning model can look them up.
 
-The sklearn path has had a real categorical capability for a while: a vocabulary fitted inside the
-pipeline, with an explicit unknown policy (``scikit_trainer_utils.PipelineBuilder``). This module is
-its deep-learning counterpart, and it is deliberately **framework-neutral** - pandas and numpy only,
-no torch, no Lightning, no bundle or graph concept - so that any datamodule can fit a vocabulary here
-and any model can consume the integer codes it produces. The torch side lives in
-``models.lightningmodules.tabular_encoders``.
+A category such as a landform class reaches `soil_cnn` as an :term:`embedding`: one learned vector
+per label, found by the label's number. The numbering here is learned from the training points only
+and saved with the model, so a label keeps its number when the model is later applied to new points.
+Code 0 is reserved for labels the training points never held and for missing values, so an unknown
+label cannot stop a prediction.
 
-Three properties distinguish this from the ordinal ``pd.factorize`` encoding it replaced:
-
-* **The vocabulary is fitted, not derived.** ``pd.factorize`` re-derives its mapping from whatever
-  frame it is handed, so the same category takes a different integer in training and in inference and
-  a checkpoint cannot be applied to new data. Here the vocabulary is an object you fit once, on the
-  training split alone, and carry with the model.
-* **Index 0 is reserved.** Every category the training split never saw, and every missing value,
-  maps to it. There is always somewhere for an unknown to go, so inference cannot fail on a category
-  that simply did not exist when the model was fitted.
-* **The codes are indices, not magnitudes.** Nothing here casts them to float, because the consumer
-  is an ``nn.Embedding`` lookup rather than a ``nn.Linear`` that would read ``peak_ridge < valley``
-  as a meaningful inequality.
+The codes are labels, not quantities: nothing compares or adds them. The scikit-learn models encode
+their categories inside their own pipeline instead. This module uses pandas and NumPy only.
 """
 
 from __future__ import annotations
@@ -29,33 +18,38 @@ import numpy as np
 import pandas as pd
 
 
-#: Reserved code for "not in the fitted vocabulary" and for "missing". One shared slot rather than
-#: two: with a handful of categories per column there is rarely enough signal to learn a separate
-#: embedding row for absence, and a single reserved index keeps the cardinality arithmetic obvious
-#: (``cardinality == len(vocabulary) + 1``).
+#: The code for a label the training points never held, and for a missing value. They share one
+#: slot, so a column has ``len(vocabulary) + 1`` codes in all.
 OOV_INDEX = 0
 
-#: Label reported for :data:`OOV_INDEX` in logs and summaries. Never a key in a vocabulary.
+#: How :data:`OOV_INDEX` is named in messages. Never a label itself.
 OOV_TOKEN = "<OOV>"
 
 
 class FeatureBlocks(NamedTuple):
-    """Which of a frame's feature columns are continuous and which are categorical."""
+    """Which of a table's input columns hold numbers and which hold categories.
+
+    Attributes
+    ----------
+    continuous_columns : list of str
+        The numeric inputs.
+    categorical_columns : list of str
+        The category inputs, which have to be numbered before a model can read them.
+    """
 
     continuous_columns: list[str]
     categorical_columns: list[str]
 
 
 def _normalize_label(value: Any) -> Optional[str]:
-    """Map one raw cell to a vocabulary key, or to ``None`` when it is missing.
+    """Return a cell as a label, or None when it is missing.
 
-    Missing means NaN/None/pd.NA **or** a blank string: a CSV that quotes its empty cells produces
-    ``""`` rather than NaN, and treating that as a genuine category would give it an embedding row
-    trained on whatever "we did not record this" happens to correlate with.
+    A blank string counts as missing: a CSV that quotes its empty cells writes ``""``, which is not
+    a category of its own.
     """
     if value is None:
         return None
-    # pd.isna on a scalar is safe; guard anyway so an unexpected array-like cannot raise here.
+    # pd.isna raises on a list-like cell; the guard keeps one odd cell from stopping the run.
     try:
         if bool(pd.isna(value)):
             return None
@@ -66,7 +60,7 @@ def _normalize_label(value: Any) -> Optional[str]:
 
 
 def _as_object_matrix(values: Any, feature_names: Optional[Sequence[str]]) -> tuple[np.ndarray, list[str]]:
-    """Coerce a DataFrame/2-D array-like to an ``(n_rows, n_features)`` object array plus its names."""
+    """Return a table or 2-D array as an ``(n_rows, n_columns)`` object array plus its column names."""
     if isinstance(values, pd.DataFrame):
         names = list(values.columns) if feature_names is None else list(feature_names)
         return values.to_numpy(dtype=object), [str(name) for name in names]
@@ -85,14 +79,24 @@ def _as_object_matrix(values: Any, feature_names: Optional[Sequence[str]]) -> tu
 
 
 class CategoricalEncoder:
-    """Fits a per-column vocabulary and turns raw labels into embedding indices.
+    """Number the labels of each category column, and apply that numbering to other rows.
 
-    Follows the sklearn ``fit``/``transform`` shape so it slots into the places a datamodule already
-    fits statistics - on the sequence path it is fitted next to the standardization statistics, on
-    the training split alone, for the same reason.
+    Follows the familiar ``fit`` / ``transform`` shape. Fit it on the training points only: their
+    labels are numbered ``1, 2, 3, ...`` in alphabetical order, and anything else - an unseen label,
+    a missing value - gets :data:`OOV_INDEX`. The numbering is saved in the model's checkpoint.
 
-    Codes are ``1 .. len(vocabulary)``; :data:`OOV_INDEX` is reserved. So ``cardinalities[i]`` is
-    ``len(vocabularies[i]) + 1`` and is exactly the ``num_embeddings`` an ``nn.Embedding`` needs.
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> training = pd.DataFrame({"landform_class": ["plateau", "valley", "plateau"]})
+    >>> encoder = CategoricalEncoder().fit(training)
+    >>> encoder.vocabularies
+    [['plateau', 'valley']]
+    >>> new_points = pd.DataFrame({"landform_class": ["valley", "dune", None]})
+    >>> encoder.transform(new_points).ravel().tolist()   # "dune" was never seen; None is missing
+    [2, 0, 0]
+    >>> encoder.cardinalities                            # two labels plus the reserved code
+    [3]
     """
 
     def __init__(self) -> None:
@@ -107,10 +111,26 @@ class CategoricalEncoder:
     def from_vocabularies(
         cls, feature_names: Sequence[str], vocabularies: Sequence[Sequence[str]]
     ) -> "CategoricalEncoder":
-        """Rebuild a fitted encoder from vocabularies carried in a checkpoint.
+        """Rebuild a fitted encoder from the numbering saved in a checkpoint.
 
-        This is what makes a trained model applicable to a frame it has never seen: the mapping
-        travels with the weights instead of being re-derived from the new data.
+        The numbering travels with the weights, which is what lets a saved model read data it has
+        never seen.
+
+        Parameters
+        ----------
+        feature_names : sequence of str
+            The category columns, in order.
+        vocabularies : sequence of sequence of str
+            Each column's labels in code order; the first gets code 1.
+
+        Returns
+        -------
+        CategoricalEncoder
+
+        Raises
+        ------
+        ValueError
+            If there are not as many vocabularies as column names.
         """
         feature_names = [str(name) for name in feature_names]
         vocabularies = [[str(category) for category in vocabulary] for vocabulary in vocabularies]
@@ -132,26 +152,44 @@ class CategoricalEncoder:
 
     @property
     def is_fitted(self) -> bool:
+        """Whether a numbering has been fitted or loaded."""
         return self._is_fitted
 
     @property
     def feature_names(self) -> list[str]:
+        """The category columns, in order."""
         return list(self._feature_names)
 
     @property
     def vocabularies(self) -> list[list[str]]:
-        """Per column, the training categories in code order. Plain ``str``, so this survives a
-        checkpoint round-trip under ``torch.load(weights_only=True)``."""
+        """Each column's training labels, in code order (the first has code 1).
+
+        Plain strings, so they can be saved in a checkpoint and read back.
+        """
         return [list(vocabulary) for vocabulary in self._vocabularies]
 
     @property
     def cardinalities(self) -> list[int]:
-        """Per column, ``len(vocabulary) + 1`` - the reserved slot included."""
+        """How many codes each column has: its labels plus the reserved code."""
         return [len(vocabulary) + 1 for vocabulary in self._vocabularies]
 
     # --- fit / transform ---------------------------------------------------
 
     def fit(self, values: Any, feature_names: Optional[Sequence[str]] = None) -> "CategoricalEncoder":
+        """Learn the numbering from these rows - the training points only.
+
+        Parameters
+        ----------
+        values : pandas.DataFrame or array-like of shape (n_rows, n_columns)
+            The raw labels.
+        feature_names : sequence of str, optional
+            The column names, needed when ``values`` is not a DataFrame.
+
+        Returns
+        -------
+        CategoricalEncoder
+            This encoder, fitted.
+        """
         matrix, names = _as_object_matrix(values, feature_names)
         self._feature_names = names
         self._vocabularies = []
@@ -163,9 +201,8 @@ class CategoricalEncoder:
                 for label in (_normalize_label(cell) for cell in matrix[:, column_index])
                 if label is not None
             }
-            # Sorted, so the mapping depends on the set of training categories and not on the row
-            # order they happened to arrive in. Two runs over shuffled copies of the same split must
-            # produce the same integers, or a checkpoint's vocabulary means nothing.
+            # Sorted, so the numbering depends on which labels appeared and not on the order the
+            # rows arrived in.
             vocabulary = sorted(observed)
             self._vocabularies.append(vocabulary)
             self._lookups.append({category: index + 1 for index, category in enumerate(vocabulary)})
@@ -174,6 +211,26 @@ class CategoricalEncoder:
         return self
 
     def transform(self, values: Any) -> np.ndarray:
+        """Return the code of every label as an ``(n_rows, n_columns)`` array of whole numbers.
+
+        Unseen labels and missing values give :data:`OOV_INDEX`.
+
+        Parameters
+        ----------
+        values : pandas.DataFrame or array-like
+            Raw labels, in the columns the encoder was fitted on.
+
+        Returns
+        -------
+        numpy.ndarray of int
+
+        Raises
+        ------
+        RuntimeError
+            If the encoder has not been fitted.
+        ValueError
+            If the number of columns is not the fitted one.
+        """
         if not self._is_fitted:
             raise RuntimeError("CategoricalEncoder.transform called before fit")
 
@@ -188,21 +245,32 @@ class CategoricalEncoder:
         for column_index, lookup in enumerate(self._lookups):
             for row_index, cell in enumerate(matrix[:, column_index]):
                 label = _normalize_label(cell)
-                # Unknown and missing share OOV_INDEX, which is what `codes` is already filled with.
+                # Unknown and missing both keep OOV_INDEX, which `codes` is already filled with.
                 if label is not None:
                     codes[row_index, column_index] = lookup.get(label, OOV_INDEX)
         return codes
 
     def fit_transform(self, values: Any, feature_names: Optional[Sequence[str]] = None) -> np.ndarray:
+        """Learn the numbering from these rows and return their codes."""
         return self.fit(values, feature_names).transform(values)
 
     # --- reporting ---------------------------------------------------------
 
     def oov_fraction(self, codes: np.ndarray) -> dict[str, float]:
-        """Share of rows landing on the reserved slot, per column.
+        """Share of rows falling on the reserved code, per column.
 
-        Worth logging after transform: a column that is mostly OOV on the validation split is a
-        vocabulary the training split could not cover, and its embedding is close to a constant.
+        Worth checking: a column mostly on the reserved code means the training points did not cover
+        its labels, and the model learns almost nothing from it.
+
+        Parameters
+        ----------
+        codes : numpy.ndarray
+            What :meth:`transform` returned.
+
+        Returns
+        -------
+        dict of str to float
+            One share per column, between 0 and 1.
         """
         codes = np.asarray(codes)
         if codes.size == 0:
@@ -213,6 +281,7 @@ class CategoricalEncoder:
         }
 
     def summary(self) -> str:
+        """One line naming each category column and how many labels it has."""
         return ", ".join(
             f"{name} ({len(vocabulary)} categories + {OOV_TOKEN})"
             for name, vocabulary in zip(self._feature_names, self._vocabularies)
@@ -226,16 +295,35 @@ def resolve_categorical_columns(
     *,
     logger: Any,
 ) -> FeatureBlocks:
-    """Split schema-filtered feature columns into continuous and categorical, from the declaration.
+    """Split the input columns into the numeric ones and the category ones.
 
-    ``CATEGORICAL_FEATURES`` is the single source of truth, which is the point: dtype sniffing cannot
-    express "this integer column is a class id", and it silently disagreed with the list the sklearn
-    path reads, so the two paths trained on different predictors while claiming otherwise.
+    ``CATEGORICAL_FEATURES`` in ``data_spec.yml`` decides, for both model families: the type of a
+    column cannot say whether a whole number is a measurement or a class number.
 
-    Both failure modes raise rather than warn. A declared column that is not in the frame is usually
-    a config left over from a retired dataset, and dropping it quietly is how the deep path ended up
-    ignoring the declaration in the first place. An undeclared non-numeric column would previously be
-    factorized into a magnitude; refusing it forces a decision instead of inventing an ordering.
+    Parameters
+    ----------
+    config : Config
+        The run configuration; reads ``CATEGORICAL_FEATURES`` and ``EXCLUDE_CATEGORICAL``.
+    frame : pandas.DataFrame
+        The data, read to check which columns exist and which hold numbers.
+    feature_columns : iterable of str
+        The columns models may use as inputs, from
+        :meth:`DataManager.filter_schema <yg_eo_soilnet.data_manager.DataManager.filter_schema>`.
+    logger : logging.Logger
+        Where a note about declared columns the models will not see goes.
+
+    Returns
+    -------
+    FeatureBlocks
+
+    Raises
+    ------
+    KeyError
+        If a declared category column is not in the data - usually a leftover from another dataset.
+        Remove it, or list it under ``EXCLUDE_CATEGORICAL``.
+    ValueError
+        If an input column holds text but is not declared. Numbering it silently would invent an
+        order between its labels.
     """
     declared = [str(column) for column in (getattr(config, "CATEGORICAL_FEATURES", None) or [])]
     excluded = {str(column) for column in (getattr(config, "EXCLUDE_CATEGORICAL", None) or [])}
@@ -264,8 +352,8 @@ def resolve_categorical_columns(
             "add them to ELIMINATED_FEATURES to drop them."
         )
 
-    # Declared but filtered out of the schema - dropped as an id, an eliminated feature or a target.
-    # Legitimate, unlike the cases above, but worth saying out loud since the model will not see it.
+    # Declared, but not an input: dropped as an id, a lab column or an eliminated feature. That is
+    # allowed, unlike the two cases above, but the model will not see the column.
     withheld = [column for column in declared if column not in categorical_columns]
     if withheld:
         logger.info(
@@ -276,11 +364,23 @@ def resolve_categorical_columns(
 
 
 def split_feature_blocks(frame: pd.DataFrame, blocks: FeatureBlocks) -> tuple[np.ndarray, np.ndarray]:
-    """Extract the two feature blocks as arrays: continuous float32, categorical **raw labels**.
+    """Take the two blocks out of the table: numbers as 32-bit floats, categories as raw labels.
 
-    The labels are returned unencoded on purpose. Encoding needs a vocabulary, a vocabulary must be
-    fitted on the training split alone, and at this point in the pipeline the split does not exist
-    yet - fitting one here is exactly the leak this module removes.
+    The labels stay unnumbered here: the numbering has to be learned from the training points, and
+    the split does not exist yet at this point.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The data.
+    blocks : FeatureBlocks
+        Which columns go in which block.
+
+    Returns
+    -------
+    continuous : numpy.ndarray of shape (n_rows, n_continuous)
+    categorical : numpy.ndarray of shape (n_rows, n_categorical)
+        Raw labels, as objects.
     """
     rows = len(frame)
     continuous = (

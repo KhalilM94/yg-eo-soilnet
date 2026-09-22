@@ -1,3 +1,5 @@
+"""Serve the deep-learning model its batches, and learn the scaling that prepares them."""
+
 from __future__ import annotations
 
 from copy import deepcopy
@@ -18,7 +20,7 @@ from yg_eo_soilnet.targets import select_target_columns
 
 
 class _PointDataset(Dataset):
-    """Yields point indices; the DataLoader batches them and collate assembles the padded batch."""
+    """Hands out point numbers; the batch itself is assembled by ``_collate_points``."""
 
     def __init__(self, point_indices: np.ndarray):
         self.point_indices = np.asarray(point_indices, dtype=np.int64)
@@ -31,19 +33,50 @@ class _PointDataset(Dataset):
 
 
 class SoilSequenceDataModule(LightningDataModule):
-    """Serves static covariates plus ragged, date-stamped observation sequences.
+    """Serve `soil_cnn` its batches: covariates, categories, lab values and dated readings.
 
-    Two properties are load-bearing:
+    It learns everything needed to prepare the inputs - the standardization statistics, the fill
+    values for gaps, the category numbering, the area the coordinates cover - **from the training
+    points only**, so nothing about the held-out points reaches the model. :meth:`setup` fits them;
+    :meth:`preprocessing_state` hands them to the checkpoint, so a saved model can prepare raw data
+    on its own, and :meth:`apply_preprocessing_state` installs them again when it is served.
 
-    * **Padding is a batch-local artefact.** Sequences are stored ragged and padded only to the
-      current batch's longest series, so ``L`` differs from batch to batch. Nothing downstream may
-      assume a fixed number of steps.
-    * **``sequence_mask.sum(1)`` is a genuine length.** Every unmasked token is a real observation,
-      so the count-versus-length confusion that dogged the dense-axis representation cannot arise
-      here, and packing an RNN by that count is correct.
+    Points keep different numbers of readings. Each batch is padded to its own longest series and
+    carries a mask, so nothing assumes a fixed number of readings.
 
-    Batches are plain dicts of tensors, so Lightning moves them to the accelerator by itself; the
-    model needs no device-transfer override.
+    Parameters
+    ----------
+    sequence_bundle : SoilSequenceBundle or mapping
+        Everything known about every point; see
+        :class:`~yg_eo_soilnet.datamodules.sequence.sequence_bundle.SoilSequenceBundle`.
+    batch_size : int, default 32
+        Points per batch.
+    val_size, test_size : float, default 0.2
+        Only used without a ``split_plan``, for standalone use and tests.
+    num_workers : int, default 0
+        Background processes preparing batches.
+    pin_memory : bool, default False
+        Speeds up copying batches to a GPU.
+    persistent_workers : bool, default False
+        Keep the worker processes alive between epochs.
+    seed : int, default 42
+        Seed for the fallback split.
+    shuffle : bool, default False
+        Draw the training points in a new order each epoch.
+    target_transform : {None, "log1p"}, optional
+        Train on 10·ln(1 + *y*) instead of *y*.
+    max_sequence_length : int, optional
+        Keep at most this many readings per point, the most recent ones.
+    split_plan : SplitPlan, optional
+        The run's shared split. Given, it decides the three sets and ``val_size``/``test_size`` are
+        ignored.
+    active_targets : list of str, optional
+        The targets this model predicts; all of the bundle's targets unless given.
+
+    Raises
+    ------
+    ValueError
+        If ``target_transform`` is neither ``None`` nor ``"log1p"``.
     """
 
     def __init__(
@@ -64,10 +97,8 @@ class SoilSequenceDataModule(LightningDataModule):
     ):
         super().__init__()
         self.sequence_bundle = deepcopy(SoilSequenceBundle.from_mapping(sequence_bundle))
-        # The subset of the bundle's targets this run fits. None keeps all of them, which is the
-        # joint head. Narrowed HERE, immediately after the copy, so everything below - target_dim,
-        # the per-column scaler, the y frames, the batch `y`, the serving state - follows from the
-        # two fields it rewrites and needs no per-target branch of its own.
+        # Narrowed once, here: every width, statistic and frame below then follows from it, so
+        # nothing further down needs a one-target branch of its own.
         self.active_targets = list(active_targets) if active_targets else None
         narrowed, target_names, _ = select_target_columns(
             self.sequence_bundle.targets, self.sequence_bundle.target_names, self.active_targets
@@ -83,9 +114,8 @@ class SoilSequenceDataModule(LightningDataModule):
         self.batch_size = batch_size
         self.val_size = val_size
         self.test_size = test_size
-        # The run's shared split. When present it decides train/val/test and `val_size`/`test_size`
-        # are ignored - the point being that this datamodule and the sklearn family hold out the
-        # same points. None keeps the legacy ratio carve, which standalone and test use rely on.
+        # The run's shared split. Without one, the fractions below are used instead - which
+        # standalone and test use rely on.
         self.split_plan = split_plan
         self.num_workers = num_workers
         self.pin_memory = pin_memory
@@ -105,71 +135,55 @@ class SoilSequenceDataModule(LightningDataModule):
         self.X_test_frame_ = None
         self.y_test_frame_ = None
 
-        # Standardization statistics, fitted on the train split only in setup().
+        # Fitted on the training points only, in setup().
         self.static_mean_: Optional[np.ndarray] = None
         self.static_scale_: Optional[np.ndarray] = None
-        # The FILL value for a missing covariate, kept separately from the mean for the same reason
-        # label_median_ below is: a skewed column's mean sits somewhere no sample actually is.
+        # What a missing covariate is filled with. The median, not the mean: a skewed column's
+        # mean sits where no sample actually is.
         self.static_median_: Optional[np.ndarray] = None
-        # Categorical vocabulary, fitted on the train split only in setup() for the same reason the
-        # scaler is: a category seen only in validation or test must reach the model as "unknown",
-        # exactly as an unseen category would at inference time.
+        # The category numbering, also from the training points only: a label seen only in
+        # validation or test must reach the model as unknown, exactly as a new label would later.
         self.categorical_encoder_: Optional[CategoricalEncoder] = None
         self.categorical_codes_: Optional[np.ndarray] = None
         self.sequence_mean_: dict[str, np.ndarray] = {}
         self.sequence_scale_: dict[str, np.ndarray] = {}
         self.target_mean_: Optional[np.ndarray] = None
         self.target_scale_: Optional[np.ndarray] = None
-        # Covariance of the STANDARDIZED training targets, i.e. their correlation matrix. Fitted
-        # here rather than derived by the model because this is the only place holding the whole
-        # training split at once; the config factory offers it to whichever loss wants it.
+        # How the training targets vary together, in the same units the loss works in. Fitted here
+        # because this is the only place holding every training point at once.
         self.target_covariance_: Optional[np.ndarray] = None
-        # Lab-value statistics, train-only for the same reason as everything above. The median is
-        # kept separately from the mean because it is the FILL value, not a centring constant: a
-        # skewed column's mean sits somewhere no sample actually is.
+        # The same three statistics for the lab values carried as auxiliary inputs.
         self.label_mean_: Optional[np.ndarray] = None
         self.label_scale_: Optional[np.ndarray] = None
         self.label_median_: Optional[np.ndarray] = None
-        # The TRAIN-split bounding box, which is what maps lat/lon onto the [-1, 1] the harmonic
-        # encoder's frequencies are defined on. Train-only for the same reason every statistic here
-        # is, and stored in preprocessing_state for a reason specific to this one: a serving request
-        # can be a SINGLE point, whose own bounding box is degenerate, so a re-fit would normalize
-        # every served point to the centre of itself.
+        # The area the training points cover, which is what the coordinates are measured against.
+        # Saved with the model: a served request can be one point, whose own extent is nothing.
         self.coord_min_: Optional[np.ndarray] = None
         self.coord_max_: Optional[np.ndarray] = None
 
-        # The shape contract the Lightning config factory reads off the datamodule. Note the
-        # deliberate absence of `temporal_steps` and `edge_attr_dim`: the model is length-agnostic
-        # and graph-free, and the factory only injects attributes that actually exist here.
-        # Validity channels widen the static block, so static_dim counts them: the model's first
-        # Linear must match what _collate_points actually hands it. Only covariates that genuinely
-        # have gaps carry a flag, so a complete dataset leaves this exactly as it was.
+        # The input widths the model is built from. The measured-or-filled flags widen the
+        # covariate block, so static_dim counts them: the model must match what a batch carries.
         self.static_validity_names = list(self.sequence_bundle.static_validity_names)
         self.static_dim = int(
             np.asarray(self.sequence_bundle.static_features).shape[1] + len(self.static_validity_names)
         )
         self.target_dim = int(np.asarray(self.sequence_bundle.targets).shape[1])
         self.static_feature_names = list(self.sequence_bundle.static_feature_names)
-        # The subset of the above declared as spatial context. Purely descriptive: these columns are
-        # already inside static_features and are standardized with the rest, so this changes no
-        # shape. It travels so the explainer can roll them up as a block instead of scattering them
-        # among the ordinary covariates.
+        # Which of those covariates are the spatial-context group. Descriptive only: they are
+        # ordinary inputs, and this just lets the SHAP figures report them together.
         self.context_feature_names = list(self.sequence_bundle.context_feature_names)
-        # 2 when USE_HARMONIC_COORDS put coordinates on the bundle, 0 otherwise. The config factory
-        # reads it as coord_dim, and 0 is what keeps the model's coordinate branch an nn.Identity
-        # with no parameters and no state_dict keys.
+        # 2 when the model reads coordinates, 0 otherwise - and 0 leaves it without a coordinate
+        # branch at all.
         self.coord_dim = int(self.sequence_bundle.coord_dim)
         self.coord_names = list(self.sequence_bundle.coord_names)
-        # Categorical shape contract. The names are known now, but the cardinalities are not: they
-        # depend on the vocabulary, which depends on the train split, which setup() decides. The
-        # config factory reads these AFTER calling setup(), so by then they are filled in.
+        # The category columns are known now; how many codes each has is not, since that depends
+        # on the training points. setup() fills those in before the model is built.
         self.categorical_feature_names = list(self.sequence_bundle.categorical_feature_names)
         self.categorical_cardinalities: list[int] = []
         self.categorical_vocabularies: list[list[str]] = []
         self.target_names = list(self.sequence_bundle.target_names)
-        # Every lab column the bundle carries, offered to the model so it can resolve the subset
-        # named in auxiliary_label_columns. Nothing is selected here: the choice belongs to the
-        # architecture, and this datamodule serves several.
+        # Every lab column on offer; a model picks the ones it named as auxiliary inputs. One
+        # datamodule serves several models, so nothing is selected here.
         self.label_feature_names = list(self.sequence_bundle.label_feature_names)
         self.label_dim = int(self.sequence_bundle.label_dim)
         self.modality_dims = dict(self.sequence_bundle.modality_dims)
@@ -177,18 +191,16 @@ class SoilSequenceDataModule(LightningDataModule):
         self.grid_years = self._infer_grid_years()
 
     def preprocessing_state(self) -> dict:
-        """Everything fitted in :meth:`setup` that a saved model needs in order to serve raw data.
+        """Everything a saved model needs to prepare raw data by itself.
 
-        The scalers here are fitted on the TRAIN SPLIT ONLY, and until this method existed they
-        lived nowhere but on this object. A checkpoint therefore restored the weights and the target
-        inverse-transform (both are buffers on the module) but not the input standardization, so a
-        reloaded model could only ever be fed data that some datamodule had already scaled - which
-        is to say, it could not be deployed. Attaching this to the module closes that gap.
+        The statistics, fill values, category numbering, column names and the area the coordinates
+        were measured against - all fitted on the training points in :meth:`setup`. They go into the
+        :term:`checkpoint`, which is what makes a saved model usable on new points.
 
-        Everything is returned as plain builtins. That is not cosmetic: numpy arrays in a Lightning
-        module's ``hyper_parameters`` make the checkpoint unloadable under ``torch.load``'s
-        ``weights_only=True`` default from PyTorch 2.6 on, which is the same constraint that put
-        ``as_float_list`` in the model constructors.
+        Returns
+        -------
+        dict
+            Plain lists, numbers and strings only, so the checkpoint can be read back safely.
         """
 
         def as_list(values) -> list[float]:
@@ -201,15 +213,13 @@ class SoilSequenceDataModule(LightningDataModule):
             "static_scale": as_list(self.static_scale_),
             "static_median": as_list(self.static_median_),
             "static_feature_names": list(self.static_feature_names),
-            # Which covariates carry a measured-vs-filled flag, and therefore how wide x_static is.
-            # Without this a served model would rebuild the flags from whatever the request happens
-            # to be missing and hand the network a different width than it was trained on.
+            # Which covariates carry a flag, and so how wide the covariate block is. A served
+            # model must keep that width, whatever the new points happen to be missing.
             "static_validity_names": list(self.static_validity_names),
-            # Which of those covariates are the declared spatial-context group. Carried so a
-            # restored model can label its attributions the way the training run did.
+            # Carried so a restored model labels its attributions as the training run did.
             "context_feature_names": list(self.context_feature_names),
-            # The train bounding box, without which a served point cannot be placed on the same
-            # [-1, 1] interval the model was trained on. Empty when coordinates are switched off.
+            # Without this a new point cannot be placed on the same scale the model was trained
+            # on. Empty when coordinates are switched off.
             "coord_min": as_list(self.coord_min_),
             "coord_max": as_list(self.coord_max_),
             "coord_names": list(self.coord_names),
@@ -232,17 +242,22 @@ class SoilSequenceDataModule(LightningDataModule):
         }
 
     def apply_preprocessing_state(self, state: Mapping[str, Any]) -> None:
-        """Install statistics fitted ELSEWHERE, instead of fitting them from this data.
+        """Install the statistics a model was trained with, instead of fitting new ones.
 
-        The inference counterpart of :meth:`setup`. At serving time the incoming points are not a
-        training split - they may be a single point - so re-fitting a scaler on them would
-        standardize each request against itself and produce predictions that drift with batch
-        composition. This installs the statistics the model was trained with, which is the only
-        correct choice, and is why :meth:`preprocessing_state` puts them in the checkpoint.
+        The counterpart of :meth:`setup`, used when a saved model predicts new points: those points
+        are not a training set - there may be one of them - so fitting statistics on them would
+        measure each request against itself and make a prediction depend on what else was in the
+        batch. A category the new points have and training did not lands on the reserved code.
 
-        Categorical codes are re-derived through ``CategoricalEncoder.from_vocabularies``, so a
-        category this data has but training did not lands on the reserved out-of-vocabulary index
-        rather than shifting every other code.
+        Parameters
+        ----------
+        state : mapping
+            What :meth:`preprocessing_state` returned.
+
+        Raises
+        ------
+        ValueError
+            If ``state`` is empty.
         """
         if not state:
             raise ValueError("apply_preprocessing_state needs the state produced by preprocessing_state()")
@@ -254,17 +269,14 @@ class SoilSequenceDataModule(LightningDataModule):
         self.static_mean_ = as_array(state.get("static_mean"))
         self.static_scale_ = as_array(state.get("static_scale"))
         self.static_median_ = as_array(state.get("static_median"))
-        # Restored rather than re-derived, so x_static keeps the width the model was trained with
-        # even when the incoming request happens to be missing a different set of covariates.
+        # Restored rather than worked out again, so the covariate block keeps the width the model
+        # was trained with.
         if "static_validity_names" in state:
             self.static_validity_names = [str(name) for name in (state.get("static_validity_names") or [])]
         if "context_feature_names" in state:
             self.context_feature_names = [str(name) for name in (state.get("context_feature_names") or [])]
-        # Installed rather than re-fitted, which is the whole point of this method: a serving batch
-        # can be one point, and a bounding box fitted on one point is a single location that
-        # normalizes to the centre of itself. Every request must be placed on the interval the model
-        # was trained on, so a point outside the training extent lands outside [-1, 1] - correct, and
-        # not clipped: the encoder is periodic and handles it.
+        # A point outside the training area lands outside the trained range, and is not clipped:
+        # that is correct, and the model handles it.
         self.coord_min_ = as_array(state.get("coord_min"), dtype=np.float64)
         self.coord_max_ = as_array(state.get("coord_max"), dtype=np.float64)
         if "coord_names" in state:
@@ -298,19 +310,25 @@ class SoilSequenceDataModule(LightningDataModule):
         self._is_setup = True
 
     def collate(self, point_indices) -> dict[str, Any]:
-        """Public entry to the batch builder, so serving code need not reach for a private name."""
+        """Build one batch from these point numbers.
+
+        Parameters
+        ----------
+        point_indices : sequence of int
+            Positions in the bundle.
+
+        Returns
+        -------
+        dict
+            Tensors ready for the model.
+        """
         return self._collate_points(point_indices)
 
     def _infer_grid_years(self) -> int:
-        """How many calendar years a per-point grid must span to hold every observation.
+        """How many years the :term:`calendar grid` needs, from the longest single point history.
 
-        Derived from the data rather than configured, so a one-year dataset produces a one-row grid
-        and a decade produces ten. Consumers that rasterise onto a calendar grid read this; the
-        sequence encoders ignore it entirely.
-
-        The span is measured per point and maximised, not measured across the dataset: a grid is
-        anchored on each point's own latest observation, so what matters is the longest individual
-        history, not the calendar range the dataset as a whole happens to cover.
+        Read from the data, so one year of readings gives a one-row grid and ten years give ten.
+        Measured per point, because each point's grid is counted back from its own latest reading.
         """
         longest = 0
         has_observations = False
@@ -320,9 +338,8 @@ class SoilSequenceDataModule(LightningDataModule):
                 if not times.size:
                     continue
                 has_observations = True
-                # Counted in CALENDAR years, not decimal ones. A point spanning 2017.9 to 2018.1 is
-                # 0.2 decimal years but occupies two rows, so measuring the decimal span would
-                # under-allocate the grid and silently drop the earlier reading.
+                # Counted in calendar years: readings from December 2017 to February 2018 are two
+                # months apart but occupy two rows of the grid.
                 longest = max(longest, int(np.floor(times[-1])) - int(np.floor(times[0])) + 1)
         if not has_observations:
             return 0
@@ -331,6 +348,13 @@ class SoilSequenceDataModule(LightningDataModule):
     # --- lifecycle ---------------------------------------------------------
 
     def setup(self, stage: Optional[str] = None) -> None:
+        """Split the points and fit every statistic on the training ones. Runs once.
+
+        Parameters
+        ----------
+        stage : str, optional
+            Lightning's stage name; the same work is done whatever it is.
+        """
         if self._is_setup:
             return
 
@@ -345,34 +369,39 @@ class SoilSequenceDataModule(LightningDataModule):
         self.X_test_frame_, self.y_test_frame_ = self._build_split_frames(test_idx)
 
     def train_dataloader(self):
+        """The training batches, shuffled if asked for."""
         if not self._is_setup:
             self.setup("fit")
-        # drop_last on TRAIN only: a trailing batch of one point makes BatchNorm1d raise, and a
-        # handful of points is a noisy gradient regardless. Val/test/predict must keep every sample.
+        # Only training drops a short last batch: a batch of one point cannot be normalized, and a
+        # handful of points makes a noisy update. Scoring must keep every point.
         drop_last = self.train_idx_ is not None and self.train_idx_.size > max(1, int(self.batch_size))
         return self._make_loader(self.train_idx_, shuffle=self.shuffle, drop_last=drop_last)
 
     def val_dataloader(self):
+        """The validation batches, watched during training."""
         if not self._is_setup:
             self.setup("fit")
         return self._make_loader(self.val_idx_)
 
     def test_dataloader(self):
+        """The test batches, used once training has finished."""
         if not self._is_setup:
             self.setup("test")
         return self._make_loader(self.test_idx_)
 
     def predict_dataloader(self):
+        """The test batches again, in a fixed order, for collecting predictions."""
         if not self._is_setup:
             self.setup("predict")
-        # Never shuffle: the trainer aligns predictions positionally with y_test_frame_.
+        # Never shuffled: predictions are matched to the measured values by position.
         return self._make_loader(self.test_idx_)
 
     def _make_loader(self, point_indices, *, shuffle: bool = False, drop_last: bool = False):
+        """Build a DataLoader over these points."""
         point_indices = np.asarray(point_indices, dtype=np.int64)
         batch_size = max(1, int(self.batch_size)) if point_indices.size else 1
-        # build_loader, not a bare DataLoader: it keeps num_workers and persistent_workers from
-        # shifting the global RNG stream, so they cannot change what a run trains to.
+        # build_loader, not a bare DataLoader: the loading settings must not change what the run
+        # trains to. See yg_eo_soilnet.datamodules.loaders.
         return build_loader(
             _PointDataset(point_indices),
             batch_size=batch_size,
@@ -388,16 +417,18 @@ class SoilSequenceDataModule(LightningDataModule):
 
     @staticmethod
     def _finite(array: np.ndarray) -> np.ndarray:
-        """Replace non-finite values with 0 so a single inf cannot poison a column statistic."""
+        """Replace missing and infinite values with 0, so one bad cell cannot spoil a statistic."""
         return np.nan_to_num(np.asarray(array, dtype=np.float64), nan=0.0, posinf=0.0, neginf=0.0)
 
     @staticmethod
     def _safe_scale(scale: np.ndarray) -> np.ndarray:
+        """Return standard deviations, with 1 where a column does not vary (never divide by 0)."""
         scale = np.asarray(scale, dtype=np.float32)
         scale[~np.isfinite(scale) | (scale < 1e-8)] = 1.0
         return scale
 
     def _fit_normalization(self, train_idx: np.ndarray) -> None:
+        """Fit every statistic - covariates, targets, lab values, readings - on the training points."""
         indices = np.asarray(train_idx, dtype=np.int64)
         if indices.size == 0:
             return
@@ -410,10 +441,9 @@ class SoilSequenceDataModule(LightningDataModule):
 
         static_features = np.asarray(self.sequence_bundle.static_features)
         if static_features.size:
-            # Median-filled from the TRAIN rows only, exactly as the lab values below are: a
-            # covariate gap costs one imputed value rather than the whole soil sample, and the fill
-            # value must not be able to see validation or test. Statistics are computed AFTER the
-            # fill so the model's inputs and the standardizer agree about where a filled cell lands.
+            # Gaps are filled with the training median, so a gap costs one value rather than the
+            # whole soil sample. The statistics are measured after the fill, so a filled cell lands
+            # where the model expects it.
             train_static = np.asarray(static_features[indices], dtype=np.float64)
             measured = np.isfinite(train_static)
             counts = measured.sum(axis=0)
@@ -428,17 +458,12 @@ class SoilSequenceDataModule(LightningDataModule):
 
         targets = np.asarray(self.sequence_bundle.targets)
         if targets.size:
-            # Fit on ALREADY-transformed targets so the two stages compose; the model inverts them
-            # in the opposite order.
+            # Measured after the log transform, so the two undo in the right order.
             train_targets = self._apply_target_transform(self._finite(targets[indices]))
             self.target_mean_ = train_targets.mean(axis=0).astype(np.float32)
             self.target_scale_ = self._safe_scale(train_targets.std(axis=0))
-            # In the SAME space the loss runs in, which is what makes this usable as-is: the loss
-            # never sees raw units, so a covariance fitted on raw units would describe a different
-            # geometry than the one the errors live in. Standardizing first also means the diagonal
-            # comes out at 1 and this IS the correlation matrix.
-            #
-            # ddof=0 to match np.std above; ddof=1 would put n/(n-1) on the diagonal instead of 1.
+            # In the units the loss works in, so a loss can use it as it stands. Standardized
+            # first, so this is the correlation matrix.
             if indices.size > 1 and train_targets.shape[1] > 1:
                 standardized = (train_targets - self.target_mean_) / self.target_scale_
                 self.target_covariance_ = np.atleast_2d(
@@ -447,29 +472,24 @@ class SoilSequenceDataModule(LightningDataModule):
 
         label_features = np.asarray(self.sequence_bundle.label_features)
         if label_features.size:
-            # Measured cells only, exactly as for the sequence channels below: a column that is 37%
-            # absent would otherwise have its own fill value counted into the mean it was derived
-            # from, shrinking the spread and inflating every real reading on standardization.
+            # Measured values only: counting the fill value into the statistics it came from would
+            # shrink the spread and stretch every real reading.
             train_labels = np.asarray(label_features[indices], dtype=np.float64)
             measured = np.isfinite(train_labels)
             counts = measured.sum(axis=0)
-            # A column with nothing measured in the train split cannot be filled from the data;
-            # 0.0 with unit scale makes it a constant the model can only ignore, which is the
-            # honest degenerate answer rather than a fabricated centre.
+            # A column measured on no training point becomes a constant the model can only
+            # ignore - the honest answer, rather than an invented centre.
             median = np.zeros(train_labels.shape[1], dtype=np.float64)
             for column in range(train_labels.shape[1]):
                 if counts[column]:
                     median[column] = np.median(train_labels[measured[:, column], column])
-            # Statistics are computed AFTER the fill, so the model's inputs and the standardizer
-            # agree about what a filled cell looks like: it lands wherever the train median lands,
-            # not at an arbitrary offset from a mean fitted on a different population.
+            # Measured after the fill, so a filled cell lands where the model expects it.
             filled = np.where(measured, train_labels, median)
             self.label_median_ = median.astype(np.float32)
             self.label_mean_ = filled.mean(axis=0).astype(np.float32)
             self.label_scale_ = self._safe_scale(filled.std(axis=0))
 
-        # Per-modality, per-channel statistics over the train points' real observations. With no
-        # padding at rest there is nothing to mask out - every row here is a genuine reading.
+        # One statistic per channel per data source, over the training points' real readings.
         for modality_name, per_point_values in (self.sequence_bundle.sequences or {}).items():
             channels = len(self.sequence_bundle.modality_columns.get(modality_name, []))
             selected = [
@@ -484,9 +504,8 @@ class SoilSequenceDataModule(LightningDataModule):
             valid = np.concatenate(
                 [self.sequence_bundle.validity_for(modality_name, index) for index in selected], axis=0
             )
-            # Statistics over measured cells only. Median-filled cells are all equal to one value by
-            # construction, so counting them pulls the mean toward that median and shrinks the
-            # standard deviation - which would then inflate every real reading on standardization.
+            # Measured readings only: filled ones are all the same value, and counting them would
+            # pull the mean towards it and shrink the spread.
             counts = valid.sum(axis=0)
             mean = np.where(counts > 0, (stacked * valid).sum(axis=0) / np.maximum(counts, 1), 0.0)
             variance = np.where(
@@ -498,11 +517,10 @@ class SoilSequenceDataModule(LightningDataModule):
             self.sequence_scale_[modality_name] = self._safe_scale(np.sqrt(variance))
 
     def _fit_categoricals(self, train_idx: np.ndarray) -> None:
-        """Fit the vocabulary on the train split, then encode every point against it.
+        """Number the category labels from the training points, then code every point with it.
 
-        Encoding the full array against a train-only vocabulary is the point: a category that occurs
-        only in validation or test is not in the vocabulary, so it lands on the reserved index and
-        the model meets it exactly as it will meet a genuinely new category at inference.
+        A label appearing only in validation or test is not in the numbering, so it gets the
+        reserved code - exactly as a new label would when the model is used later.
         """
         raw = np.asarray(self.sequence_bundle.static_categoricals, dtype=object)
         names = self.categorical_feature_names
@@ -514,9 +532,8 @@ class SoilSequenceDataModule(LightningDataModule):
             return
 
         indices = np.asarray(train_idx, dtype=np.int64)
-        # With no train split there is nothing to fit a vocabulary from; an empty one sends every
-        # category to the reserved index, which is the correct degenerate behaviour rather than an
-        # excuse to fall back on the full frame.
+        # With no training points there is nothing to number from, and every label gets the
+        # reserved code. Falling back on all the points would be looking at the held-out ones.
         fit_rows = raw[indices] if indices.size else raw[:0]
 
         encoder = CategoricalEncoder().fit(fit_rows, names)
@@ -526,12 +543,10 @@ class SoilSequenceDataModule(LightningDataModule):
         self.categorical_vocabularies = encoder.vocabularies
 
     def _standardize_static(self, values: np.ndarray, validity: Optional[np.ndarray] = None) -> np.ndarray:
-        """Covariates -> standardized, missing cells filled from the train median.
+        """Standardize the covariates, filling gaps with the training median.
 
-        `_finite` is not the fill: it maps NaN to 0, which after centring is a fabricated value
-        sitting wherever 0 happens to fall. The train median is where the column actually is. The
-        flags for the gappy columns are appended here so the model can tell the two apart, and are
-        computed from the RAW values before the fill, since afterwards the information is gone.
+        The measured-or-filled flags are worked out from the raw values first - afterwards a filled
+        cell looks like a measured one - and appended, so the model can tell them apart.
         """
         if values.size == 0:
             return np.asarray(values, dtype=np.float32)
@@ -553,48 +568,44 @@ class SoilSequenceDataModule(LightningDataModule):
     def _static_validity_channels(
         self, measured: np.ndarray, validity: Optional[np.ndarray]
     ) -> np.ndarray:
-        """The measured-vs-filled flags, restricted to the covariates that actually have gaps."""
+        """The measured-or-filled flags, for the covariates that have gaps."""
         if not self.static_validity_names:
             return np.empty((measured.shape[0], 0), dtype=np.float32)
         if validity is not None and np.asarray(validity).size:
             return np.asarray(validity, dtype=np.float32).reshape(measured.shape[0], -1)
-        # No precomputed mask (a caller standardizing raw rows, e.g. at serving time): derive the
-        # flags from the values themselves, taking the same columns in the same order.
+        # No flags supplied - raw rows, as at serving time - so read them off the values, taking
+        # the same columns in the same order.
         positions = [self.static_feature_names.index(name) for name in self.static_validity_names]
         return measured[:, positions].astype(np.float32)
 
     def _normalize_coords(self, values: np.ndarray) -> np.ndarray:
-        """lat/lon -> the [-1, 1] interval the harmonic frequencies are defined on.
+        """Place the coordinates on the -1 to 1 range the model's location branch works on.
 
-        A min-max onto the TRAIN bounding box, not a z-score. The distinction matters: the encoder's
-        frequency k is ``2**k * pi``, so it resolves about 1/2**k of the interval, and that is a
-        statement about the study area only while the study area IS the interval. Standardizing
-        instead would make the same k mean a different distance on every dataset.
-
-        A point outside the training extent lands outside [-1, 1] and is NOT clipped. Clipping would
-        collapse every point beyond the edge onto the boundary, making a distant location
-        indistinguishable from one just outside; sine and cosine are periodic and handle the
-        overflow without any special case.
+        Measured against the area the training points cover, so the scale means the same thing
+        whatever the dataset. A point outside that area lands outside the range and is left there:
+        clipping would make a distant location look like one just beyond the edge.
         """
         values = np.asarray(values, dtype=np.float64)
         if values.size == 0 or self.coord_min_ is None or self.coord_max_ is None:
             return values.astype(np.float32)
 
         span = np.asarray(self.coord_max_, dtype=np.float64) - np.asarray(self.coord_min_, dtype=np.float64)
-        # A degenerate axis - every training point on one meridian, or a single training point -
-        # carries no positional information at all. Mapping it to a constant 0 is the honest answer;
-        # dividing by it would produce inf and poison every downstream channel.
+        # An axis with no extent - every training point on one line, or only one point - carries
+        # no location information, so it becomes a constant rather than a division by zero.
         safe_span = np.where(np.isfinite(span) & (np.abs(span) > 1e-12), span, 1.0)
         normalized = 2.0 * (values - self.coord_min_) / safe_span - 1.0
         normalized = np.where(np.abs(span) > 1e-12, normalized, 0.0)
         return normalized.astype(np.float32)
 
     def _standardize_labels(self, values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Lab values -> ``(standardized, validity)``, filling what is missing from the train median.
+        """Standardize the lab values, filling gaps with the training median.
 
-        Validity is captured BEFORE the fill - afterwards the information is gone for good, and a
-        filled cell would be indistinguishable from a measured one. That is the same failure the
-        time-series validity channels exist to prevent.
+        Returns
+        -------
+        standardized : numpy.ndarray
+        validity : numpy.ndarray of bool
+            True where the value was measured. Recorded before the fill, after which the two would
+            be indistinguishable.
         """
         values = np.asarray(values, dtype=np.float64)
         validity = np.isfinite(values)
@@ -605,7 +616,7 @@ class SoilSequenceDataModule(LightningDataModule):
         return ((filled - self.label_mean_) / self.label_scale_).astype(np.float32), validity
 
     def _apply_target_transform(self, values: np.ndarray) -> np.ndarray:
-        """Forward target transform. Mirrors LogTransformer in yg_eo_soilnet.utils (10 * log1p)."""
+        """Apply the log transform to the targets, matching the scikit-learn side (10·ln(1 + y))."""
         if self.target_transform != "log1p" or values.size == 0:
             return values
 
@@ -622,12 +633,14 @@ class SoilSequenceDataModule(LightningDataModule):
         return 10.0 * np.log1p(values)
 
     def _standardize_targets(self, values: np.ndarray) -> np.ndarray:
+        """Transform and standardize the targets, into the units the model is trained in."""
         transformed = self._apply_target_transform(self._finite(values))
         if self.target_mean_ is None or values.size == 0:
             return transformed.astype(np.float32)
         return ((transformed - self.target_mean_) / self.target_scale_).astype(np.float32)
 
     def _standardize_sequence(self, modality_name: str, values: np.ndarray) -> np.ndarray:
+        """Standardize one data source's readings, channel by channel."""
         mean = self.sequence_mean_.get(modality_name)
         if mean is None or values.size == 0:
             return self._finite(values).astype(np.float32)
@@ -636,6 +649,7 @@ class SoilSequenceDataModule(LightningDataModule):
     # --- batch assembly ----------------------------------------------------
 
     def _collate_points(self, point_indices) -> dict[str, Any]:
+        """Assemble one batch: prepare every input and pad the readings to this batch's longest."""
         indices = np.asarray(point_indices, dtype=np.int64)
         bundle = self.sequence_bundle
 
@@ -654,16 +668,15 @@ class SoilSequenceDataModule(LightningDataModule):
             (indices.size, 0), dtype=np.float32
         )
 
-        # Indices, never scaled: they address an embedding table rather than measuring anything.
-        # Always well-shaped, so a dataset with no categoricals needs no None branch downstream.
+        # Codes, never scaled: they look up a vector rather than measure anything. Always present,
+        # if zero-width, so nothing downstream needs a special case.
         if self.categorical_codes_ is not None and self.categorical_codes_.shape[1]:
             x_categorical = self.categorical_codes_[indices]
         else:
             x_categorical = np.zeros((indices.size, 0), dtype=np.int64)
 
-        # ALL lab columns, always, in bundle order. The model index_selects the ones it was built
-        # for; sending only a selected subset would make the batch depend on which architecture is
-        # training, and this datamodule is shared and cached across several.
+        # Every lab column, always in the same order: the model picks what it was built for. One
+        # datamodule serves several models, so a batch must not depend on which one is training.
         label_features = np.asarray(bundle.label_features)
         if label_features.size:
             x_labels, x_label_validity = self._standardize_labels(label_features[indices])
@@ -671,9 +684,8 @@ class SoilSequenceDataModule(LightningDataModule):
             x_labels = np.zeros((indices.size, 0), dtype=np.float32)
             x_label_validity = np.zeros((indices.size, 0), dtype=bool)
 
-        # Normalized against the TRAIN bounding box, never against this batch. Always well-shaped
-        # and zero-width when coordinates are switched off, exactly as x_categorical is, so nothing
-        # downstream needs a None branch.
+        # Measured against the training area, never against this batch. Zero-width when
+        # coordinates are switched off.
         coords = np.asarray(bundle.coords)
         if coords.size and coords.shape[1]:
             x_coords = self._normalize_coords(coords[indices])
@@ -705,12 +717,11 @@ class SoilSequenceDataModule(LightningDataModule):
             selected_validity = []
             for index in indices.tolist():
                 values = np.asarray(per_point_values[index], dtype=np.float32)
-                # float64 throughout: see to_decimal_year on why float32 blurs the seasonal signal.
+                # Full precision: what the model reads is the gap between two nearby dates.
                 times = np.asarray(per_point_times[index], dtype=np.float64)
                 validity = bundle.validity_for(modality_name, index)
                 if self.max_sequence_length is not None and len(times) > self.max_sequence_length:
-                    # Keep the most recent readings: they sit closest to the sampling date the
-                    # target was measured at.
+                    # The most recent readings: they are closest to the date the soil was sampled.
                     values = values[-self.max_sequence_length :]
                     times = times[-self.max_sequence_length :]
                     validity = validity[-self.max_sequence_length :]
@@ -718,8 +729,8 @@ class SoilSequenceDataModule(LightningDataModule):
                 selected_times.append(times)
                 selected_validity.append(validity)
 
-            # Pad to this batch's longest series, never to a global constant. At least one column
-            # so a batch where nothing was observed still produces well-shaped tensors.
+            # Padded to this batch's longest series, never to a fixed length. At least one step,
+            # so a batch whose points have no readings still has a shape.
             max_length = max((len(times) for times in selected_times), default=0)
             max_length = max(1, max_length)
 
@@ -741,8 +752,7 @@ class SoilSequenceDataModule(LightningDataModule):
 
             batch["sequences"][modality_name] = torch.as_tensor(padded, dtype=torch.float32)
             batch["sequence_mask"][modality_name] = torch.as_tensor(mask, dtype=torch.bool)
-            # float64, matching the array above. Downcasting here would undo the precision the
-            # decimal-year representation exists to preserve.
+            # Full precision, as above.
             batch["sequence_time"][modality_name] = torch.as_tensor(times_padded, dtype=torch.float64)
             batch["sequence_validity"][modality_name] = torch.as_tensor(validity_padded, dtype=torch.bool)
 
@@ -751,6 +761,7 @@ class SoilSequenceDataModule(LightningDataModule):
     # --- splits and evaluation frames --------------------------------------
 
     def _build_split_frames(self, point_indices):
+        """The covariates and measured targets of one split, as tables in the targets' own units."""
         indices = np.asarray(point_indices, dtype=np.int64)
         static_features = np.asarray(self.sequence_bundle.static_features)
         targets = np.asarray(self.sequence_bundle.targets)
@@ -768,17 +779,17 @@ class SoilSequenceDataModule(LightningDataModule):
         if indices.size == 0:
             return pd.DataFrame(columns=feature_columns), pd.DataFrame(columns=target_columns)
 
-        # Raw, untransformed values: the trainer compares predictions against these in original units.
+        # Untransformed: the scores are computed against these, in the target's own units.
         x_frame = pd.DataFrame(static_features[indices], columns=feature_columns)
         y_frame = pd.DataFrame(targets[indices], columns=target_columns)
         return x_frame, y_frame
 
     def _split_indices(self, num_rows: int):
-        """Train/val/test point indices.
+        """Which points train, which validate and which test.
 
-        Resolved from the run's shared :class:`SplitPlan` when one was supplied, so this family and
-        the sklearn family hold out the same points. Otherwise it falls back to the local ratio
-        carve, in which `test_size` and `val_size` apply sequentially.
+        From the run's shared split when there is one, so this family and the scikit-learn family
+        hold out the same points; otherwise from ``test_size`` and ``val_size``, applied one after
+        the other.
         """
         empty = np.array([], dtype=np.int64)
         indices = np.arange(num_rows, dtype=np.int64)
@@ -796,7 +807,14 @@ class SoilSequenceDataModule(LightningDataModule):
         return train_idx, val_idx, test_idx
 
     def _planned_split_indices(self, num_rows: int):
-        """Resolve the shared plan against this bundle's own point ordering."""
+        """Read the shared split against this bundle's own point order.
+
+        Raises
+        ------
+        ValueError
+            If the bundle and the plan disagree on the number of points, or the plan leaves this
+            family no training points.
+        """
         point_ids = list(self.sequence_bundle.point_ids)
         if len(point_ids) != num_rows:
             raise ValueError(
@@ -806,8 +824,8 @@ class SoilSequenceDataModule(LightningDataModule):
         train_idx, val_idx, test_idx = self.split_plan.split_indices(point_ids)
         assigned = train_idx.size + val_idx.size + test_idx.size
         if assigned < num_rows:
-            # Expected under population_policy=intersect: these are points the other families
-            # could not use, so the shared plan deliberately gives them no split.
+            # Expected under population_policy: intersect - these are points another family could
+            # not use, so the shared split gives them to none.
             self._log(
                 f"{num_rows - assigned} of {num_rows} point(s) are outside the shared split "
                 f"population and are used by no split "
@@ -821,16 +839,15 @@ class SoilSequenceDataModule(LightningDataModule):
         return train_idx, val_idx, test_idx
 
     def _log(self, message: str) -> None:
-        """Best-effort info logging; a LightningDataModule has no logger of its own."""
+        """Write one message to the module logger; a datamodule has no logger of its own."""
         import logging
 
         logging.getLogger(__name__).info(message)
 
     def _carve_out(self, indices: np.ndarray, fraction: float):
-        """Split off `fraction` of `indices`, returning (held_out, remainder).
+        """Hold out ``fraction`` of these points at random, returning ``(held_out, remainder)``.
 
-        A fraction of 0 means "no holdout", which train_test_split rejects outright rather than
-        treating as empty - so handle it here and keep val_size=0 or test_size=0 usable.
+        A fraction of 0 means no holdout, which ``train_test_split`` refuses outright.
         """
         fraction = min(max(float(fraction), 0.0), 0.9)
         if fraction <= 0.0:

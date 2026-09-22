@@ -1,8 +1,4 @@
-"""One seeding function, shared by every path that trains a Lightning model.
-
-Its own module because both the config factory and the trainer need it, and the trainer already
-imports from the factory - putting it in either would make that circular.
-"""
+"""Seed every random-number generator, so a run can be repeated exactly."""
 
 from __future__ import annotations
 
@@ -18,16 +14,24 @@ except ImportError:  # pragma: no cover
 
 
 def seed_everything(seed: int) -> None:
-    """Seed every RNG a Lightning run touches, dataloader workers included.
+    """Seed Python, NumPy and PyTorch (and data-loading worker processes) from one number.
 
-    Call this immediately BEFORE the model is constructed. Weight initialization draws from the
-    global torch generator, so seeding afterwards leaves the weights at whatever state the preceding
-    work happened to leave behind, and starts `fit` from a different point in the stream than a run
-    that seeded first. That asymmetry is what stopped a tuned configuration from reproducing the
-    hyperparameter trial that selected it.
+    Call it just before building a deep-learning model: the starting weights are drawn at that
+    moment, so seeding first is what makes two runs - or a tuned config and the tuning trial it came
+    from - start from the same weights.
 
-    `workers=True` is the part a hand-rolled seeder misses: it sets PL_SEED_WORKERS so each
-    DataLoader worker derives its stream from this seed rather than an arbitrary one.
+    Parameters
+    ----------
+    seed : int
+        The seed, usually ``RANDOM_SEED`` from the configuration.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> seed_everything(42); first = np.random.rand()
+    >>> seed_everything(42); second = np.random.rand()
+    >>> first == second
+    True
     """
     seed_value = int(seed)
     try:
