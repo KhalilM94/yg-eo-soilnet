@@ -1,6 +1,7 @@
 """Config: the loader, the shipped files, and every dotted path those files name."""
 
 import importlib
+import os
 from pathlib import Path
 
 import pytest
@@ -130,8 +131,8 @@ def test_config_reads_env_overrides(
     assert config.MAIN_FILE_LOGGING_ENABLED is False
     assert config.SKLEARN_FILE_LOGGING_ENABLED is False
     assert config.MLFLOW_EXPERIMENT_EXPORT_ENABLED is False
-    assert config.STATIC_CSV_PATH == "override_folder/base_static.csv"
-    assert config.TARGETS_CSV_PATH == "override_folder/base_targets.csv"
+    assert config.STATIC_CSV_PATH == os.path.abspath("override_folder/base_static.csv")
+    assert config.TARGETS_CSV_PATH == os.path.abspath("override_folder/base_targets.csv")
 
 
 def test_config_reads_file_logging_toggles(base_config_paths: dict) -> None:
@@ -142,6 +143,28 @@ def test_config_reads_file_logging_toggles(base_config_paths: dict) -> None:
     assert config.MLFLOW_EXPERIMENT_EXPORT_PATH.endswith("export_dir")
     assert config.MIN_FEATURE_COUNT == 10
     assert config.MAX_FEATURE_DROP_RATIO_WARNING == 0.9
+
+
+def test_a_relative_data_folder_is_read_from_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict, tmp_path: Path, logger
+) -> None:
+    """The data folder is joined on once; joining it twice looked for rel_data/rel_data/..."""
+    import pandas as pd
+
+    from yg_eo_soilnet.data_manager import DataManager
+
+    data_folder = tmp_path / "rel_data"
+    data_folder.mkdir()
+    pd.DataFrame({"point_id": ["a", "b"], "cov": [1.0, 2.0]}).to_csv(data_folder / "base_static.csv", index=False)
+    pd.DataFrame({"point_id": ["a", "b"], "base_target": [3.0, 4.0]}).to_csv(
+        data_folder / "base_targets.csv", index=False
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_FOLDER", "rel_data")
+
+    frame = DataManager(Config(**base_config_paths), logger).load_tabular_data()
+
+    assert sorted(frame["base_target"]) == [3.0, 4.0]
 
 
 def test_config_raises_for_missing_registry(base_config_paths: dict, tmp_path: Path) -> None:
@@ -386,10 +409,10 @@ def test_data_block_resolves_every_source(base_config_paths: dict) -> None:
 
     assert config.DATA_FOLDER == "unified_root"
     assert config.DATA_ROOT == "unified_root"
-    assert config.STATIC_SOURCE == "unified_root/static_dir"
-    assert config.TARGETS_SOURCE == "unified_root/targets_dir"
-    assert config.TIMESERIES_SOURCE == "unified_root/ts_dir"
-    assert config.DATA_MANIFEST_PATH == "unified_root/index.json"
+    assert config.STATIC_SOURCE == os.path.abspath("unified_root/static_dir")
+    assert config.TARGETS_SOURCE == os.path.abspath("unified_root/targets_dir")
+    assert config.TIMESERIES_SOURCE == os.path.abspath("unified_root/ts_dir")
+    assert config.DATA_MANIFEST_PATH == os.path.abspath("unified_root/index.json")
 
 
 def test_data_block_omitting_targets_means_joint_file(base_config_paths: dict) -> None:
@@ -397,7 +420,7 @@ def test_data_block_omitting_targets_means_joint_file(base_config_paths: dict) -
     content = UNIFIED_DATA_CONFIG_CONTENT.replace("        targets: targets_dir\n", "")
     config = Config(**_write_config(base_config_paths, content))
 
-    assert config.STATIC_SOURCE == "unified_root/static_dir"
+    assert config.STATIC_SOURCE == os.path.abspath("unified_root/static_dir")
     assert config.TARGETS_SOURCE is None
 
 
@@ -405,8 +428,8 @@ def test_legacy_flat_keys_still_resolve_without_a_data_block(base_config_paths: 
     config = Config(**base_config_paths)
 
     assert config.DATA_FOLDER == "base_folder"
-    assert config.STATIC_SOURCE == "base_folder/base_static.csv"
-    assert config.TARGETS_SOURCE == "base_folder/base_targets.csv"
+    assert config.STATIC_SOURCE == os.path.abspath("base_folder/base_static.csv")
+    assert config.TARGETS_SOURCE == os.path.abspath("base_folder/base_targets.csv")
 
 
 def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths: dict) -> None:
@@ -418,7 +441,7 @@ def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths
 
     assert config.DATA_FILE == "base_data.csv"
     assert config.STATIC_FEATURES_FILE == "base_static.csv"
-    assert config.STATIC_CSV_PATH == "base_folder/base_static.csv"
+    assert config.STATIC_CSV_PATH == os.path.abspath("base_folder/base_static.csv")
 
 
 @pytest.mark.parametrize("key", ["timeseries_file", "timeseries_csv_path"])
@@ -429,7 +452,7 @@ def test_both_timeseries_key_spellings_resolve(base_config_paths: dict, key: str
     )
     config = Config(**_write_config(base_config_paths, content))
 
-    assert config.TIMESERIES_SOURCE == "base_folder/ts.csv"
+    assert config.TIMESERIES_SOURCE == os.path.abspath("base_folder/ts.csv")
 
 
 # --- lightning registry `defaults:` -------------------------------------------------------------

@@ -681,7 +681,9 @@ class Config:
             return None
         if os.path.isabs(path_value):
             return path_value
-        return os.path.join(self.DATA_FOLDER, path_value)
+        # A full path, so the data loader can never join the data folder on a second time. A
+        # relative DATA_FOLDER is read from the directory the command is run in.
+        return os.path.abspath(os.path.join(self.DATA_FOLDER, path_value))
 
     def _resolve_config_path(self, path_value: Optional[str]) -> Optional[str]:
         if not path_value:

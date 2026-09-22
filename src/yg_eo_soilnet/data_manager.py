@@ -151,7 +151,9 @@ class DataManager:
             return None
         if os.path.isabs(path_value):
             return path_value
-        return os.path.join(self.config.DATA_FOLDER, path_value)
+        # Paths from Config arrive already joined to the data folder, as full paths; returning a
+        # full path here too makes resolving the same path twice harmless.
+        return os.path.abspath(os.path.join(self.config.DATA_FOLDER, path_value))
 
     def _read_tabular_file(self, file_path: str, missing_label: str = "Tabular file") -> pd.DataFrame:
         if not os.path.isfile(file_path):
