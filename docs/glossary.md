@@ -1,453 +1,310 @@
 # Glossary
 
-Plain definitions of the terms used in this documentation and in the code. When a page uses one of
-these words, it links here.
+The terms this documentation uses, with what they mean **in this project**: where they are set,
+their defaults, and the project-specific ones in full.
 
-A few words have **two meanings** in this project. They are marked with ⚠ below: *registry*,
-*bundle*, *residual*, *calibration* and *grid*.
+A few words have **two meanings** here. They are marked ⚠: *registry*, *bundle*, *residual*,
+*calibration* and *grid*.
 
 ## Data
 
 ```{glossary}
 point
 sample point
-  One place where soil was sampled and measured in a lab. It has an identifier (the `uuid`
-  column), a latitude and longitude, lab measurements, fixed descriptions of the place, and a
-  history of satellite and climate readings. Most tables in the project have one row per point.
+  One soil sampling location: an id (`uuid`), latitude/longitude, lab measurements, static
+  covariates and a satellite/climate history. Most tables have one row per point.
 
 static covariate
 static feature
-  A value describing a point that does not change over time: elevation, slope, aridity, a
-  bare-soil satellite reflectance, a value read from an existing soil map, and so on. They come
-  from the *static* data file.
+  A per-point value that does not change over time - terrain, aridity, bare-soil Sentinel-2
+  reflectance, a prior soil-map value. Read from the *static* data file.
 
 time series
-  Readings of the same thing at the same point on different dates - for example a Sentinel-2
-  band every month from 2017 to 2025. They come from the *time-series* data file, which has one
-  row per point per date. Points can have different numbers of readings (cloudy months are
-  missing).
+  Dated readings per point (for example monthly Sentinel-2 bands, 2017-2025), in the *time-series*
+  file: one row per point per date. Points have different numbers of readings.
 
 modality
 data source
-  One source of time-series readings with its own columns: Sentinel-2 optical bands, Sentinel-1
-  radar, climate, soil moisture, and so on. In the data file, each source's columns share a name
-  prefix (`S2_`, `S1_asc_`, `CLIM_`, ...); `temporal.modality_prefix_map` in the main config
-  says which prefix belongs to which source.
+  One family of time-series columns sharing a name prefix - `S2_` (Sentinel-2), `S1_asc_` /
+  `S1_desc_` (Sentinel-1), `CLIM_`, `AG_`, `SOIL_`. Mapped in `temporal.modality_prefix_map`.
 
 feature
-input
-predictor
-  Any column a model is given to make its prediction. Features are the static covariates (and,
-  for the deep-learning model, the time series). Lab measurements, identifiers and coordinates are
-  not features.
+  A model input: the static covariates, plus the time series for the deep-learning model. Lab
+  measurements, ids and coordinates are never features.
 
 target
-  A lab-measured soil property the models learn to predict, such as organic matter (g/kg), clay
-  (%) or pH. They are listed under `TARGET_COLUMNS` in `data_spec.yml`.
+  A lab-measured property being predicted (`TARGET_COLUMNS` in `data_spec.yml`), e.g.
+  `organic_matter_g_kg`, `clay_pct`, `ph_water`.
 
 lab column
 label column
-  Any column holding a lab measurement, listed under `LABEL_COLUMNS` in `data_spec.yml`,
-  whether or not it is currently a target. Lab columns are never used as ordinary inputs, so a
-  property you stop predicting cannot quietly start helping to predict the others.
+  Any lab measurement, listed under `LABEL_COLUMNS` whether or not it is a target. Never used as an
+  ordinary feature, so a property you stop predicting cannot leak into predicting the others.
 
 auxiliary lab input
-  A deliberate exception to the rule above: a measured lab value (say, pH) that is genuinely
-  available when predicting, fed to the deep-learning model as an extra input when predicting a
-  different property. Switched on with `auxiliary_enabled` and `auxiliary_label_columns`.
+  A deliberate exception to that rule: a measured lab value that is genuinely available at
+  prediction time (say pH), fed to `soil_cnn` as an extra input for a *different* target.
+  `auxiliary_enabled` + `auxiliary_label_columns`; naming a current target is refused.
 
 residual base
-  ⚠ *Residual* also means an ordinary prediction error. Here it is an option of the
-  deep-learning model: instead of predicting a property directly, the model predicts a
-  **correction** to an existing prediction (the "base"), and the final prediction is base plus
-  correction. Switched on with `residual_enabled`.
+  ⚠ Not an ordinary residual (prediction error). A `soil_cnn` option (`residual_enabled`) where the
+  network predicts a *correction* to an existing prediction column - typically an earlier model's
+  exported prediction - and outputs base + correction. Only honest if the base was predicted
+  without seeing the current test points.
 
 categorical feature
-category
-  A column holding labels rather than numbers - a landform class or a soil texture class, for
-  example. Listed under `CATEGORICAL_FEATURES` in `data_spec.yml`.
+  A label column such as a landform class, declared under `CATEGORICAL_FEATURES`. One-hot or
+  ordinal encoded for scikit-learn models; an {term}`embedding` for `soil_cnn`.
 
 vocabulary
-  The list of category labels a model knows, learned from the training points only. A label
-  first seen when predicting is treated as "unknown" instead of causing an error.
+  The category labels a model knows, learned from training points only; unseen labels map to a
+  reserved "unknown" slot.
 
 embedding
-  A short list of numbers the deep-learning model learns for each category label, so it can use
-  the category like a measurement. Categories that behave alike end up with similar numbers.
-
-missing value
-gap
-  A cell with no value. A column missing in more than 20% of the points stops the run (the
-  threshold is `data_quality.max_missing_column_ratio`); smaller gaps are filled with the
-  middle value (median) of the training points, and a validity flag records that the value was
-  filled in.
+  The learned vector `soil_cnn` uses for each category label.
 
 validity flag
-  A yes/no value stored next to a filled-in value, saying whether it was really measured. It lets
-  a model treat filled-in values with care.
+  A 0/1 companion value recording whether a value was measured or filled in. Gaps in covariates
+  are median-filled (from training points) and flagged; a covariate missing in more than 20% of
+  points stops the run (`data_quality.max_missing_column_ratio`).
 
 standardization
-  Rescaling a column so that, over the training points, its average is 0 and its standard
-  deviation is 1. It puts every column on a comparable scale. The average and standard deviation
-  are learned from the training points only.
+  Rescaling to mean 0 and standard deviation 1, with statistics from the training points only.
 
-log transform
 log1p
 target transform
-  Before training, the deep-learning model converts each target value *y* to 10 × ln(1 + *y*),
-  which spreads out the many small values and pulls in the few very large ones. Predictions are
-  converted back to the target's units afterwards. Set with `target_transform: log1p`.
+  `soil_cnn` trains on 10·ln(1 + *y*) rather than *y* (`target_transform: log1p`), then converts
+  predictions back to the target's units.
 
 original units
 training scale
-  Scores are reported on one of two scales. In **original units** (g/kg, %, pH) they can be
-  compared with each other and read directly. The **training scale** is the log-transformed and
-  standardized scale the deep-learning model trains on; `train_loss`, `val_loss`, `test_loss`
-  and `val_r2` are on it and cannot be compared with `rmse_test`.
+  Scores are on one of two scales. `rmse_test`, `r2_test`, ... are in the target's own units and
+  comparable across models. `soil_cnn`'s `train_loss`, `val_loss`, `test_loss` and `val_r2` are on
+  its log-transformed, standardized training scale and cannot be compared with them.
 
 decimal year
-  A date written as a single number: 15 July 2021 is about 2021.54. The time series is converted
-  to decimal years before it reaches the deep-learning model.
+  A date as one number: 15 July 2021 ≈ 2021.54. Time-series dates are converted to this form.
 
 calendar grid
-year-by-month grid
-  ⚠ *Grid* also appears in *grid search* and in *spatial grid* (see {term}`spatial split`).
-  Here it is how the deep-learning model sees a point's time series: a small table with one row
-  per year and one column per calendar month, like a tiny image. Years are counted back from the
-  point's most recent reading, and empty cells are marked as empty.
+  ⚠ Not grid search or the spatial grid. How `soil_cnn` sees a data source's time series: a
+  years × 12-months table per point, filled with its readings (empty cells masked), with years
+  counted back from the point's latest reading. A small CNN then reads it like an image.
 ```
 
-## Splitting the data and scoring models
+## Splitting and scoring
 
 ```{glossary}
 split
-  Every point is assigned once, before any model is trained, to one of three sets: the
-  **training set** (used to fit the models), the **validation set** (used during training to
-  decide when to stop and which settings are best) and the **test set** (kept aside and used only
-  to score the finished models). All models share the same split, so their scores are comparable.
-  Set in the `split:` block of `main_config.yml`.
-
-training set
-  The points a model learns from. See {term}`split`.
-
-validation set
-  Points kept out of training and used to check progress during training - for example to stop
-  when the model stops improving. See {term}`split`.
-
-test set
-  Points kept out of training entirely and used once, at the end, to score each model. Test
-  scores (`rmse_test`, `r2_test`, ...) are the fair measure of how a model does on points it has
-  never seen. See {term}`split`.
+  The one assignment of every point to the training, validation or test set, made before any model
+  is trained and shared by all of them (`split:` in `main_config.yml`; 15% test, 15% validation by
+  default). Saved on each run as `data_splits/split_assignments.parquet`.
 
 fit pool
-  The points a scikit-learn model is fitted on: the training set **plus** the validation set
-  (scikit-learn models choose their settings by {term}`cross-validation` instead of using a
-  separate validation set).
+  What scikit-learn models are fitted on: training **plus** validation points. They choose their
+  hyperparameters by {term}`cross-validation` inside it rather than on a separate validation set.
 
 cross-validation
-fold
-  A way to test settings without touching the test set. The fit pool is cut into *k* parts
-  (folds; 5 here). The model is trained *k* times, each time leaving one part out and scoring the
-  model on it. The average score over the folds is used to choose the settings.
+  Here: 5-fold, inside the fit pool, used by scikit-learn models to choose hyperparameters (their
+  `params` grid). `SPLIT_STRATEGY: groupkfold` keeps spatial clusters within one fold.
 
 spatial split
-spatial_group
-  A split that keeps nearby points together: points are grouped into clusters by location
-  (k-means or a regular spatial grid), and whole clusters go to the test set. It stops a model
-  from looking good just because a test point sits a few metres from a training point. Set
-  `split.strategy: spatial_group`.
+  `split.strategy: spatial_group`: points are clustered by location (k-means or a regular grid) and
+  whole clusters are held out, so test points are not near-duplicates of training points.
+
+population policy
+  What to do when the model families can use different points (the deep-learning model needs a time
+  series). `intersect`: everyone uses only points every family can use, so test sets are identical.
+  `assign_all`: each family uses all it can.
 
 leakage
-  Information about the answer reaching a model during training - for example a lab value that is
-  really the target under another name, or a test point used to learn scaling statistics. It
-  makes scores look better than they will be on new data. Much of the project's design (lab
-  columns never used as inputs, statistics learned from training points only) exists to prevent it.
+  Information about the answer reaching training - a lab value that is really the target, or a test
+  point used for scaling statistics - which inflates scores.
 
 target group
 joint
 per_target
-  The set of targets one model predicts. With `MULTI_TARGET_MODE: joint` one model predicts all
-  targets at once; with `per_target` each target gets its own model. A group's name joins its
-  targets with `__`, for example `organic_matter_g_kg__clay_pct__ph_water`.
-
-RMSE
-MAE
-R²
-RPD
-RPIQ
-bias
-  The accuracy scores reported for every model. See {mod}`yg_eo_soilnet.metrics` for what
-  each one means.
+  The targets one model predicts. `MULTI_TARGET_MODE: joint` fits one model for all targets;
+  `per_target` one model per target. A scikit-learn model fits jointly only if its entry declares
+  `multi_target: native`. Group names join targets with `__`.
 
 leaderboard
-  A table (and plot) ranking every model trained in a run by its test scores, saved on the main
-  MLflow run as `leaderboard.csv` and `leaderboard_plots/leaderboard.png`.
-
-overfitting
-  A model learning the particular points it was trained on - including their noise - instead of
-  the general pattern, so it scores well on those points and badly on new ones. Dropout, early
-  stopping and weight decay are ways to reduce it.
+  The table ranking every model of a run by test scores: `leaderboard.csv` and
+  `leaderboard_plots/leaderboard.png` on the main run. Scores are defined in
+  {mod}`yg_eo_soilnet.metrics`.
 ```
 
 ## Models
 
 ```{glossary}
 model family
-  The project trains two kinds of model side by side. The **scikit-learn family** holds classic
-  statistical and machine-learning models (Ridge, PLS, XGBoost, TabICL) that read only the static
-  covariates. The **deep-learning family** holds `soil_cnn`, a neural network that also reads
-  the time series.
-
-scikit-learn
-  A widely used Python library of classic models. The project's scikit-learn models are listed in
-  `configs/sklearn/model_registry.yml`.
-
-estimator
-  scikit-learn's word for a model object with `fit` and `predict` methods.
-
-pipeline
-  A chain of steps run as one model: for example "fill gaps → rescale → encode categories →
-  Ridge". Each scikit-learn model is wrapped in one, so the preprocessing is saved with the model.
+  The two kinds of model trained side by side: the **scikit-learn family** (Ridge, PLS, XGBoost,
+  TabICL; static covariates only) and the **deep-learning family** (`soil_cnn`; static covariates
+  plus time series, built with PyTorch Lightning).
 
 model registry
 registry
-  ⚠ Two different things share this name. The **model list** is a YAML file listing which models
-  exist, their settings and whether they are switched on (`enabled: true`):
-  `configs/sklearn/model_registry.yml` and `configs/lightning/models/`. The **MLflow model
-  registry** is where saved models are given a name and version numbers (see
+  ⚠ Two things. The **model list**: the YAML files declaring which models exist, their
+  hyperparameters and `enabled: true/false` (`configs/sklearn/model_registry.yml`,
+  `configs/lightning/models/`). The **MLflow model registry**: named, versioned saved models (see
   {term}`registered model`).
 
-hyperparameter
-setting
-  A setting chosen before training rather than learned from the data: the strength of Ridge's
-  simplification, the number of layers of a network, the learning rate. The project tries several
-  values and keeps the best (see {term}`cross-validation` and {term}`tuning`).
+pipeline
+  A scikit-learn `Pipeline`: imputation → scaling → categorical encoding → estimator, saved as one
+  object so new data is prepared exactly like the training data.
 
-deep learning
-neural network
-  Models built from many layers of simple calculations whose numbers ("weights") are adjusted step
-  by step to reduce the error. `soil_cnn` is the project's only deep-learning model.
+TabICL
+  A pretrained "foundation model" for tables that predicts from the training rows directly instead
+  of fitting weights. Memory-hungry; downloads a checkpoint on first use.
 
 soil_cnn
-  The project's deep-learning model. It summarises the static covariates, turns each data source's
-  time series into a {term}`calendar grid` and reads it with a small {term}`convolutional
-  network`, combines the summaries, and predicts every target. Three switches change it: `fusion`,
-  `auxiliary_enabled` and `residual_enabled`.
-
-Lightning
-PyTorch
-  The Python libraries the deep-learning model is written with. *Lightning* runs the training
-  loop; the configuration of deep-learning models lives under `configs/lightning/`.
-
-convolutional network
-CNN
-  A kind of neural network that slides small filters over a grid - usually an image - to find
-  patterns. Here the "image" is a point's {term}`calendar grid`, and the filters find seasonal
-  patterns, such as a green-up every spring.
-
-layer
-width
-  A network is a stack of layers; each layer turns a list of numbers into another list. Its width
-  is how many numbers it outputs. Settings such as `head_hidden_dims: [64, 32]` list the widths:
-  two layers, 64 then 32 wide.
-
-encoder
-branch
-  The part of the deep-learning model that summarises one kind of input into a short list of
-  numbers: one for the static covariates, one per time-series data source, one for location.
+  The project's deep-learning model. Branches summarise the static covariates, each data source's
+  {term}`calendar grid` (through a small CNN) and optionally location; a {term}`fusion` step
+  combines them and an MLP head predicts every target. Switches: `fusion`, `auxiliary_enabled`,
+  `residual_enabled`.
 
 fusion
-  How the deep-learning model combines its branches' summaries. **Gated** fusion weighs each number
-  up or down; **attention** fusion lets each summary be re-read in the light of the others (for
-  example, the Sentinel-2 summary in the light of the climate summary).
+  How `soil_cnn` combines its branch summaries. **gated**: each value is scaled by a learned 0-1
+  weight. **attention**: a small transformer where each branch summary (a "token") is updated from
+  the others - e.g. the Sentinel-2 summary re-read in light of the climate summary.
 
-head
-  The last layers of the deep-learning model, which turn the combined summary into one predicted
-  value per target.
+dilated_tempcnn
+annual_grid2d
+  The two CNNs that read a calendar grid. `dilated_tempcnn` scans along months with a spacing that
+  links each month to the same month a year earlier; `annual_grid2d` scans months and years as a
+  2-D image.
 
-epoch
-  One full pass of the deep-learning model over all training points.
-
-batch
-  A small group of points the model processes together in one training step (32 by default).
+hidden dims
+  Settings such as `head_hidden_dims: [64, 32]` list layer widths: two layers, 64 then 32 units.
+  The length of the list is the number of layers.
 
 early stopping
-  Stopping training once the score on the validation set has not improved for a set number of
-  epochs (`patience`), and keeping the best version seen.
+  Training stops once `val_loss` has not improved for `patience` epochs (100 in the shipped
+  defaults), and the best checkpoint is kept.
 
 checkpoint
-  A file saving a trained deep-learning model: its weights, its settings, and the scaling
-  statistics and category lists it needs to prepare new data.
+  A saved `soil_cnn` (`.ckpt`): weights, hyperparameters, and the scaling statistics and category
+  vocabularies needed to prepare new data - so it can be served on its own.
 
 random seed
-seed
-  A number that fixes every random choice (the split, the starting weights, the order of
-  batches), so a run can be repeated exactly. Set with `RANDOM_SEED`.
+  `RANDOM_SEED` fixes the split, the initial weights and the batch order, so a run can be repeated.
 
-loss
 loss function
-  The error score the deep-learning model tries to reduce during training. `mse` (the average
-  squared error) is the default.
-
-learning rate
-  How big a step the deep-learning model takes each time it adjusts its weights. Too big and
-  training is unstable; too small and it is slow.
-
-dropout
-  During training only, randomly ignoring a fraction of the numbers passing through the network,
-  so it cannot rely too much on any single one. It reduces {term}`overfitting`.
+  What `soil_cnn` minimizes: `mse` by default; `huber`/`smooth_l1` are less sensitive to outliers;
+  `mahalanobis`, `correlation_penalty` and `cosine` (joint mode only) also penalize predictions whose
+  targets do not co-vary the way the measured ones do.
 
 bundle
-  ⚠ Used for two things. The **sequence bundle** holds everything the deep-learning model reads
-  about every point (static values, categories, time series, dates, targets). A **model bundle**
-  is one deep-learning model packed with its data and training settings, ready to train.
+  ⚠ Two things. The **sequence bundle** holds everything `soil_cnn` reads about every point. A
+  **model bundle** is one deep-learning model with its datamodule and training settings, ready to
+  train.
 ```
 
 ## Uncertainty
 
 ```{glossary}
-uncertainty
-  How far off a prediction might be. When switched on (`uncertainty.enabled`), every prediction
-  comes with a {term}`sigma` and a {term}`prediction interval`.
-
 ensemble
-member
-  The same model trained several times (10 by default), each time starting from a different random
-  seed; each copy is a *member*. The average of their predictions is the final prediction, and
-  how much they disagree shows how unsure the model is.
+  With `uncertainty.enabled`, each model is trained `n_members` times (10 by default) from different
+  seeds; the members' mean is the prediction and their spread feeds the uncertainty. Members appear
+  as extra sub-runs tagged `run_kind=ensemble_member`.
 
 bootstrap
-  Training each ensemble member on a slightly different sample of the training points (drawn at
-  random, some points more than once). Used for models that would otherwise give the same answer
-  every time.
+  Resampling the training rows for each member, used for models that would otherwise give identical
+  members (Ridge ignores its seed).
 
 sigma
-predicted standard deviation
-  The predicted "±" of a prediction, in the target's units: the model expects its error to be about
-  this big.
+  A prediction's standard deviation, in the target's units (column `prediction_std`).
 
 epistemic uncertainty
 aleatoric uncertainty
-  Two reasons a prediction can be unsure. **Epistemic** uncertainty is the model's own lack of
-  knowledge, seen as disagreement between ensemble members; more data reduces it. **Aleatoric**
-  uncertainty is noise in the data itself (lab error, small-scale variation); more data does not
-  reduce it.
+  **Epistemic**: the model's own uncertainty, seen as disagreement between ensemble members; more
+  data reduces it. **Aleatoric**: noise in the data itself (lab error, small-scale variability),
+  predicted by a {term}`variance head`; more data does not reduce it.
 
 variance head
 heteroscedastic
-  An option of the deep-learning model (`uncertainty.heteroscedastic`) where it predicts, for each
-  point, both a value and how noisy that value is likely to be - so the uncertainty can differ
-  from point to point.
+  `uncertainty.heteroscedastic`: `soil_cnn` predicts a mean and a variance per target, so each
+  prediction carries its own noise estimate. Trained with a beta-NLL loss.
 
 prediction interval
-  A range - a lower and an upper value - that should contain the true value most of the time
-  (for example 95% of the time).
+  The `prediction_lower` / `prediction_upper` range that should contain the true value at the
+  promised rate (for example 95%). Method set by `uncertainty.interval.method`: `sigma`
+  (mean ± k·σ), `gaussian`, or `conformal`.
 
 coverage
 PICP
-  How often the true value actually falls inside its prediction interval, measured on the test
-  set. It should be close to the promised rate (for example 95%).
+  The share of test points whose true value falls inside its interval. Compare it with the promised
+  rate; `coverage_error` is the difference.
 
 calibration
-  ⚠ Also used for the points reserved for it. Here: correcting the size of the prediction
-  intervals using the errors seen on held-back points, so the promised coverage is actually met.
+  ⚠ Also the name of the points reserved for it. Adjusting interval widths using errors observed on
+  held-back points, so the promised coverage holds.
 
 conformal
-  A calibration method: widen or narrow the intervals until they cover the promised share of the
-  held-back points' true values.
+  A calibration method: scale the intervals so they contain the promised share of the validation
+  points' true values. Its guarantee holds if new points resemble the validation points.
 ```
 
-## Explaining predictions
+## Explanations and tuning
 
 ```{glossary}
 SHAP
-  A way of splitting each prediction into one contribution per input, so you can see which inputs
-  pushed it up or down. The contributions add up to the prediction minus the average prediction.
-  Switched on with `EXPLAIN_ENABLED`.
+  Per-prediction attributions: one contribution per input, adding up to the prediction minus the
+  average prediction. `EXPLAIN_ENABLED`; figures under `explain/` on each run.
 
-beeswarm plot
-  The main SHAP figure: one row per input, one dot per point, placed by how much that input moved
-  that point's prediction and coloured by the input's value.
-```
-
-## Tuning
-
-```{glossary}
 tuning
-hyperparameter search
-  Trying many combinations of a model's settings automatically and keeping the best. `tune.py`
-  does this for the deep-learning model with {term}`Optuna`.
-
-Optuna
-  The Python library `tune.py` uses to choose which settings to try next.
+  `tune.py`: a hyperparameter search for one deep-learning model with Optuna.
 
 study
-  One tuning campaign: every setting combination tried for one model, stored in
-  `optuna_studies/soilnet.db` so it can be continued later.
-
 trial
-  One attempt in a study: the model trained once with one combination of settings.
-
-objective
-  The score a study tries to improve, `val_loss` by default (lower is better).
+  A **study** is one search campaign, stored in `optuna_studies/soilnet.db` and resumable; a
+  **trial** is one training run with one combination of settings. The study minimizes `val_loss`
+  by default.
 
 search space
-  The settings a study may change and the values allowed for each, defined in
-  `configs/lightning/search_spaces/`.
-
-pruning
-  Stopping a trial early when it is clearly doing worse than earlier trials, to save time.
+  The hyperparameters a study may vary and their ranges, in `configs/lightning/search_spaces/`.
 
 fingerprint
-  A short code computed from a search space. A study's name ends with it (`soil_cnn-e6c9f8`), so
-  editing the search space starts a new study instead of mixing incompatible trials.
+  A short hash of a search space that ends the study's name (`soil_cnn-e6c9f8`). Editing the space
+  changes it, which starts a new study instead of mixing incompatible trials.
 
 rerank
-  Re-running the best few trials with several seeds and choosing on their average score, so a trial
-  that was merely lucky is not picked.
+  `tune.py --rerank-top K`: re-train the K best trials over several seeds and pick the best average,
+  so a lucky trial is not chosen.
 
 tuned config
-  The file `tune.py` writes for the winning trial, in `configs/lightning/tuned/`. It is a complete
-  model-list entry you can train directly.
+  The model-list file `tune.py` writes for the winner in `configs/lightning/tuned/`, trainable with
+  `LIGHTNING_MODEL_REGISTRY_PATH=<file> python main.py`.
 ```
 
-## MLflow and saved models
+## MLflow
 
 ```{glossary}
-MLflow
-  The tool that records every training run: its settings, scores, figures, tables and saved
-  models. By default it stores them in the `mlruns/` folder; `pixi run mlflow` opens a browser
-  view of them.
-
 experiment
-  A named group of runs in MLflow - for example `Soil_Model_Training_v2` for real training runs,
-  `Soil_HPO_Experiment` for tuning and `Soil_Demo` for the demo.
+  A named group of MLflow runs: `Soil_Model_Training_v2` (training), `Soil_HPO_Experiment`
+  (tuning), `Soil_Demo` (the demo).
 
-run
 main run
 parent run
-  One execution of `main.py` is one **main run** (named `Run_<date>_<time>`). It holds the split,
-  the leaderboard and the combined predictions.
+  One `main.py` execution (`Run_<date>_<time>`): holds the split, the leaderboard and the combined
+  predictions.
 
 sub-run
 child run
-  A run inside the main run: one per trained model (and, when one model predicts several targets,
-  one per target inside that).
+  One per trained model inside the main run (named `<target group>_<model>`), plus one per target
+  when a model predicts several.
 
 artifact
-  Any file saved with a run: plots, tables such as `eval_results/eval_results.csv`, the saved
-  model, the log file.
+  A file stored with a run: `eval_results/eval_results.csv` (test predictions), plots, the saved
+  model, the log file. See {doc}`outputs`.
 
 registered model
 champion
-  A saved model given a name (such as `clay_pct_Ridge`) and a version number in the MLflow model
-  registry. The *champion* label points at the version of that model with the lowest `rmse_test`
-  so far. It compares versions of the same model on the same target only; the leaderboard compares
-  different models.
+  A saved model with a name (`<target>_<model>`) and versions in the MLflow model registry. The
+  `champion` alias points at the version with the lowest `rmse_test` - among versions of that one
+  model and target, not across models (the leaderboard does that).
 
 pyfunc
-  MLflow's standard saved-model format: load it with `mlflow.pyfunc.load_model(...)` and call
-  `predict` on a table of new points.
+  MLflow's generic saved-model format: `mlflow.pyfunc.load_model(uri).predict(table)`.
 ```
 
 ## Tools
@@ -455,12 +312,6 @@ pyfunc
 ```{glossary}
 pixi
 environment
-  pixi installs the exact versions of Python and every library the project needs into a
-  project-local **environment**. `core` runs on a normal processor (CPU), `core-gpu` on an NVIDIA
-  graphics card, `dev` adds the tools for tests and documentation, and `explore` adds Jupyter.
-
-YAML
-config file
-  The plain-text format of the configuration files in `configs/`: `name: value` pairs, with
-  indentation for nesting and `#` for comments.
+  pixi installs pinned versions of Python and every library into a project-local environment:
+  `core` (CPU), `core-gpu` (NVIDIA GPU), `dev` (adds tests and docs), `explore` (adds Jupyter).
 ```

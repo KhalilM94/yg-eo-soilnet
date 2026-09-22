@@ -9,9 +9,8 @@ points, and records everything - settings, scores, figures and the trained model
 compared and repeated. It was built for the Al Moutmir soil dataset in Morocco, but works with any
 dataset laid out the same way.
 
-**Who this is for:** environmental scientists and analysts who know some Python. You do not need a
-machine-learning background: the [glossary](docs/glossary.md) explains every technical term the
-documentation uses.
+**Who this is for:** environmental scientists and analysts comfortable with Python and the basics
+of machine learning. The [glossary](docs/glossary.md) defines the project's own terms.
 
 ---
 
@@ -46,9 +45,9 @@ pixi run -e core demo-data
 
 You should see: `Wrote 300 points and 8951 monthly observations to .../examples/demo_data/`.
 
-**4. Train the models.** This trains two models on the example data - Ridge (a classic statistical
-model that reads the fixed description of each point) and `soil_cnn` (the project's deep-learning
-model, which also reads the monthly time series) - and scores both on the same 45 test points:
+**4. Train the models.** This trains two models on the example data - Ridge (a regularized linear
+model on the static covariates) and `soil_cnn` (the project's convolutional network, which also reads
+the monthly time series) - and scores both on the same 45 test points:
 
 ```bash
 pixi run -e core demo
@@ -76,11 +75,9 @@ test points. Your numbers will be close to these:
 | ph_water | Ridge | 0.19 | 0.75 |
 | ph_water | soil_cnn | 0.21 | 0.70 |
 
-In the made-up data, organic matter follows how green the vegetation gets over the year - something
-only the time series shows - so the deep-learning model wins there, while Ridge wins for clay and
-pH, which follow the fixed covariates. `rmse_test` is the typical error in the property's own units
-(g/kg, %, pH units); `r2_test` is the share of the variation between points the model explains
-(1 is perfect).
+In the made-up data, organic matter follows how green the vegetation gets over the year - a signal
+only the time series carries - so `soil_cnn` wins there, while Ridge wins for clay and pH, which
+follow the static covariates. `rmse_test` is in each property's own units (g/kg, %, pH units).
 
 **Next:** [use your own data](docs/getting-started.md), or read the
 [step-by-step Quickstart](docs/quickstart.md) for what each step did.

@@ -1,25 +1,24 @@
-"""Train every switched-on model and record the results in MLflow.
+"""Train every enabled model and record the results in MLflow.
 
-This is the project's main entry point. Run it from the repository root::
+The project's main entry point. Run it from the repository root::
 
     python main.py                                   # reads configs/main_config.yml
     python main.py --config-path examples/demo_config/main_config.yml
 
-One run does six things, in order:
+One run:
 
-1. reads the configuration files (see :class:`config.Config`);
-2. loads the three data files - static covariates, lab :term:`targets <target>` and time series -
-   and keeps the columns that can be used as model inputs;
-3. splits the sample :term:`points <point>` once into training, validation and test sets, shared by
-   every model so their scores are comparable (see :term:`split`);
-4. decides which targets each model predicts - all of them at once, or one model per target
-   (see :term:`target group`);
-5. trains every switched-on scikit-learn model, then every switched-on deep-learning model;
-6. records each model's scores, plots and saved model in MLflow, plus a :term:`leaderboard`
+1. reads the configuration (:class:`config.Config`);
+2. loads the static, target and time-series files and selects the usable features;
+3. assigns every point once to the training, validation or test set - one :term:`split` shared by
+   every model, so all test scores are comparable;
+4. resolves the :term:`target groups <target group>` (one model for all targets, or one per target);
+5. trains every enabled scikit-learn model (hyperparameters chosen by cross-validation), then every
+   enabled deep-learning model;
+6. logs each model's test scores, figures and saved model to MLflow, and a :term:`leaderboard`
    comparing them.
 
-Everything is recorded under one MLflow :term:`run` named ``Run_<date>_<time>``, with one sub-run
-per trained model. Open the results with ``pixi run mlflow``.
+Everything is logged under one MLflow :term:`main run` named ``Run_<date>_<time>``, with one sub-run
+per trained model. Browse the results with ``pixi run mlflow``.
 """
 
 from yg_eo_soilnet.trainers.sklearn_trainer import ModelTrainer
@@ -136,11 +135,11 @@ def _export_mlflow_run_folder(trainer, experiment_id: str, run_id: str, run_name
 
 
 class SoilModelTraining:
-    """Everything one training run needs: the configuration, the data tools and the model builders.
+    """Everything one training run needs: configuration, data loading, the split and the model builders.
 
     Creating it reads the configuration, seeds every random-number generator and sets up the
     loggers, the data loader, the shared split and the two model factories. Nothing is loaded or
-    trained until :func:`main` calls the steps in turn.
+    trained until :func:`main` runs the steps in turn.
 
     Parameters
     ----------
@@ -196,7 +195,7 @@ class SoilModelTraining:
         self.lightning_trainer = LightningTrainer(config=self.config, logger=self.logger)
 
     def train_models(self, data: Dict):
-        """Train every switched-on model, target group by target group.
+        """Train every enabled model, target group by target group.
 
         The scikit-learn models are trained first, then the deep-learning models. Each model
         records its own results in MLflow as it finishes; nothing is returned.
@@ -342,7 +341,7 @@ def parse_args() -> argparse.Namespace:
     """Read the command-line options (just ``--config-path``)."""
     parser = argparse.ArgumentParser(
         description=(
-            "Train every switched-on model on the configured data and record the results in MLflow."
+            "Train every enabled model on the configured data and record the results in MLflow."
         )
     )
     parser.add_argument(

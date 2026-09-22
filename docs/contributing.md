@@ -20,18 +20,23 @@ Open `docs/_build/html/index.html` in a browser to read the built documentation.
 ## Who we write for
 
 The readers are environmental scientists and intermediate Python programmers. They know soil
-science, remote sensing and Python; they do not necessarily know machine-learning vocabulary. Every
-page and docstring is written so that such a reader can use the code without looking anything up.
+science, remote sensing, Python and the everyday vocabulary of machine learning (training,
+validation and test sets, cross-validation, hyperparameters, overfitting, RMSE, R², epochs,
+ensembles, embeddings). They do not necessarily know the more advanced methods, or this project's
+own terms. Every page and docstring is written so that such a reader can use the code without
+reading its source.
 
 ## Writing rules
 
 1. **Say what it does first, in one plain sentence.** The first line of a docstring is a complete
    sentence saying what the thing does or is. A second short paragraph may say when you would use
    it.
-2. **Prefer everyday words to jargon.** "trained 10 times from different random starts, then
-   averaged" rather than "a 10-member ensemble". When a technical word is the right one, link it to
-   the {doc}`glossary` - ``:term:`ensemble` `` in a docstring, ``{term}`ensemble` `` in a page - or
-   explain it in the same sentence.
+2. **Use standard terms freely; define the rest.** Everyday machine-learning words need no
+   explanation. Advanced methods and this project's own terms - the residual base, auxiliary lab
+   inputs, the calendar grid, attention fusion, conformal intervals, target groups - get a one-line
+   definition or a link to the {doc}`glossary` (``:term:`residual base` `` in a docstring,
+   ``{term}`residual base` `` in a page). Never use internal shorthand ("the seam", "the sweep",
+   "the fold") that only makes sense to someone who wrote the code.
 3. **Give units.** Every value that has units says them: g/kg, %, metres, decimal years.
 4. **Show an example.** Every public function and class has an `Examples` section. For functions
    that just compute something, write runnable `>>>` examples with their real output; they are

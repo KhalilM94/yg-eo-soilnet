@@ -1,41 +1,36 @@
 """The accuracy scores every model reports, and which scale each score is on.
 
-Every trained model - scikit-learn or deep learning - is scored with the same function,
-:func:`regression_metrics`, on the same test points, in the target's own units (g/kg, %, pH).
-So ``rmse_test`` means exactly the same thing on every row of the :term:`leaderboard`.
-
-The scores, for predictions compared with lab measurements:
+Every trained model - scikit-learn or deep learning - is scored by :func:`regression_metrics` on the
+same test points, in the target's own units (g/kg, %, pH), so ``rmse_test`` means the same thing on
+every row of the :term:`leaderboard`.
 
 ``rmse``
-    Root mean squared error: the typical size of an error, in the target's units. Lower is better.
+    Root mean squared error, in the target's units. Lower is better.
 ``mae``
-    Mean absolute error: the average size of an error, in the target's units. Lower is better.
+    Mean absolute error, in the target's units. Lower is better.
 ``bias``
-    The average of (prediction - measurement). Positive means the model predicts too high on
-    average; best near zero.
+    Mean of (prediction - measurement); positive means the model over-predicts. Best near 0.
 ``r2``
-    Coefficient of determination: the share of the variation between points that the model
-    explains. 1 is perfect, 0 is no better than always predicting the average, and it can be
-    negative for a model worse than that.
+    Coefficient of determination: 1 is perfect, 0 is no better than predicting the mean, and a
+    negative value is worse than that.
 ``rpd``
-    Ratio of performance to deviation: the spread of the measurements (standard deviation) divided
-    by the RMSE. Common in soil spectroscopy; higher is better.
+    Standard deviation of the measurements divided by the RMSE (ratio of performance to
+    deviation). Higher is better.
 ``rpiq``
-    Ratio of performance to interquartile range: like ``rpd``, but with the interquartile range,
-    which is less affected by a few extreme values. Higher is better.
+    Interquartile range of the measurements divided by the RMSE; less sensitive to extreme values
+    than ``rpd``. Higher is better.
 ``n``
-    How many points were scored.
+    Number of points scored.
 
-No score is made negative to mean "higher is better": :data:`METRIC_DIRECTION` says which way
-each one is better.
+No score is negated to mean "higher is better"; :data:`METRIC_DIRECTION` records which way each one
+is better.
 
 Two scales
 ----------
-The deep-learning models also record their own training scores - ``train_loss``, ``val_loss``,
-``test_loss``, ``val_r2`` and so on. These are computed on the scale the model trains on (the
-target log-transformed, then rescaled to mean 0 and standard deviation 1), not in the target's
-units, so they cannot be compared with ``rmse_test``. :data:`METRIC_SPACE` records which scale
-each name is on, and every run stores that information alongside its scores.
+``soil_cnn`` also logs its own training metrics - ``train_loss``, ``val_loss``, ``test_loss``,
+``val_r2``, ... - on its training scale (log-transformed, then standardized targets), not in the
+target's units, so they cannot be compared with ``rmse_test``. :data:`METRIC_SPACE` records the
+scale of every metric name, and each run stores it alongside its scores.
 """
 
 from __future__ import annotations
