@@ -1,35 +1,12 @@
-"""An MLflow pyfunc wrapper for the sequence models, so a trained CNN can actually be served.
+"""Package a trained deep-learning model so MLflow can serve it raw data.
 
-Why this exists rather than a plain ``mlflow.pytorch.log_model``: MLflow 3 defaults that call to
-``serialization_format="pt2"``, a traced-graph format that runs ``model.forward`` on an example
-input. ``SoilCNNLightningModule.forward`` consumes a **dict batch of ragged, date-stamped
-sequences**, so there is no tensor example that can trace it - the run failed with
-``If serialization_format is set to 'pt2', then input_example is required``, and passing a tensor
-instead of the DataFrame would not have helped. Tracing is simply the wrong strategy for this
-architecture.
+A saved model here accepts a table: one row per point, with the covariates as ordinary columns and
+each :term:`data source`'s readings and their dates as nested columns. It rebuilds the internal form
+from that, using the statistics stored in the :term:`checkpoint`, and returns predictions in the
+target's own units.
 
-The input contract is one row per point. Static covariates and categoricals are ordinary columns;
-the ragged part travels as nested arrays, which MLflow schemas express as ``Array(Double)`` and
-``Array(Array(Double))``:
-
-===========================  ==========================  ===================================
-column                       type                        meaning
-===========================  ==========================  ===================================
-``point_id``                 string, optional            echoed onto the output index
-one per static feature       double                      covariates in RAW units, unscaled
-one per categorical feature  string                      raw labels; unseen ones hit the OOV index
-one per label feature        double, optional            only when the model uses lab auxiliaries
-one per coordinate           double                      raw lat/lon; required when the model has
-                                                         a coordinate branch
-``<modality>__time``         ``Array(Double)``           decimal years, one per observation
-``<modality>__values``       ``Array(Array(Double))``    per observation, one value per band
-===========================  ==========================  ===================================
-
-Bands are ordered by ``modality_column_names[modality]`` from the checkpoint's own preprocessing
-state, so the contract is self-describing: the model says which columns it wants and in what order.
-
-Prediction delegates to :class:`~yg_eo_soilnet.serving.sequence_predictor.SoilSequencePredictor`,
-which installs the training-time statistics rather than re-fitting them on the request.
+Saved in MLflow's generic format rather than as a raw PyTorch model, which would have to be traced
+from an example input - impossible for a model that reads a different number of readings per point.
 """
 
 from __future__ import annotations
@@ -85,7 +62,7 @@ submodules directly.
 
 
 def stage_serving_package(destination: str) -> str:
-    """Copy the inference modules into ``destination`` and return the path to pass as code_paths."""
+    """Copy the few modules a served model needs next to it, and say where they went."""
     import shutil
     from pathlib import Path
 
@@ -112,13 +89,10 @@ def stage_serving_package(destination: str) -> str:
 
 
 def serving_requirements() -> list[str]:
-    """The runtime dependencies, declared rather than inferred.
+    """The libraries a served model needs, listed rather than guessed.
 
-    MLflow infers requirements from the modules imported in the LOGGING process, where the whole
-    training stack is already loaded, so inference reports geopandas and seaborn no matter how
-    little code is shipped. Declaring is the only reliable lever. Versions are read from the
-    installed packages so the serving environment matches the one that trained the model.
-    """
+    Guessing them from what was loaded while saving would list the whole training stack.
+        """
     from importlib.metadata import PackageNotFoundError, version
 
     requirements = []
@@ -131,20 +105,21 @@ def serving_requirements() -> list[str]:
 
 
 def time_column(modality: str) -> str:
+    """The column holding one data source's dates."""
     return f"{modality}{TIME_SUFFIX}"
 
 
 def values_column(modality: str) -> str:
+    """The column holding one data source's readings."""
     return f"{modality}{VALUES_SUFFIX}"
 
 
 def _as_list_of_arrays(column: pd.Series, *, dtype, label: str) -> list[np.ndarray]:
-    """One array per row, tolerating the several shapes a nested column arrives in.
+    """One array per row, whatever shape the nested column arrived in.
 
-    MLflow's JSON transport, pandas' own parquet round-trip and a hand-built frame all deliver
-    nested values slightly differently (lists, numpy object arrays, tuples), so this normalises
-    rather than assuming one of them.
-    """
+    A request can arrive as JSON, as a saved file or as a hand-built table, and each delivers nested
+    values slightly differently.
+        """
     arrays: list[np.ndarray] = []
     for position, value in enumerate(column.tolist()):
         if value is None:
@@ -158,12 +133,23 @@ def _as_list_of_arrays(column: pd.Series, *, dtype, label: str) -> list[np.ndarr
 
 
 def bundle_from_frame(frame: pd.DataFrame, state: Mapping[str, Any]):
-    """Rebuild a :class:`SoilSequenceBundle` from the serving contract above.
+    """Rebuild the model's internal form from a request table.
 
-    Every column list comes from the checkpoint's stored preprocessing state, never from the
-    incoming frame, so a request with extra columns is ignored rather than silently reshaping the
-    model's inputs, and a request missing one is refused by name.
-    """
+    Every column list comes from the model's own stored settings rather than from the request, so a
+    request with extra columns, missing ones, or columns in another order still produces exactly the
+    inputs the model was trained on.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        One row per point.
+    state : mapping
+        The model's stored input statistics and column names.
+
+    Returns
+    -------
+    SoilSequenceBundle
+        """
     from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 
     static_names = list(state.get("static_feature_names") or [])
@@ -293,18 +279,11 @@ def frame_from_bundle(
     n_rows: int | None = None,
     auxiliary_columns: Any = None,
 ) -> pd.DataFrame:
-    """The inverse of :func:`bundle_from_frame`: a serving frame built from a training bundle.
+    """The reverse: a request table built from training data.
 
-    Used to produce the ``input_example`` that ships with the logged model, which is what makes the
-    signature real and gives `mlflow models serve` something valid to echo back.
-
-    ``auxiliary_columns`` is the list of lab columns the model actually consumes - normally
-    ``model.auxiliary_label_columns``, which is empty for a model that does not use them. It is a
-    parameter rather than being read off the state because the bundle carries the WHOLE lab roster
-    whenever ``CARRY_LABEL_COLUMNS`` is on, and emitting all of it put ~20 unused columns into the
-    signature as required inputs - including the prediction target itself, which made the contract
-    ask for the value being predicted.
-    """
+    Used to produce the example that ships with a saved model, which is what makes its declared inputs
+    real rather than a description.
+        """
     from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 
     bundle = SoilSequenceBundle.from_mapping(bundle)
@@ -351,23 +330,26 @@ def frame_from_bundle(
 
 
 class SoilSequencePyfunc:
-    """The prediction half of the served model: raw frame in, original-unit predictions out.
+    """The prediction half of a saved model: a request table in, predictions out.
 
-    Deliberately NOT a ``mlflow.pyfunc.PythonModel`` subclass here. The mixin is applied in
-    ``serving/_pyfunc_entry.py``, the models-from-code script, so that importing this module - which
-    the logger does on every Lightning run, and which the training path also pulls in - does not
-    depend on mlflow's pyfunc stack. It is also directly usable without mlflow at all, which is what
-    lets the tests compare it against SoilSequencePredictor.
-    """
+    Examples
+    --------
+    >>> import mlflow                                                    # doctest: +SKIP
+    >>> model = mlflow.pyfunc.load_model("models:/clay_pct_soil_cnn@champion")   # doctest: +SKIP
+    >>> model.predict(request_frame)                                     # doctest: +SKIP
+        """
 
     def __init__(self, model=None):
+        """Hold the stored input statistics the model was trained with."""
         self.model = model
         self._predictor = None
 
     def load_context(self, context) -> None:  # pragma: no cover - exercised via mlflow
+        """Load the saved network when MLflow restores the model."""
         self._predictor = None
 
     def _ensure_predictor(self):
+        """Build the predictor on first use."""
         if self._predictor is None:
             from yg_eo_soilnet.serving.sequence_predictor import SoilSequencePredictor
 
@@ -375,15 +357,23 @@ class SoilSequencePyfunc:
         return self._predictor
 
     def predict(self, context, model_input: pd.DataFrame, params=None) -> pd.DataFrame:
-        """Predictions per target, plus their uncertainty when asked for and available.
+        """Predict for the points in a request table.
 
-        ``params={"uncertainty": True}`` widens the output to ``<target>`` / ``<target>_std`` per
-        target. It is opt-in rather than always-on because the column set is the served model's
-        contract, and silently doubling it would break every caller that reads the frame
-        positionally. Asking a point-head model for uncertainty returns the ordinary columns rather
-        than raising: a checkpoint trained before the variance head existed has none to give, and
-        that is not an error at inference time.
-        """
+        Parameters
+        ----------
+        context : object
+            MLflow's loading context.
+        model_input : pandas.DataFrame
+            One row per point; see :func:`bundle_from_frame` for the columns.
+        params : dict, optional
+            ``{"uncertainty": True}`` adds a ``<target>_std`` column beside each prediction, when the model
+            predicts a spread.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One column per target, in the target's own units.
+                """
         predictor = self._ensure_predictor()
         frame = pd.DataFrame(model_input)
         bundle = bundle_from_frame(frame, predictor.preprocessing_state)
@@ -409,22 +399,11 @@ def example_from_state(
     sequence_length: int = 4,
     auxiliary_columns: Any = None,
 ) -> pd.DataFrame:
-    """A schema-correct serving frame built from ``preprocessing_state`` alone - no bundle needed.
+    """An example request table built from the model's stored settings alone.
 
-    The no-dataset sibling of :func:`build_input_example`. A checkpoint carries every column name and
-    every fitted statistic, so a valid example can be assembled long after the training data is out
-    of reach - which is what lets a model that failed to package be recovered from its checkpoint
-    rather than retrained.
-
-    ``static_frame`` supplies real measured values for whichever static columns it happens to carry;
-    anything absent falls back to the stored training mean. Means rather than zeros: the data the
-    caller sends is in RAW units, and a zero would be an outlier for most covariates, whereas the
-    training mean is by construction inside the range the model was fitted on.
-
-    Note what cannot come from a run's ``eval_results.csv``: it holds the static block and the
-    predictions, never the lab roster and never the ragged sequences. Those are always synthesized
-    here.
-    """
+    The version of :func:`build_input_example` that needs no data - a checkpoint carries every column
+    name it expects.
+        """
     static_names = list(state.get("static_feature_names") or [])
     static_mean = list(state.get("static_mean") or [])
     categorical_names = list(state.get("categorical_feature_names") or [])
@@ -477,14 +456,11 @@ def example_from_state(
 
 
 def required_label_columns(model) -> list[str]:
-    """The lab columns a request must supply for this model, as the model itself reports them.
+    """The lab columns a request has to supply for this model.
 
-    ``serving_label_columns`` rather than ``auxiliary_label_columns`` because a model can read a lab
-    column for something other than the auxiliary branch - the residual architecture anchors its
-    head on one - and a column missing from the signature arrives NaN and is median-filled without
-    anything being raised. Falls back to the auxiliary list for a checkpoint restored into an older
-    class that has no such property.
-    """
+    Asked of the model itself, since a model may read a lab column as an
+    :term:`auxiliary lab input`, as a :term:`residual base`, or not at all.
+        """
     columns = getattr(model, "serving_label_columns", None)
     if columns is None:
         columns = getattr(model, "auxiliary_label_columns", None)
@@ -492,11 +468,10 @@ def required_label_columns(model) -> list[str]:
 
 
 def build_input_example(model, bundle, n_rows: int = 3) -> pd.DataFrame:
-    """A small, valid serving frame for the model's own training bundle.
+    """A small, valid request table built from the model's own training data.
 
-    Asks the model which lab columns it consumes rather than offering the whole roster, so the
-    inferred signature describes the inputs the model genuinely needs.
-    """
+    It ships with the saved model, so anyone loading it can see exactly what a request looks like.
+        """
     state = model.get_preprocessing_state() if hasattr(model, "get_preprocessing_state") else {}
     if not state:
         raise ValueError("The model carries no preprocessing state, so no input example can be built.")

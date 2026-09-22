@@ -1,11 +1,10 @@
-"""Figures for a training run: predicted-vs-observed, the parent overlay, the leaderboard, CV sweeps.
+"""The figures a training run produces.
 
-Every function here builds a Figure, styles it through :mod:`yg_eo_soilnet.plot_style`, and RETURNS
-it. The caller saves and closes - ``yg_eo_soilnet.artifacts.log_figure`` does both. That is now the
-whole repo's contract without exception; ``create_pred_obs_plot`` used to save itself to satisfy
-MLflow's custom-artifact hook, and that hook has been removed because the frame the evaluator handed
-it never carried the uncertainty columns, so it only ever produced a worse duplicate of a plot the
-logger was already writing.
+Predicted against measured for one model, the same for every model at once, the
+:term:`leaderboard`, and the figures showing how a hyperparameter search went.
+
+Every function builds a figure and returns it; the caller saves and closes it. With nothing to
+draw, a figure carrying a message comes back rather than nothing, so no caller has to check.
 """
 
 import math
@@ -43,6 +42,7 @@ from yg_eo_soilnet.utils import rpiq_score
 
 
 def _normalise_target_names(values):
+    """The target names as a plain list, whatever form they arrived in."""
     if values is None:
         return []
     if isinstance(values, str):
@@ -54,6 +54,7 @@ def _normalise_target_names(values):
 
 
 def _resolve_prediction_column(df, target_name=None, target_index=None):
+    """Which column of a results table holds this target's predictions."""
     candidates = []
     if target_name:
         candidates.extend(
@@ -87,6 +88,7 @@ def _resolve_prediction_column(df, target_name=None, target_index=None):
 
 @styled
 def _create_parent_pred_obs_multitarget(eval_dfs):
+    """The combined figure when a run covers several targets: one panel each."""
     if not eval_dfs:
         return None
 
@@ -131,6 +133,7 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
     model_colors: dict[str, str] = {}
 
     def color_for(model_name):
+        """A stable colour per model, so a model looks the same in every panel."""
         key = str(model_name)
         if key not in model_colors:
             model_colors[key] = MODEL_COLORS[len(model_colors) % len(MODEL_COLORS)]
@@ -279,18 +282,19 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
 
 @styled
 def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
-    """
-    Plot mean train/test CV scores with std bands, and highlight the best parameter.
+    """How one searched setting affected the score, with the best value marked.
 
-    Args:
-        cv_results (dict): The cv_results_ attribute from GridSearchCV
-        param_name (str): The hyperparameter name (e.g. 'model__n_components')
-        scoring (str): The scoring metric used in GridSearchCV.
-                       If it's a "neg_*" metric, values will be flipped.
+    Parameters
+    ----------
+    cv_results : dict or pandas.DataFrame
+        What the search recorded.
+    param_name : str, optional
+        The setting; found from the results unless given.
 
-    Returns:
-        matplotlib.figure.Figure: The figure object
-    """
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
 
     param_key, = [str(col) for col in cv_results.columns if str(col).startswith("param_")]
     param_name = param_key.rsplit("__", 1)[-1]
@@ -302,6 +306,7 @@ def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
 
     # Flip scores if it's a neg_* metric
     def process_scores(scores):
+        """Average one set of fold scores and their spread, for plotting."""
         return -scores if scoring.startswith("neg_") else scores
 
     mean_train = process_scores(np.array(cv_results["mean_train_score"], dtype=float))
@@ -373,6 +378,14 @@ def cv_parallel_coordinates(cv_results):
     # Copied before anything is written to it. The caller passes the same frame that is later saved
     # as cv/cv_results.csv, and taking the absolute value in place silently rewrote that file's
     # scores.
+    """How several searched settings affected the score, one line per combination tried.
+
+    Each vertical axis is one setting, and each line is one combination, coloured by how it scored.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     cv_results = cv_results.copy()
     cv_results['mean_test_score'] = cv_results['mean_test_score'].abs()
     best_index = cv_results['mean_test_score'].idxmin()
@@ -463,12 +476,11 @@ MAX_PARENT_ERROR_BARS = 120
 
 
 def _error_bar_positions(x_values, cap=MAX_ERROR_BARS):
-    """Row positions to draw bars for: every row, or an even spread across the x range.
+    """Which points get an error bar drawn.
 
-    Evenly spaced through the x-SORTED order rather than a random sample, so the drawn bars span the
-    whole range of the axis instead of clustering wherever the data is dense. Deterministic, so the
-    same run always produces the same picture.
-    """
+    Spread evenly across the range rather than picked at random, so the bars describe the whole picture
+    rather than bunching where the points are dense.
+        """
     values = np.asarray(x_values, dtype=float)
     if values.size <= cap:
         return np.arange(values.size)
@@ -516,17 +528,11 @@ ERROR_BAR_CAP_SIZE = 2.0
 
 
 def _square_limits(observed, predicted, interval=None, percentile=INTERVAL_CLIP_PERCENTILE, margin=0.05):
-    """One ``(low, high)`` range for BOTH axes of a predicted-vs-observed panel.
+    """One range for both axes of a predicted-against-measured panel.
 
-    A pred-vs-obs scatter is only readable when the identity line is a true 45 degree diagonal, and
-    that needs the two axes to share a range as well as an aspect - otherwise the cloud is stretched
-    along whichever axis happens to span less.
-
-    ``interval``, when given, widens the range toward the bar ends, but by a PERCENTILE rather than
-    by their min and max. That distinction is the whole point of this function: a single very
-    uncertain point has an interval several times the target's range, and letting it set the limits
-    is exactly the blow-out that framing on the data alone was introduced to avoid.
-    """
+    The panel can only be read when the 1:1 line is a true diagonal, which needs both axes on the same
+    range.
+        """
     candidates = [np.asarray(observed, dtype=float), np.asarray(predicted, dtype=float)]
     finite = np.concatenate([values[np.isfinite(values)] for values in candidates])
     if finite.size == 0:
@@ -540,12 +546,7 @@ def _square_limits(observed, predicted, interval=None, percentile=INTERVAL_CLIP_
 
 
 def _extend_range(low, high, interval, percentile=INTERVAL_CLIP_PERCENTILE):
-    """Widen ``(low, high)`` toward the interval ends, under two independent limits.
-
-    The percentile drops the few pathological bars. The extension ceiling handles the case the
-    percentile cannot - a heavy-tailed sigma, where even the 98th percentile is far enough out to
-    squash the data into the middle of the panel. Whichever binds first wins.
-    """
+    """Widen a range enough for the error bars, without letting one extreme bar set the scale."""
     if interval is None:
         return low, high
 
@@ -561,29 +562,14 @@ def _extend_range(low, high, interval, percentile=INTERVAL_CLIP_PERCENTILE):
 
 
 def _frame_square(ax, low, high):
-    """Give an axes one shared range and a 1:1 aspect, so its diagonal is a real diagonal.
-
-    ``adjustable="box"`` reshapes the axes box rather than the data limits, which is what keeps the
-    range exactly as asked. Call this AFTER every plotting call on the panel, so nothing that
-    autoscales on draw can overwrite the limits set here.
-    """
+    """Give an axes one shared range and equal spacing, so its diagonal is a real diagonal."""
     ax.set_xlim(low, high)
     ax.set_ylim(low, high)
     ax.set_aspect("equal", adjustable="box")
 
 
 def _draw_error_bars(ax, x_values, y_values, lower, upper, positions):
-    """Vertical prediction intervals with visible ends.
-
-    The verticals and the caps are styled SEPARATELY, which a single ``alpha=`` on the errorbar call
-    cannot do - it fades both by the same amount, and the setting that makes a few hundred
-    overlapping verticals bearable is far too faint for the caps that mark where each interval
-    actually stops. Faint accent lines, firmer accent caps.
-
-    ``yerr`` takes the two half-widths rather than half of ``upper - lower``: a conformal interval is
-    only symmetric when its calibrator is, and halving the width would bake in an assumption that
-    need not hold.
-    """
+    """Draw the prediction intervals as vertical bars with visible ends."""
     _plotline, caplines, barlinecols = ax.errorbar(
         np.asarray(x_values)[positions],
         np.asarray(y_values)[positions],
@@ -607,11 +593,7 @@ def _draw_error_bars(ax, x_values, y_values, lower, upper, positions):
 
 
 def _least_squares_line(x_values, y_values):
-    """``(slope, intercept)`` of the OLS fit, or ``None`` when there is nothing to fit.
-
-    Closed-form rather than ``np.polyfit``, which warns on a poorly-conditioned fit - and this suite
-    turns warnings into errors, so a degenerate target would take the whole plot down.
-    """
+    """The straight line that best fits the points, or None when there is nothing to fit."""
     x = np.asarray(x_values, dtype=float)
     y = np.asarray(y_values, dtype=float)
     finite = np.isfinite(x) & np.isfinite(y)
@@ -627,26 +609,25 @@ def _least_squares_line(x_values, y_values):
 
 @styled
 def pred_obs_panel(eval_df, *, target_name=None):
-    """One square panel: predictions against observations, with the 1:1 line and the metrics.
+    """One model's predictions against the lab measurements, with the 1:1 line and its scores.
 
-    This used to be three panels - the scatter, residuals against predicted, and a KDE of the same
-    two variables. Both extras were dropped: the residual panel is the scatter rotated onto the
-    identity line and says nothing the metric box does not, and the KDE redraws the first panel's
-    data with the individual points - the thing a reader is looking for - smoothed away.
+    Points on the diagonal are exactly right; the spread around it is the error. The fitted line shows
+    any systematic over- or under-prediction, the error bars the model's own uncertainty, and the
+    corner box the scores.
 
-    The uncertainty columns are OPTIONAL. Most frames reaching this function come from runs with
-    uncertainty disabled and must render exactly as they always have, so every addition below is
-    guarded on the column being present rather than on a flag the caller would have to pass.
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The test-point results: the measurements, the predictions, and the uncertainty columns if any.
+    target_name : str
+        The target, in its own units.
+    model_name : str, optional
+        Named in the title.
 
-    Args:
-        eval_df (DataFrame): must carry `target` and `prediction`; may carry `prediction_std`
-            and the `prediction_lower`/`prediction_upper` pair, and may set `attrs["interval_label"]`.
-        target_name (str, optional): what to caption the panel with; defaults to the target column's
-            own name.
-
-    Returns:
-        matplotlib.figure.Figure: the caller saves and closes it.
-    """
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     y_test = eval_df["target"]
     y_pred = eval_df["prediction"]
 
@@ -763,6 +744,14 @@ def pred_obs_panel(eval_df, *, target_name=None):
 
 
 def create_parent_pred_obs(eval_dfs):
+    """Every model's predictions against the measurements, on one figure.
+
+    One panel per target when a run has several.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     return _create_parent_pred_obs_multitarget(eval_dfs)
 
 
@@ -779,6 +768,7 @@ _METRIC_LABELS = {
 
 
 def _metric_label(metric: str) -> str:
+    """The axis label for one score, with its units where it has them."""
     if metric in _METRIC_LABELS:
         return _METRIC_LABELS[metric]
     stem, _, split = str(metric).rpartition("_")
@@ -790,10 +780,15 @@ def _metric_label(metric: str) -> str:
 @styled
 def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_test",
                                         label_col="model", hue_col="target"):
-    """
-    Create a scatter subplot for each target showing model performance,
-    with average RMSE and R² lines per target.
-    """
+    """The :term:`leaderboard` as a figure: every model's test score, per target.
+
+    One panel per target, with the average across models marked, so a model that is well ahead or well
+    behind is obvious.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     if leaderboard_df is None or leaderboard_df.empty:
         return message_figure("No leaderboard rows available")
 

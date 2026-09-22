@@ -1,3 +1,9 @@
+"""Group sample points by location, so whole groups can be held out together.
+
+Used by the :term:`spatial split`: points near each other are much alike, so holding out single
+points would leave near-copies of them in the training set and flatter every score. ``split.group``
+chooses the strategy.
+"""
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import pandas as pd
@@ -21,15 +27,24 @@ import mlflow
 import numpy as np
 
 class BaseSpatialClusterStrategy(ABC):
-    """
-    Abstract base class for spatial clustering strategies.
-    """
+    """What a grouping strategy has to provide.
+
+    Name a subclass in ``split.group.class_path`` to use it.
+        """
 
     @abstractmethod
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Clusters the input DataFrame spatially and adds a 'cluster' column.
-        """
+        """Add a ``cluster`` column saying which group each point belongs to.
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            The points, with coordinate columns.
+
+        Returns
+        -------
+        pandas.DataFrame
+                """
         pass
 
     def plot_train_test(
@@ -44,13 +59,11 @@ class BaseSpatialClusterStrategy(ABC):
         filename: str = "train_test_split.png",
         show: bool = False,
     ):
-        """
-        Plot clustered points with train/test coloring, save to temp file,
-        and log to MLflow as an artifact.
+        """Draw a map of which points went to training and which to test, and attach it to the run.
 
-        Unlike every other plotter in this project this one saves itself, because it is called from
-        inside the splitter rather than from a logger that would have somewhere to put a Figure.
-        """
+        The one plotter here that saves itself, because it is drawn while the split is being made rather
+        than by a logger.
+                """
         with style_context():
             fig, ax = plt.subplots(
                 figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
@@ -120,26 +133,24 @@ class BaseSpatialClusterStrategy(ABC):
 
 @dataclass
 class KMeansClusterStrategy(BaseSpatialClusterStrategy):
-    """
-    KMeans-based spatial clustering.
+    """Group the points into a set number of clusters by location.
 
-    Parameters:
-    -----------
-    n_clusters : int, default=12
-        Number of spatial clusters to form.
-    lat_col : str, default='lat'
-        Name of the latitude column in the DataFrame.
-    lon_col : str, default='lon'
-        Name of the longitude column in the DataFrame.
-    random_state : int, default=42
-        Random seed for reproducibility of clustering.
-    """
+    Parameters
+    ----------
+    n_clusters : int, default 12
+        How many groups.
+    lat_col, lon_col : str
+        The coordinate columns.
+    random_state : int, default 42
+        The random seed.
+        """
     n_clusters: int = 12
     lat_col: str = 'lat'
     lon_col: str = 'lon'
     random_state: int = 42
 
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Group the points into ``n_clusters`` clusters and label each one."""
         coords = df[[self.lat_col, self.lon_col]].dropna()
         kmeans = KMeans(n_clusters=self.n_clusters, random_state=self.random_state)
         labels = kmeans.fit_predict(coords) + 1  # 1-indexed
@@ -150,18 +161,15 @@ class KMeansClusterStrategy(BaseSpatialClusterStrategy):
 
 @dataclass
 class SpatialGridClusterStrategy(BaseSpatialClusterStrategy):
-    """
-    Regular grid-based spatial clustering.
+    """Group the points by laying a regular grid over them; each square is a group.
 
     Parameters
     ----------
     cell_size_m : int
-        Size of each grid cell in meters.
-    lat_col : str, default='lat'
-        Latitude column in the DataFrame.
-    lon_col : str, default='lon'
-        Longitude column in the DataFrame.
-    """
+        The width of a square, in metres.
+    lat_col, lon_col : str
+        The coordinate columns.
+        """
 
     cell_size_m: int
     lat_col: str = "lat"
@@ -169,6 +177,7 @@ class SpatialGridClusterStrategy(BaseSpatialClusterStrategy):
     random_state: int = 42
 
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Label each point with the grid square it falls in; see :func:`~yg_eo_soilnet.utils.assign_grid_ids`."""
         df = df.copy()
         grid_ids, grid_gdf = assign_grid_ids(
             df, cell_size_m=self.cell_size_m, lon_col=self.lon_col, lat_col=self.lat_col

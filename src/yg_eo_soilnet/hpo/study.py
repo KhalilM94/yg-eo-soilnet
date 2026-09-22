@@ -1,9 +1,8 @@
-"""Creating, resuming and running a study, and recording it in MLflow.
+"""Create, resume and run a :term:`study`, and record it.
 
-Studies live in SQLite so a sweep can be interrupted, resumed, run from several processes against
-the same database, and analysed afterwards with optuna-dashboard. MLflow gets one run per study
-rather than one per trial: a few hundred nested runs would bury the real training runs in
-Soil_Model_Training_Experiment, and Optuna's own storage already answers per-trial questions better.
+Studies are kept in a small database file, so a search can be stopped and resumed, run from several
+processes at once, and looked at afterwards. MLflow gets one run per study rather than one per
+trial: a few hundred runs would bury every training run in the experiment.
 """
 
 from __future__ import annotations
@@ -30,11 +29,7 @@ _MAX_PARAM_CHARS = 500
 
 
 def ensure_storage_directory(storage: str) -> str:
-    """Create the parent directory of a SQLite study database, so the first run is not a crash.
-
-    Stripping the three-slash scheme prefix leaves `relative/path.db` or `/absolute/path.db`, and
-    Path handles both.
-    """
+    """Create the folder the study's database goes in, so the first run does not fail."""
     prefix = "sqlite:///"
     if storage.startswith(prefix) and not storage.endswith(":memory:"):
         Path(storage[len(prefix) :]).parent.mkdir(parents=True, exist_ok=True)
@@ -42,17 +37,28 @@ def ensure_storage_directory(storage: str) -> str:
 
 
 def default_study_name(entry: str, space: SearchSpace) -> str:
-    """`soil_cnn-a3f19c`: the entry, plus a digest of the search space it is tuned with.
+    """The study's name: the model, plus a digest of the search space it is tuned with.
 
-    The name is what Optuna resumes on, so folding the fingerprint into it means an edited search
-    space starts a clean study by construction, while re-running an unedited one continues where it
-    left off. Before this, both cases silently appended to the same leaderboard.
-    """
+    Resuming works by name, so an edited search space starts a clean study rather than mixing trials
+    run under different rules. A name looks like ``soil_cnn-a3f19c``.
+
+    Parameters
+    ----------
+    entry : str
+        The model being tuned.
+    space : SearchSpace
+        Its search space, whose :meth:`~yg_eo_soilnet.hpo.search_space.SearchSpace.fingerprint`
+        becomes the suffix.
+
+    Returns
+    -------
+    str
+        """
     return f"{entry}-{space.fingerprint()}"
 
 
 def create_or_load_study(space: SearchSpace, study_name: str, storage: str) -> optuna.Study:
-    """Resuming is the default: the same command twice continues one study."""
+    """Open the study, resuming it when it exists - which is what running the same command twice does."""
     study = optuna.create_study(
         study_name=study_name,
         storage=ensure_storage_directory(storage),
@@ -94,13 +100,13 @@ def create_or_load_study(space: SearchSpace, study_name: str, storage: str) -> o
 
 
 def study_state(study: optuna.Study) -> str:
-    """`(new)` or `(resuming, N trials on record)` - which one it is used to be invisible."""
+    """A short line saying whether this study is new or being resumed, and how many trials it holds."""
     existing = len(study.trials)
     return "(new)" if existing == 0 else f"(resuming, {existing} trials on record)"
 
 
 def reset_study(study_name: str, storage: str, logger: Any = None) -> None:
-    """Delete a study so the next run starts clean. A study that does not exist is not an error."""
+    """Delete a study so the next run starts clean. A study that is not there is not an error."""
     try:
         optuna.delete_study(study_name=study_name, storage=ensure_storage_directory(storage))
     except KeyError:
@@ -112,13 +118,11 @@ def reset_study(study_name: str, storage: str, logger: Any = None) -> None:
 
 
 def set_hpo_experiment(name: str = HPO_EXPERIMENT_NAME) -> None:
-    """Point MLflow at the HPO experiment and close any run left open.
+    """Point MLflow at the tuning experiment, and close any run left open.
 
-    Called before data preparation, not just before the study, and even when the study itself is
-    not being logged: SklearnDataSplitter.split_data calls mlflow.log_artifacts unconditionally,
-    which auto-starts a run in whatever experiment is current. Leaving that as Default drops the
-    split artifacts into experiment 0.
-    """
+    Called before the data is prepared, and even when the study itself is not being recorded, so
+    nothing lands in the training experiment by accident.
+        """
     from yg_eo_soilnet.tracking import configure_tracking
 
     # Through configure_tracking so HPO records into the same tracking root as training, and so the
@@ -129,11 +133,14 @@ def set_hpo_experiment(name: str = HPO_EXPERIMENT_NAME) -> None:
 
 
 def _log_params(params: dict[str, Any]) -> None:
+    """Record a batch of settings on the study's run, as text."""
     mlflow.log_params({key: str(value)[:_MAX_PARAM_CHARS] for key, value in params.items()})
 
 
 def _mlflow_trial_callback() -> Callable[[optuna.Study, optuna.trial.FrozenTrial], None]:
+    """Build the callback that records each trial's score on the study's run."""
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        """Record one finished trial's score."""
         if trial.value is not None:
             mlflow.log_metric("objective", float(trial.value), step=trial.number)
         # best_value_or_none, not `study.best_value is not None`: Optuna raises when no trial has
@@ -147,6 +154,7 @@ def _mlflow_trial_callback() -> Callable[[optuna.Study, optuna.trial.FrozenTrial
 
 
 def summarize(study: optuna.Study, space: SearchSpace) -> dict[str, Any]:
+    """A short report of how the study went: the best value, which trial, and how many ran."""
     states = [trial.state.name for trial in study.trials]
     summary = {
         "study": study.study_name,
@@ -179,6 +187,23 @@ def run_study(
     progress: Any = None,
     artifact_dir: str | Path | None = None,
 ) -> optuna.Study:
+    """Run the study: draw, train and score trials until the budget is used up.
+
+    Parameters
+    ----------
+    study : optuna.Study
+        The study to run.
+    objective : TrialObjective
+        What one trial does.
+    n_trials : int
+        How many trials to run in this session.
+    callbacks : list, optional
+        Extra things to call when a trial finishes, such as the progress display.
+
+    Returns
+    -------
+    optuna.Study
+        """
     study = create_or_load_study(space, study_name, storage)
     # Read before optimize() adds any: n_trials is an increment on whatever is already stored, and
     # a resumed study's sparkline and counts include that history.

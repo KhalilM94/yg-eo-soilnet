@@ -1,23 +1,12 @@
-"""The per-point prediction export: every model's estimate for every point, keyed on point id.
+"""Every model's prediction for every point, in one table.
 
-A run already records what each model predicted for its own test rows, in each child run's
-``eval_results/eval_results.csv``. What it has never recorded is the other direction - given a
-point, what did every model say about it - because those frames carry no point id at all and are
-one file per child.
+A run already records what each model predicted for its own test points. This answers the other
+question: given a point, what did each model say about it? Switched on with
+``export_point_predictions.enabled``.
 
-This module builds that view. Children write their own contribution keyed on the id; the parent
-collects and combines them. Two shapes, because they answer different questions:
-
-* **long** - one row per (point, target, model). Authoritative: target and model are separate
-  columns, so nothing has to be parsed back out of a name.
-* **wide** - one row per point, one column per ``<target>__<model>``. Readable, drops into a
-  spreadsheet, and is what "a column per child run" means. Its column names are NOT reliably
-  splittable back into their two parts, because both halves routinely contain underscores
-  (``clay_pct``, ``soil_cnn``) - which is exactly why the long file exists beside it.
-
-Deliberately no uncertainty columns and no observed values. Where a model was ensembled the number
-here is the ensemble MEAN; its sigma and interval stay in eval_results.csv, and the observed lab
-values stay in the targets file this is keyed against.
+Two files on the :term:`main run`: ``point_predictions_wide.csv``, one row per point with a column
+per target and model, which is what to join onto a map; and ``point_predictions_long.csv``, one row
+per point per target per model, which is what to group and compare.
 """
 
 from __future__ import annotations
@@ -41,11 +30,11 @@ PREDICTION_COLUMN = "prediction"
 
 
 def export_enabled_for(config: Any, model_name: str) -> bool:
-    """Whether this registry entry should pay for a full-population prediction pass.
+    """Whether this model should predict every point, not only the test points.
 
-    Allowlist beats denylist, the same rule ``uncertainty_enabled_for`` and the SHAP seam apply -
-    the cost is per model, so naming one explicitly has to override a blanket exclusion.
-    """
+    ``export_point_predictions.models`` names the models to do it for and ``exclude_models`` names ones
+    to leave out; naming a model explicitly wins.
+        """
     if not bool(getattr(config, "EXPORT_POINT_PREDICTIONS", False)):
         return False
 
@@ -60,7 +49,7 @@ def export_enabled_for(config: Any, model_name: str) -> bool:
 
 
 def point_id_column(config: Any) -> str:
-    """The name the id column is written under, from the run's own config."""
+    """What the id column is called in the exported files."""
     return str(getattr(config, "POINT_ID_COLUMN", "point_id") or "point_id")
 
 
@@ -70,14 +59,10 @@ def point_prediction_frame(
     target_names: Sequence[str],
     id_column: str = "point_id",
 ) -> pd.DataFrame:
-    """A child's contribution: the id column plus one prediction column per target it fits.
+    """One model's contribution: the point ids, and one column per target it predicts.
 
-    ``point_ids`` must already be aligned with ``predictions`` row for row. Getting that alignment
-    right is the whole difficulty of this feature and it is the CALLER's job, because only the
-    caller still has the object that knows it - a Series indexed like the feature frame on the
-    sklearn side, the bundle's own id list on the Lightning side. Passing a bare positional range
-    here would look identical and be wrong for any model whose rows were filtered.
-    """
+    ``point_ids`` must line up with ``predictions`` row for row.
+        """
     values = np.asarray(predictions, dtype=float)
     if values.ndim == 1:
         values = values.reshape(-1, 1)
@@ -101,11 +86,7 @@ def point_prediction_frame(
 
 
 def to_long(frames: Iterable[tuple[str, pd.DataFrame]], id_column: str = "point_id") -> pd.DataFrame:
-    """``(point_id, target, model, prediction)`` over every child's frame.
-
-    ``frames`` is ``(model_name, child_frame)`` pairs - the model name comes from the run's tag
-    rather than from inside the file, so a child never has to know what it is called.
-    """
+    """Every model's predictions as one row per point per target per model."""
     melted = []
     for model_name, frame in frames:
         if frame is None or frame.empty or id_column not in frame.columns:
@@ -130,11 +111,10 @@ def to_long(frames: Iterable[tuple[str, pd.DataFrame]], id_column: str = "point_
 
 
 def to_wide(long_frame: pd.DataFrame, id_column: str = "point_id") -> pd.DataFrame:
-    """One row per point, one ``<target>__<model>`` column per child.
+    """One row per point, one column per target and model.
 
-    Built from the long frame rather than from the child frames a second time, so the two files
-    cannot disagree about what a model predicted.
-    """
+    Built from the long form rather than from the models again, so the two files cannot disagree.
+        """
     if long_frame.empty:
         return pd.DataFrame(columns=[id_column])
 
@@ -154,7 +134,13 @@ def to_wide(long_frame: pd.DataFrame, id_column: str = "point_id") -> pd.DataFra
 
 
 def wide_column_name(target: Any, model: Any) -> str:
-    """``<target>__<model>``, both halves sanitised the way artifact paths are."""
+    """The wide form's column name for one target and model.
+
+    Examples
+    --------
+    >>> wide_column_name("clay_pct", "soil_cnn")
+    'clay_pct__soil_cnn'
+        """
     return f"{ArtifactLayout.safe(target)}{NAME_SEPARATOR}{ArtifactLayout.safe(model)}"
 
 
@@ -162,17 +148,17 @@ def combine(
     frames: Iterable[tuple[str, pd.DataFrame]],
     id_column: str = "point_id",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """``(wide, long)`` for every child frame collected from a parent run."""
+    """Both forms, from every model's contribution to one run."""
     long_frame = to_long(frames, id_column=id_column)
     return to_wide(long_frame, id_column=id_column), long_frame
 
 
 def duplicate_report(long_frame: pd.DataFrame, id_column: str = "point_id") -> Optional[str]:
-    """A message when one (point, target, model) appears twice, else None.
+    """A message when a point, target and model appear twice, or None when they do not.
 
-    The wide pivot keeps the first of any duplicate, so without this check a double-counted child -
-    the same model logged under two runs, say - would be invisible in the output.
-    """
+    The wide form keeps only the first of a duplicate, so without this a model counted twice would
+    quietly lose predictions.
+        """
     if long_frame.empty:
         return None
     keys = [id_column, TARGET_COLUMN, MODEL_COLUMN]
@@ -190,12 +176,7 @@ def child_frame_from_predictor_output(
     id_column: str,
     target_names: Optional[Sequence[str]] = None,
 ) -> pd.DataFrame:
-    """Normalise ``SoilSequencePredictor.predict_frame`` output into the child-frame shape.
-
-    That method returns predictions indexed BY POINT ID with one column per target, which is the
-    same information in a different arrangement - this moves the index into a real column so the
-    Lightning and sklearn contributions are the same object.
-    """
+    """Turn what the deep-learning predictor returned into one model's contribution."""
     reset = frame.reset_index()
     reset = reset.rename(columns={reset.columns[0]: id_column})
     if target_names:
@@ -205,7 +186,7 @@ def child_frame_from_predictor_output(
 
 
 def summarize(wide: pd.DataFrame, long_frame: pd.DataFrame, id_column: str) -> Mapping[str, Any]:
-    """Log-friendly description of what was written, for the run summary."""
+    """A short description of what was exported, for the run summary."""
     return {
         "n_points": int(wide.shape[0]),
         "n_columns": int(max(wide.shape[1] - 1, 0)),

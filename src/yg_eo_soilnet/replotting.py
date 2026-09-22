@@ -1,19 +1,9 @@
-"""Redraw a finished run's figures from the artifacts it already holds.
+"""Redraw a finished run's figures from what it already recorded; the engine behind ``replot.py``.
 
-Nothing here loads the source data, a checkpoint, or a model. It does not need to: every figure a
-run emits is a pure function of two CSVs it already wrote. ``eval_results/eval_results.csv`` carries
-the observations, the predictions and - when the run had uncertainty on - sigma and the interval
-bounds; ``cv/cv_results.csv`` carries the sklearn hyper-parameter sweep. That is the whole input.
-
-This is what makes a style change affordable. Restyling the plotters would otherwise leave every
-run trained before the change holding the old picture, with retraining as the only way to refresh
-it - which would also give a different model, so the figure and the metrics beside it would no
-longer describe the same fit.
-
-Figures are re-logged INTO the run they came from, replacing the file at the same artifact path. A
-run whose artifacts cannot be read is skipped and counted, never raised on: a tree of 800 runs
-always contains some that never got far enough to write an eval CSV, and one of those must not stop
-the other 799 from being refreshed.
+Nothing here reads the source data or a model. It does not need to: every figure a run produces can
+be redrawn from the two tables it already wrote - the test-point results, and the search results.
+So the figures of a run that finished months ago can be redrawn after a change to how they look,
+without retraining anything.
 """
 
 from __future__ import annotations
@@ -52,10 +42,12 @@ ALL_KINDS = CHILD_KINDS + PARENT_KINDS
 
 
 def _wanted(only: Optional[Iterable[str]], kind: str) -> bool:
+    """Whether a figure of this kind was asked for."""
     return kind in (set(only) if only else set(ALL_KINDS))
 
 
 def _download(run_id: str, artifact_path: str):
+    """Fetch one file from a run, or None when it is not there."""
     try:
         return mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=artifact_path)
     except Exception:
@@ -63,11 +55,10 @@ def _download(run_id: str, artifact_path: str):
 
 
 def _read_first(run_id: str, artifact_paths: Iterable[str]) -> Optional[pd.DataFrame]:
-    """The first of several candidate artifact paths that resolves, read as a CSV.
+    """Read the first of several possible paths that exists.
 
-    Always goes through the candidate list rather than a hardcoded path: three generations of
-    artifact layout coexist in ``mlruns/``, and a run from any of them should replot.
-    """
+    Runs recorded at different times keep their files in different places.
+        """
     for artifact_path in artifact_paths:
         local_path = _download(run_id, artifact_path)
         if local_path is None:
@@ -80,15 +71,11 @@ def _read_first(run_id: str, artifact_paths: Iterable[str]) -> Optional[pd.DataF
 
 
 def _interval_estimator(run: Any, target: str) -> Any:
-    """The interval this run's bars actually came from, rebuilt from the params that recorded it.
+    """Rebuild the kind of interval this run's error bars came from, for the label.
 
-    Only the LABEL on the plot needs this - "bar: ±1σ" against "bar: conformal 95%" - but that label
-    is what makes the PICP printed beside it interpretable, because the same picture means different
-    things under the three methods.
-
-    The params live on the MODEL run, not on the per-target child, so this walks up one level. A
-    single-target run is its own model run and the walk is a no-op.
-    """
+    Only the label needs it - "±1σ" against "conformal 95%" - but a figure that says the wrong thing
+    about what its bars mean is worse than one with no label.
+        """
     params = dict(run.data.params)
     parent_id = run.data.tags.get("mlflow.parentRunId")
     if f"interval_method_{target}" not in params and parent_id:
@@ -119,13 +106,11 @@ def _interval_estimator(run: Any, target: str) -> Any:
 
 
 def _calibrator_for(run_id: str, artifact_path: str) -> Optional[ConformalCalibrator]:
-    """The run's own conformal calibrator, rebuilt from ``uncertainty_summary.json``.
+    """Rebuild this run's own interval calibrator from what it recorded.
 
-    Worth the extra download. Handed a calibrator, the reliability curve grades the procedure the
-    run actually used; handed nothing, it falls back to Gaussian z-multiples of the raw sigma, which
-    grades a different claim and draws a different line - so a replot without this would not match
-    the figure it replaces even though neither is wrong.
-    """
+    With it, the reliability figure grades the procedure the run actually used rather than a
+    reconstruction of it.
+        """
     local_path = _download(run_id, f"{artifact_path}/{ArtifactLayout.UNCERTAINTY_SUMMARY_FILE}")
     if local_path is None:
         return None
@@ -142,11 +127,22 @@ def regenerate_child_figures(
     only: Optional[Iterable[str]] = None,
     dry_run: bool = False,
 ) -> dict:
-    """Redraw one run's per-target figures. Returns what was written, or why nothing was.
+    """Redraw one model's figures.
 
-    ``run`` is an ``mlflow.entities.Run``, because the target and model name come from its tags and
-    fetching it again by id would be a second round trip for something the caller already has.
-    """
+    Parameters
+    ----------
+    run : mlflow.entities.Run
+        The run to redraw; its tags say which target and model it is.
+    kinds : sequence of str, optional
+        Which figures to redraw; all of them unless given.
+    dry_run : bool, default False
+        Report what would be written without writing anything.
+
+    Returns
+    -------
+    dict
+        What was written, or why nothing was.
+        """
     run_id = run.info.run_id
     target = run.data.tags.get("target")
     model_name = run.data.tags.get("model_name")
@@ -228,18 +224,10 @@ def regenerate_child_figures(
 def _own_target_frame(
     logger: ChildRunLogger, evaluation_df: Optional[pd.DataFrame], target: str, model_name: str
 ) -> Optional[pd.DataFrame]:
-    """The single frame this RUN is responsible for, selected by its own ``target`` tag.
+    """The results this run is responsible for, chosen by its own target tag.
 
-    A run scopes exactly one target - ``_log_per_target_runs`` opens a child run per target as soon
-    as a group has more than one - but the eval CSV it holds is the JOINT frame, carrying a
-    ``prediction_<t>`` column for every target in the group and a ``target_names`` column listing
-    them all. So iterating that frame the way the training code does yields every target in the
-    group, and replotting all of them here would write six pictures into a run that owns one, five
-    of them belonging to sibling runs.
-
-    The fallback matters for the legacy single-target frames that carry no ``target_name`` at all:
-    there is exactly one frame in that case and it is this run's.
-    """
+    A run covers exactly one target, even when its model predicted several.
+        """
     if evaluation_df is None:
         return None
     frames = list(logger._iter_target_eval_frames(evaluation_df, target, model_name))
@@ -250,12 +238,7 @@ def _own_target_frame(
 
 
 def _planned(has_sigma: bool, cv_results, only) -> list[str]:
-    """The artifact paths a non-dry run would write, without writing any of them.
-
-    Flat paths throughout, because that is what both training paths write: ``plots_path()`` is
-    called with no target on either family, and every run in ``mlruns/`` has a flat ``plots/`` and
-    ``uncertainty/``. Replotting has to land on the file it is replacing, not beside it.
-    """
+    """The files a real run would write, listed without writing any of them."""
     planned: list[str] = []
     if _wanted(only, "pred_obs"):
         planned.append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.PRED_OBS_FILE}")
@@ -268,14 +251,11 @@ def _planned(has_sigma: bool, cv_results, only) -> list[str]:
 
 
 def _cv_plot_name(cv_results: pd.DataFrame) -> Optional[str]:
-    """Which CV figure this sweep gets, or ``None`` for an estimator with nothing swept.
+    """Which search figure this model gets, or None when it searched nothing.
 
-    The same three-way choice ``sklearn_trainer`` makes when training: several swept parameters get
-    parallel coordinates, one gets a validation curve, and NONE gets no figure at all - a model
-    fitted at fixed hyper-parameters has no sweep to draw. That last case is not hypothetical; it
-    produced a degenerate one-axis parallel-coordinates plot and a matplotlib warning about
-    identical axis limits before it was handled here.
-    """
+    The same choice the trainer makes: a line for one searched setting, a parallel-coordinates figure
+    for several.
+        """
     param_columns = [column for column in cv_results.columns if str(column).startswith("param_")]
     if not param_columns:
         return None
@@ -283,6 +263,7 @@ def _cv_plot_name(cv_results: pd.DataFrame) -> Optional[str]:
 
 
 def _log_cv_figures(logger: ChildRunLogger, cv_results: pd.DataFrame, target, model_name) -> list[str]:
+    """Redraw and upload the search figures for one model."""
     name = _cv_plot_name(cv_results)
     if name is None:
         return []
@@ -298,7 +279,7 @@ def regenerate_parent_figures(
     only: Optional[Iterable[str]] = None,
     dry_run: bool = False,
 ) -> dict:
-    """Redraw the leaderboard scatter and the combined pred-vs-obs overlay on a parent run."""
+    """Redraw a run's leaderboard figure and its combined predicted-against-measured figure."""
     outcome: dict[str, Any] = {"run_id": parent_run_id, "written": []}
     if not _wanted(only, "leaderboard"):
         outcome["skipped"] = "leaderboard not among the requested kinds"
@@ -322,17 +303,16 @@ def regenerate_parent_figures(
 
 
 def scoring_descendants(parent_run_id: str) -> list:
-    """Every run under a parent that holds a score, flattened.
+    """Every run under a main run that carries results.
 
-    Walks the same two levels the leaderboard collector does - a joint fit keeps its per-target
-    evaluation frames in grandchildren, and its model run holds the joint frame those were split
-    from - and drops ensemble member runs, which carry their parent's target and model name but no
-    test metrics of their own.
-    """
+    Walks the same two levels the leaderboard does, since a model predicting several targets keeps its
+    results a level deeper.
+        """
     client = mlflow.tracking.MlflowClient()
     experiment_id = client.get_run(parent_run_id).info.experiment_id
 
     def children_of(run_id: str):
+        """The sub-runs of one run."""
         return client.search_runs(
             experiment_ids=[experiment_id],
             filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
@@ -351,12 +331,10 @@ def regenerate_tree(
     only: Optional[Iterable[str]] = None,
     dry_run: bool = False,
 ) -> list[dict]:
-    """Every figure under one parent: each scoring child, then the parent's own two.
+    """Redraw every figure under one main run: each model's, then the run's own.
 
-    The parent goes LAST because its overlay is built from the children's eval CSVs, and doing it
-    last means a reader comparing the parent figure against a child's is looking at two pictures
-    drawn by the same code in the same pass.
-    """
+    The run's own go last, because they are built from the models' tables.
+        """
     outcomes = [
         regenerate_child_figures(run, only=only, dry_run=dry_run)
         for run in scoring_descendants(parent_run_id)

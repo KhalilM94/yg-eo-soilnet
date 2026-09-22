@@ -1,8 +1,8 @@
-"""The Optuna objective: a trial's draw becomes a registry entry, a bundle, and a number.
+"""What one :term:`trial` does: draw settings, build the model, train it, report a number.
 
-This is where the loose coupling lives. Nothing below names a model or a datamodule class - a trial
-mutates one registry entry and hands it to an unmodified LightningConfigFactory, so any model the
-registry can already build is tunable, including ones added after this file was written.
+Nothing here names a model or a datamodule. A trial copies one model-list entry, writes the drawn
+settings into it, and hands it to the ordinary model factory - so any model the project can build
+can be tuned.
 """
 
 from __future__ import annotations
@@ -32,13 +32,18 @@ OVERRIDES_ATTR = "overrides"
 
 
 def seed_everything(seed: int) -> None:
+    """Seed every random generator; see :mod:`yg_eo_soilnet.seeding`."""
     lightning = importlib.import_module("lightning.pytorch")
     lightning.seed_everything(seed, workers=True)
 
 
 @dataclass
 class ObjectiveContext:
-    """Everything a study needs that is the same for every trial, built once up front."""
+    """Everything a study needs that is the same for every trial, prepared once.
+
+    The data, the model-list entry, the shared split and the search space. Preparing the data per trial
+    would cost more than the training it feeds.
+        """
 
     entry: str
     registry_entry: dict[str, Any]
@@ -58,6 +63,7 @@ class ObjectiveContext:
         target: str | None = None,
         **kwargs,
     ) -> "ObjectiveContext":
+        """Build the context from a run configuration and a search space."""
         registry = config.LIGHTNING_MODEL_REGISTRY
         if entry not in registry:
             available = ", ".join(sorted(registry)) or "(none)"
@@ -91,7 +97,15 @@ class ObjectiveContext:
 
 
 class TrialObjective:
-    """Callable passed to ``study.optimize``."""
+    """What a study calls for each :term:`trial`: settings in, one number out.
+
+    Parameters
+    ----------
+    context : ObjectiveContext
+        The data and settings shared by every trial.
+    runner : TrialRunner
+        What actually trains a trial.
+        """
 
     def __init__(
         self,
@@ -103,6 +117,7 @@ class TrialObjective:
         fail_fast: bool = False,
         progress: Any = None,
     ):
+        """Hold the shared context and the thing that trains a trial."""
         self.context = context
         self.space = space
         self.seed = int(seed)
@@ -115,11 +130,11 @@ class TrialObjective:
         )
 
     def build_bundle(self, overrides: Mapping[str, Any]):
-        """A ready-to-train bundle for one set of overrides.
+        """Build a ready-to-train model for one set of settings.
 
-        Also the export path's verification hook: the same function that runs a trial builds the
-        bundle from the exported configuration, so the two cannot drift.
-        """
+        Also used when exporting a winner, so the exported file is checked by the same code that ran the
+        trial - the two cannot drift apart.
+                """
         spec = apply_overrides(deepcopy(self.context.registry_entry), overrides)
         # A single-entry registry: build_lightning_configs skips anything not enabled, and the
         # study tunes one entry at a time regardless of what the file-level registry has switched on.
@@ -134,6 +149,7 @@ class TrialObjective:
         return factory.build_lightning_configs(target=self.context.target, data=self.context.data)[self.context.entry]
 
     def __call__(self, trial: optuna.Trial) -> float:
+        """Run one trial and return the score the study is optimizing."""
         overrides = self.space.suggest(trial)
         # Stored now rather than derived later: replaying a search space outside a live trial cannot
         # reproduce a conditional draw, and export must emit exactly what ran.

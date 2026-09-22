@@ -1,20 +1,7 @@
 """The one place this project decides what a figure looks like.
 
-Every constant below is lifted verbatim from the first cell of ``notebooks/paper_figures.ipynb``,
-which is where this design system was worked out. The point of copying it here rather than
-re-inventing it is that a run's diagnostic artifacts and the paper's figures then read as one system:
-the same warm greys, the same blue/orange project pair, the same y-only grid, the same bold
-left-aligned panel letter. If the notebook's palette changes, change it here too - they are meant to
-be the same values, and a divergence is a bug rather than a variation.
-
-Style is applied through :func:`styled` / :func:`style_context`, which wrap ``plt.rc_context``, NOT
-through a module-level ``rcParams.update``. That matters twice over: these modules get imported
-inside notebooks that have set their own style, and inside a test suite that turns warnings into
-errors, and a global mutation would leak into both.
-
-``savefig.dpi`` and ``savefig.bbox`` are in :data:`RC_PARAMS` for notebook parity but cannot do any
-work here, because the save happens in ``artifacts.log_figure`` long after the context has closed.
-That function passes ``dpi=SAVE_DPI, bbox_inches="tight"`` explicitly instead.
+Colours, fonts, spacing and sizes, shared by every figure a run produces and by the paper figures,
+so a diagnostic plot and a published one are recognisably the same family.
 """
 
 from __future__ import annotations
@@ -99,20 +86,20 @@ THOUSANDS = StrMethodFormatter("{x:,g}")
 
 @contextmanager
 def style_context():
-    """Draw under this project's rcParams, restoring whatever was set before.
+    """Draw in this project's style, putting the previous settings back afterwards.
 
-    Use it directly around third-party drawing calls - shap and optuna both build their own figures,
-    and this is the only way their artists inherit the palette.
-    """
+    Use it around another library's drawing calls, which build their own figures.
+        """
     with plt.rc_context(RC_PARAMS):
         yield
 
 
 def styled(function):
-    """Decorator form of :func:`style_context`, for functions that build a Figure."""
+    """The decorator form of :func:`style_context`, for a function that builds a figure."""
 
     @functools.wraps(function)
     def wrapper(*args, **kwargs):
+        """Call the wrapped function in this project's style."""
         with style_context():
             return function(*args, **kwargs)
 
@@ -120,17 +107,11 @@ def styled(function):
 
 
 def restyle_axes(axis, *, grid_axis: str = "y"):
-    """Force the house style onto an axes that some other library has already drawn on.
+    """Impose the house style on a figure another library has already drawn.
 
-    Needed because :func:`style_context` cannot defend against a library that calls
-    ``plt.style.use`` itself - optuna's plotting helpers do exactly that (``plt.style.use("ggplot")``
-    inside ``plot_optimization_history``), which replaces the rcParams mid-draw and leaves a grey
-    panel, a white grid and ggplot's font sizes. Setting the properties on the artists afterwards is
-    the only thing that outlives it.
-
-    ``grid_axis="x"`` for a horizontal bar chart, where the value runs along x and a y grid would
-    rule lines through the bars while marking nothing.
-    """
+    Needed because a library that sets its own colours and sizes as it draws cannot be styled in
+    advance.
+        """
     axis.set_facecolor("none")
     axis.figure.set_facecolor("white")
 
@@ -169,11 +150,9 @@ def restyle_axes(axis, *, grid_axis: str = "y"):
 def square_panel(axis):
     """Re-dress an axes for a scatter whose two axes mean the same thing.
 
-    The house style drops the left spine and grids on y only, which suits the bar charts and time
-    series it was designed for. A predicted-vs-observed panel is the documented exception: its 1:1
-    line is the thing being read, and reading a point against that line needs gridlines running both
-    ways and a left edge to anchor them. Everything else - colours, fonts, weights - stays.
-    """
+    The house style suits bar charts and time series; a predicted-against-measured panel needs both
+    spines and a grid on both axes, or its diagonal cannot be read.
+        """
     axis.spines["left"].set_visible(True)
     axis.spines["left"].set_color(BASELINE)
     axis.grid(True, which="major", axis="both", color=GRID, linewidth=0.8)
@@ -184,26 +163,17 @@ def square_panel(axis):
 
 
 def panel_letter(axis, letter: str):
-    """The figure's panel label: bold, lower-case, no parentheses, in the left title slot."""
+    """The panel's label - **a**, **b** - in the left title slot."""
     axis.set_title(letter, loc="left", fontweight="bold", color=INK)
 
 
 def panel_subtitle(axis, text: str):
-    """Context for a panel - which target, how many samples - in the RIGHT title slot.
-
-    Kept separate from :func:`panel_letter` on purpose: matplotlib gives an axes three independent
-    title slots, so the letter and its caption can coexist on one line without either being squeezed
-    into the other's string.
-    """
+    """Context for a panel, such as the target and how many points, in the right title slot."""
     axis.set_title(text, loc="right", fontsize=8, color=INK_2)
 
 
 def metric_box(axis, text: str, *, loc: str = "upper left"):
-    """A framed block of numbers inside the axes, matching the notebook's map-legend frame.
-
-    Placed in a corner rather than beside the panel, because the numbers describe the cloud they sit
-    on and a reader should not have to look away from it to find them.
-    """
+    """A framed block of numbers inside the axes, describing what is drawn."""
     positions = {
         "upper left": (0.04, 0.96, "left", "top"),
         "upper right": (0.96, 0.96, "right", "top"),
@@ -229,10 +199,8 @@ def metric_box(axis, text: str, *, loc: str = "upper left"):
 def message_figure(message: str, *, figsize=(FIG_WIDTH_COLUMN, 1.6)):
     """A figure that says why there is nothing to draw.
 
-    Every plotting module in this project returns one of these instead of ``None`` when its input is
-    empty, so a caller never has to branch on the return value. This is the single implementation;
-    three near-identical copies preceded it.
-    """
+    Every plotting function here returns one of these rather than nothing, so no caller has to check.
+        """
     figure, axis = plt.subplots(figsize=figsize, layout="constrained")
     axis.text(0.5, 0.5, message, ha="center", va="center", wrap=True, fontsize=8, color=MUTED)
     axis.set_axis_off()
@@ -240,15 +208,10 @@ def message_figure(message: str, *, figsize=(FIG_WIDTH_COLUMN, 1.6)):
 
 
 def sequential_cmap(ramp=CARBONATE_RAMP, name: str = "soilnet_sequential"):
-    """A continuous colormap from one of the discrete ramps above.
-
-    Used wherever a colour has to encode a number - predictive sigma on the pred-vs-obs panel, the CV
-    score on the parallel-coordinates plot. Single-hue by construction, which is what a magnitude
-    deserves; the multi-hue defaults (viridis and friends) imply categories that are not there.
-    """
+    """A continuous colour ramp, for wherever a colour has to stand for a number."""
     return LinearSegmentedColormap.from_list(name, ramp)
 
 
 def minus(text: str) -> str:
-    """Hyphen-minus to a real minus sign, so hand-written numbers match the axis ticks."""
+    """Replace a hyphen with a real minus sign, so numbers match the axis labels."""
     return text.replace("-", "\N{MINUS SIGN}")

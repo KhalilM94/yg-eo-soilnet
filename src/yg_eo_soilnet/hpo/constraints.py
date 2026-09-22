@@ -1,11 +1,9 @@
-"""Named hooks for the couplings a declarative search space cannot express.
+"""Hooks for settings that depend on one another, which a YAML list cannot express.
 
-Almost every hyperparameter is an independent draw and belongs in YAML. The exceptions are
-parameters constrained by *each other* - a width that must divide by a head count, or a
-variable-length list of layer widths. Those live here as named callables a search space opts into
-with `derive: [<name>]`, so the YAML stays declarative and the escape hatch stays small and tested.
-
-A hook receives the live Optuna trial and the parameters chosen so far, and mutates that dict.
+Almost every setting is drawn on its own and belongs in the :term:`search space`. The exceptions are
+settings constrained by each other - a width that has to divide by a head count, or a list of layer
+widths whose length is itself being searched. Those are named hooks here, and a search space asks
+for one by name.
 """
 
 from __future__ import annotations
@@ -21,7 +19,9 @@ CONSTRAINTS: dict[str, ConstraintHook] = {}
 
 
 def constraint(name: str) -> Callable[[ConstraintHook], ConstraintHook]:
+    """Register a hook under a name a search space can ask for."""
     def register(hook: ConstraintHook) -> ConstraintHook:
+        """Record the decorated function under that name."""
         if name in CONSTRAINTS:
             raise ValueError(f"A constraint hook named {name!r} is already registered.")
         CONSTRAINTS[name] = hook
@@ -31,11 +31,10 @@ def constraint(name: str) -> Callable[[ConstraintHook], ConstraintHook]:
 
 
 def split_derive_entry(entry: Any) -> tuple[str, dict[str, Any]]:
-    """`"name"` or `{"name": {...options}}` -> `(name, options)`.
+    """Read a ``derive:`` entry: a bare name, or a name with options.
 
-    The mapping form lets one hook serve several search spaces on its own terms - the head pyramid
-    wants a different floor per model - without turning every option into a separate hook.
-    """
+    The options form lets one hook serve several search spaces on their own terms.
+        """
     if isinstance(entry, str):
         return entry, {}
     if isinstance(entry, Mapping) and len(entry) == 1:
@@ -49,11 +48,11 @@ def split_derive_entry(entry: Any) -> tuple[str, dict[str, Any]]:
 
 
 def split_when(options: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
-    """`(hook options, when guard)` - the guard belongs to the search space, not to the hook.
+    """Separate a hook's options from its condition.
 
-    Same semantics as a `params` entry's `when:`: the hook runs only in trials where every named
-    parameter - drawn, or pinned under `fixed:` - equals the given value.
-    """
+    The condition belongs to the search space, not to the hook: the hook runs only in trials where the
+    named settings took those values.
+        """
     options = dict(options)
     when = options.pop("when", None) or {}
     if not isinstance(when, Mapping):
@@ -62,7 +61,9 @@ def split_when(options: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
 
 
 def _guarded(hook: ConstraintHook, when: Mapping[str, Any]) -> ConstraintHook:
+    """Wrap a hook so it runs only in trials matching its condition."""
     def run(trial: optuna.Trial, chosen: MutableMapping[str, Any]) -> None:
+        """Run the hook if this trial matches, otherwise do nothing."""
         if all(key in chosen and chosen[key] == expected for key, expected in when.items()):
             hook(trial, chosen)
 
@@ -70,12 +71,13 @@ def _guarded(hook: ConstraintHook, when: Mapping[str, Any]) -> ConstraintHook:
 
 
 def resolve_constraints(entries: list[Any]) -> list[ConstraintHook]:
-    """Look up hooks by name, failing at search-space load time rather than mid-study.
+    """Look up the hooks a search space names, failing now rather than mid-study.
 
-    Options given in the mapping form are bound here, so a resolved hook is always callable as
-    `(trial, chosen)` and nothing downstream has to carry them. A `when:` option is not passed to
-    the hook; it wraps it, so a pyramid for a switched-off branch draws nothing at all.
-    """
+    Returns
+    -------
+    list of callable
+        Each takes the trial and what has been drawn so far, and writes its own settings in.
+        """
     parsed = [split_derive_entry(entry) for entry in entries]
     unknown = [name for name, _ in parsed if name not in CONSTRAINTS]
     if unknown:
@@ -97,15 +99,11 @@ def d_model_divisible_by_nhead(
     d_model_key: str = "model.d_model",
     nhead_key: str = "model.nhead",
 ) -> None:
-    """Round the width at `d_model_key` up to a multiple of the head count at `nhead_key`.
+    """Round a width up until it divides by the number of attention heads.
 
-    TimeAwareTransformerEncoder raises unless d_model % nhead == 0. Repairing the draw instead of
-    rejecting it keeps every trial valid by construction, and costs no extra search dimension - the
-    two parameters stay independent draws in the YAML.
-
-    The keys default to the sequence transformer's. The residual attention CNN names its own pair,
-    `model.attention_d_model` / `model.attention_nhead`, through the mapping form.
-    """
+    The model refuses a width that does not. Repairing the draw rather than rejecting the trial keeps
+    every trial useful.
+        """
     d_model = chosen.get(d_model_key)
     nhead = chosen.get(nhead_key)
     if d_model is None or nhead is None:
@@ -132,22 +130,11 @@ def dims_pyramid(
     floor: int = 8,
     taper: float = 0.5,
 ) -> None:
-    """Draw a list of per-layer widths into `key`: `depth` layers scaled by `taper` from a base width.
+    """Draw a list of layer widths: so many layers, each a fraction of the one before.
 
-    Every list-valued width argument in the models - `head_hidden_dims`, `static_hidden_dims`,
-    `cnn_hidden_dims` - needs this, because no single Optuna distribution produces a list: a
-    categorical's choices are stored in the study database and so must be scalars. Depth and base
-    width are the two dimensions that matter, and one `taper` covers the shapes worth searching
-    without spending a parameter per layer:
-
-        taper 0.5  halves      128 -> [128, 64, 32]   the classic head
-        taper 1.0  constant    128 -> [128, 128, 128] what a shared-width conv stack was
-        taper 2.0  widens       32 -> [32, 64, 128]   the conventional conv shape
-
-    `floor` clamps the taper so a deep pyramid does not shrink to a handful of dimensions and undo
-    the depth it is adding. Parameter names are derived from `key`, so several pyramids can coexist
-    in one search space without colliding.
-    """
+    Every list-valued width in the models - the head, the covariate branch, the CNN - is searched this
+    way, since the number of layers and their widths cannot be drawn independently.
+        """
     label = key.rsplit(".", 1)[-1]
     depth = trial.suggest_int(f"{label}_depth", int(min_depth), int(max_depth))
     if depth <= 0:

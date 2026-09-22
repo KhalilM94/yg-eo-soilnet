@@ -1,10 +1,8 @@
-"""Running one trial: a built bundle in, an objective value out.
+"""Train one :term:`trial` and return its score.
 
-Deliberately not LightningTrainer. That class is built for a production run - it validates, tests,
-predicts, assembles an evaluation frame and logs an MLflow child run with artifacts, and writes a
-checkpoint. Multiplied by a few hundred trials that is most of the wall clock and a lot of disk, and
-none of it informs the search. A trial only needs fit() and the best value of one metric; the
-winning configuration is retrained through the normal path afterwards.
+Deliberately not the ordinary trainer, which validates, tests, predicts, draws figures, saves a
+model and opens a run - worth doing once per model, not a few hundred times. This trains, watches
+the score, and stops early when a trial is clearly going nowhere.
 """
 
 from __future__ import annotations
@@ -30,34 +28,37 @@ TRIAL_TRAINER_OVERRIDES = {
 
 
 class UnrecoverableAcceleratorError(RuntimeError):
-    """The CUDA context is gone; no later trial in this process can succeed.
+    """Raised when the GPU itself has died and no later trial can succeed.
 
-    Distinct from every other trial failure on purpose. A bad corner of the search space - an OOM, an
-    architecture the model rejects - is one pruned trial and the study carries on. A dead device is
-    not: every remaining trial would fail in turn, each after a full data load, so the study must
-    stop and hand back what it has.
-    """
+    Kept apart from an ordinary trial failure on purpose: a bad corner of the search space should cost
+    one trial, while a dead GPU should stop the study rather than let it record hundreds of failures.
+        """
 
 
 @dataclass
 class TrialResult:
+    """What one trial produced.
+
+    Attributes
+    ----------
+    value : float or None
+        The score the study is optimizing, or None when the trial failed.
+    epochs : int
+        How many epochs it ran.
+    pruned : bool
+        Whether it was abandoned early as hopeless.
+        """
     value: float
     best_epoch: int | None
     epochs_run: int
 
 
 def cuda_context_is_dead() -> bool:
-    """One tiny allocation, run only on the failure path.
+    """Whether the GPU is still usable, tested by asking it for a little memory.
 
-    Probing beats matching on the message. ``cudaErrorUnknown`` is reported asynchronously, so the
-    exception names whatever CUDA call came next rather than the one that failed - in the run that
-    prompted this, a two-element ``torch.tensor`` in the rasterizer, then ``torch.cuda.manual_seed_all``
-    on the following trial. Neither says anything about the cause; the device either answers or it
-    does not.
-
-    ``is_initialized()`` gates the probe to processes that actually built a context, so a CPU run
-    never reports a dead accelerator.
-    """
+    Asked rather than guessed from the error message, which names whatever call came next rather than
+    the one that failed.
+        """
     torch = sys.modules.get("torch")
     if torch is None or not torch.cuda.is_initialized():
         return False
@@ -69,11 +70,11 @@ def cuda_context_is_dead() -> bool:
 
 
 def raise_if_accelerator_is_dead(exc: BaseException, trial_number: int) -> None:
-    """Turn a device death into ``UnrecoverableAcceleratorError``; return quietly for anything else.
+    """Turn a dead GPU into :class:`UnrecoverableAcceleratorError`; let anything else pass.
 
-    An OOM is handled correctly by doing nothing special: it leaves the context usable, so the probe
-    passes and the caller prunes the trial exactly as before.
-    """
+    Running out of memory needs nothing special: it leaves the GPU usable, so the trial fails and the
+    study carries on.
+        """
     if not cuda_context_is_dead():
         return
     raise UnrecoverableAcceleratorError(
@@ -84,20 +85,11 @@ def raise_if_accelerator_is_dead(exc: BaseException, trial_number: int) -> None:
 
 
 def release_dataloader_workers() -> None:
-    """Collect finished Trainer/DataLoader cycles now, between trials.
+    """Free the previous trial's data-loading processes before the next one starts.
 
-    Lightning's Trainer <-> LightningModule <-> callbacks <-> loops graph is cyclic, so dropping the
-    last name binding never frees it - it waits for a generational GC pass. Until that happens its
-    DataLoader iterators stay alive, and the next trial's fork() copies them into every new worker.
-    When such a worker exits it finalizes the inherited iterator and hits
-    `assert self._parent_pid == os.getpid()`, because is_alive() is only valid in the process that
-    started the workers. Collecting here runs that finalization in the main process instead, where
-    it is valid, and stops workers accumulating across a long study.
-
-    Also returns the trial's GPU blocks to the driver. Trials range from a one-block encoder to five
-    blocks of 256 channels per modality, so the caching allocator otherwise accumulates freed blocks
-    in shapes the next trial cannot use. A few milliseconds against a trial measured in minutes.
-    """
+    They are not released on their own, and a few hundred trials would otherwise leave hundreds of
+    processes behind.
+        """
     gc.collect()
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_initialized():
@@ -105,7 +97,7 @@ def release_dataloader_workers() -> None:
 
 
 def silence_lightning() -> None:
-    """Quiet the per-trial chatter that would otherwise scroll a study off the screen."""
+    """Quieten the per-trial messages that would otherwise scroll the study off the screen."""
     for name in (
         "lightning.pytorch",
         "lightning.pytorch.utilities.rank_zero",
@@ -119,7 +111,17 @@ def silence_lightning() -> None:
 
 
 class TrialRunner:
+    """Trains one trial and reports its score.
+
+    Parameters
+    ----------
+    objective : Objective
+        Which score to watch, and whether lower or higher is better.
+    extra_callbacks : list, optional
+        Anything extra to attach to the training, such as the progress display.
+        """
     def __init__(self, objective: Objective, *, logger=None, fail_fast: bool = False, extra_callbacks=None):
+        """Hold what to watch and anything extra to attach to each trial's training."""
         self.objective = objective
         self.logger = logger
         self.fail_fast = fail_fast
@@ -128,9 +130,11 @@ class TrialRunner:
         self.extra_callbacks = list(extra_callbacks or [])
 
     def _lightning(self):
+        """Import PyTorch Lightning, with a clear message when it is missing."""
         return importlib.import_module("lightning.pytorch")
 
     def build_trainer(self, bundle, pruning_callback):
+        """Build the trainer for one trial: quiet, with early stopping and pruning attached."""
         lightning = self._lightning()
         trainer_kwargs = {**bundle.trainer_kwargs, **TRIAL_TRAINER_OVERRIDES}
 
@@ -146,6 +150,17 @@ class TrialRunner:
         return lightning.Trainer(**trainer_kwargs, callbacks=callbacks)
 
     def run(self, bundle, trial: optuna.Trial, *, report: bool = True) -> TrialResult:
+        """Train one trial and return its score.
+
+        Returns
+        -------
+        TrialResult
+
+        Raises
+        ------
+        UnrecoverableAcceleratorError
+            If the GPU has died, so the study can stop rather than fail every remaining trial.
+                """
         pruning_callback = OptunaPruningCallback(
             trial, monitor=self.objective.metric, mode=self.objective.mode, report=report
         )

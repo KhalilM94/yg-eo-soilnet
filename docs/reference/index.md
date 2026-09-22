@@ -11,5 +11,6 @@ data
 models
 training
 uncertainty
+tuning
 utilities
 ```
