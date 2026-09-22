@@ -8,5 +8,6 @@ docstring.
 
 scripts
 data
+models
 utilities
 ```

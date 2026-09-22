@@ -1,15 +1,9 @@
-"""The MLP stack every branch in every model is built from.
+"""The stack of layers every branch of the deep-learning model is built from.
 
-The output head, the static encoder and any future block share one shape - `Linear` per width, each
-optionally followed by a norm, an activation and dropout - so it lives here once. Callers differ only
-in how the block feeding whatever comes next is treated, and in whether a final projection is
-appended, both of which are arguments.
-
-Widths are always an explicit list. An earlier generation took a layer *count* plus one width and
-halved it internally, which meant the built network could not be read off the config: every registry
-comment describing such a block had drifted from what it actually built. A halving pyramid is still a
-sensible default shape, so the hyperparameter search draws one - see ``hpo/constraints.py`` - but it
-draws it into an explicit list.
+The covariate branch, the prediction head and every other block have the same shape - one layer per
+width, each optionally followed by normalization, an activation and dropout - so it is built here
+once. The widths are always given as an explicit list, so the network can be read off the
+configuration: ``head_hidden_dims: [64, 32]`` is two layers, 64 units then 32.
 """
 
 from __future__ import annotations
@@ -18,6 +12,7 @@ from typing import Optional, Sequence
 
 from torch import nn
 
+#: The activation functions a configuration may name.
 ACTIVATIONS = {"relu": nn.ReLU, "gelu": nn.GELU}
 
 
@@ -32,18 +27,45 @@ def build_mlp_stack(
     norm_final: bool = False,
     dropout_final: bool = False,
 ) -> nn.Module:
-    """``input_dim -> hidden_dims -> output_dim``, one Linear/norm/activation/dropout block per width.
+    """Build a stack of layers: ``input_dim`` in, one block per width, optionally a final output.
 
-    ``output_dim=None`` omits the final projection, leaving a stack that is ``hidden_dims[-1]`` wide.
-    An empty ``hidden_dims`` is then either a single ``Linear(input_dim, output_dim)`` or, with no
-    output_dim, an ``Identity``.
+    Each block is a layer of that width, then normalization, the activation and dropout.
 
-    ``norm_final`` and ``dropout_final`` control the block feeding whatever comes next. A **head**
-    leaves both off: normalizing there forces the penultimate vector to unit variance, leaving the
-    final Linear only its direction - and magnitude is what a regressor needs to reach the tails -
-    while dropout on that same vector is minimized under MSE by shrinking the readout toward its
-    bias, i.e. toward the target mean. A block feeding a *fusion* rather than a readout turns both on,
-    because there is no readout for either to degrade.
+    Parameters
+    ----------
+    input_dim : int
+        How many values come in.
+    hidden_dims : sequence of int
+        One width per layer. Empty gives a single layer from ``input_dim`` to ``output_dim``, or
+        nothing at all when there is no ``output_dim``.
+    output_dim : int, optional
+        Width of a final layer. Left out, the stack ends ``hidden_dims[-1]`` wide.
+    dropout : float
+        Share of values dropped during training, between 0 and 1.
+    use_layer_norm : bool, default True
+        Normalize inside each block.
+    activation : {"relu", "gelu"}, default "relu"
+        The activation function.
+    norm_final, dropout_final : bool, default False
+        Whether the last block is normalized and dropped out too. A prediction head leaves both off:
+        normalizing there would throw away the size of the values the last layer reads, which is
+        what a prediction needs. A block feeding into the :term:`fusion` turns both on, since no
+        prediction is read from it directly.
+
+    Returns
+    -------
+    torch.nn.Module
+
+    Raises
+    ------
+    ValueError
+        If the activation is not one of :data:`ACTIVATIONS`.
+
+    Examples
+    --------
+    >>> stack = build_mlp_stack(8, [32, 16], output_dim=3, dropout=0.1)
+    >>> [type(layer).__name__ for layer in stack][-1]
+    'Linear'
     """
     try:
         activation_cls = ACTIVATIONS[str(activation).lower()]

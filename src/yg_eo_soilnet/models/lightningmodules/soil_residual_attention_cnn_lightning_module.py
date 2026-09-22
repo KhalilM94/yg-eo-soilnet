@@ -1,10 +1,8 @@
-"""Legacy name: SoilCNNLightningModule with ``residual_enabled`` on and ``fusion="attention"``.
+"""An older name for `soil_cnn` with a :term:`residual base` and attention :term:`fusion`.
 
-The attention fusion used to live in this subclass, which built its parent's gated fusion and head
-and then replaced both. It is now a switch on SoilCNNLightningModule, and this name stays for
-everything that still resolves it - see soil_residual_cnn_lightning_module for the list. New
-configuration should use the ``soil_cnn`` entry with ``residual_enabled: true`` and
-``fusion: attention``.
+Both were once classes of their own and are now switches. This name is kept so models saved before
+the change can still be loaded; new configuration should use the ``soil_cnn`` entry with
+``residual_enabled: true`` and ``fusion: attention``.
 """
 
 from __future__ import annotations
@@ -20,9 +18,9 @@ __all__ = ["STATIC_TOKEN_MODES", "SoilResidualAttentionCNNLightningModule"]
 
 
 class SoilResidualAttentionCNNLightningModule(SoilResidualCNNLightningModule):
-    """SoilResidualCNNLightningModule with attention fusion switched on by default."""
+    """`soil_cnn` with a :term:`residual base` and attention :term:`fusion`."""
 
-    # What a pickled model of this class reads - see the note on SoilCNNLightningModule's switches.
+    # Read by a saved model of this class that predates the switch.
     fusion_type = "attention"
 
     def __init__(self, *, fusion: str = "attention", **kwargs: Any):
