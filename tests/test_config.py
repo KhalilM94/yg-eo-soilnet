@@ -1,7 +1,25 @@
+"""Config: the loader, the shipped files, and every dotted path those files name."""
+
+import importlib
 from pathlib import Path
+
 import pytest
+import yaml
 
 from config import Config
+
+# These imports are the guard: if a module moved, collection of this file fails. Asserting
+# `X is not None` on them afterwards could never fail independently, so that test was removed.
+from yg_eo_soilnet.datamodules.scikit.scikit_datamodule import ScikitDataModule  # noqa: F401
+from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import (  # noqa: F401
+    CVSplitter,
+    PipelineBuilder,
+    TargetNanFilter,
+)
+from yg_eo_soilnet.datamodules.scikit.sklearn_data_splitter import SklearnDataSplitter  # noqa: F401
+from yg_eo_soilnet.datamodules.scikit.tabular_preprocessor import TabularPreprocessor  # noqa: F401
+from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule  # noqa: F401
+from yg_eo_soilnet.uncertainty.intervals import normalize_method
 
 BASE_CONFIG_CONTENT = """
 common:
@@ -606,3 +624,159 @@ def test_explain_switch_honours_an_env_override(
 
     assert config.EXPLAIN_ENABLED is False
     assert config.EXPLAIN_MAX_SAMPLES == 50
+
+
+# --- shipped configs and their dotted paths ---------------------------------------------------
+# Every dotted path shipped in configs/ must resolve.
+#
+# Module paths inside YAML are resolved at runtime, so a file move that misses them fails only
+# once training starts. These tests catch that at collection time instead.
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIGS_ROOT = PROJECT_ROOT / "configs"
+
+
+def _resolve(dotted_path: str):
+    module_path, attr_name = dotted_path.rsplit(".", 1)
+    return getattr(importlib.import_module(module_path), attr_name)
+
+
+def _enabled_lightning_entries() -> list[tuple[str, dict]]:
+    from config import load_lightning_registry
+
+    registry = load_lightning_registry(str(CONFIGS_ROOT / "lightning" / "models" / "defaults.yml"))
+    return [(name, spec) for name, spec in registry.items() if spec.get("enabled", False)]
+
+
+def _sklearn_model_entries() -> list[tuple[str, dict]]:
+    """All entries, enabled or not - these are third-party paths that must stay valid."""
+    registry = yaml.safe_load((CONFIGS_ROOT / "sklearn" / "model_registry.yml").read_text())
+    return list(registry.items())
+
+
+@pytest.mark.parametrize("name,spec", _enabled_lightning_entries())
+@pytest.mark.parametrize("key", ["import_path", "datamodule_import_path"])
+def test_enabled_lightning_registry_paths_resolve(name: str, spec: dict, key: str) -> None:
+    assert _resolve(spec[key]) is not None, f"{name}.{key} does not resolve"
+
+
+@pytest.mark.parametrize("name,spec", _sklearn_model_entries())
+def test_sklearn_model_registry_paths_resolve(name: str, spec: dict) -> None:
+    assert _resolve(spec["import_path"]) is not None, f"{name}.import_path does not resolve"
+
+
+def test_clustering_strategy_class_path_resolves() -> None:
+    sklearn_config = yaml.safe_load((CONFIGS_ROOT / "sklearn" / "config.yml").read_text())
+    class_path = sklearn_config["CLUSTERING_STRATEGY"]["class_path"]
+
+    from yg_eo_soilnet.clustering_utils import BaseSpatialClusterStrategy
+
+    assert issubclass(_resolve(class_path), BaseSpatialClusterStrategy)
+
+
+# --- the shipped configs must actually load ---------------------------------
+# A dangling YAML anchor in data_spec.yml once broke `python main.py` at startup while the suite
+# stayed green, because every test builds its own config fixture instead of reading these files.
+
+
+def test_shipped_configs_load() -> None:
+    from config import Config
+
+    config = Config(config_path=str(CONFIGS_ROOT / "main_config.yml"))
+
+    assert config.TARGET_COLUMNS, "TARGET_COLUMNS must not be empty"
+    assert config.DATA_FOLDER
+
+
+def test_active_targets_are_declared_as_labels() -> None:
+    """TARGET_COLUMNS should be a subset of LABEL_COLUMNS; both are excluded from features anyway."""
+    from config import Config
+
+    config = Config(config_path=str(CONFIGS_ROOT / "main_config.yml"))
+
+    undeclared = sorted(set(config.TARGET_COLUMNS) - set(config.LABEL_COLUMNS))
+    assert not undeclared, f"targets missing from LABEL_COLUMNS: {undeclared}"
+
+
+# --- module paths -----------------------------------------------------------------------------
+
+
+
+
+
+# --- uncertainty interval block ---------------------------------------------------------------
+# The uncertainty interval block: read from the config, legacy spellings included.
+
+
+def _config_with(tmp_path, uncertainty_yaml: str):
+    """A real Config over a minimal tree, reusing this file's fixture content.
+
+    Building the whole tree matters: Config resolves its sub-configs relative to the main file, so
+    a one-key stub raises before it ever reaches the uncertainty block.
+    """
+    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
+    (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
+    (tmp_path / "registry.yml").write_text("enabled: true\n")
+    (tmp_path / "lightning_registry.yml").write_text(MOCK_LIGHTNING_REGISTRY)
+
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        "common:\n"
+        "    DATA_SPEC_PATH: data_spec.yml\n"
+        "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
+        "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
+        "    SKLEARN_REGISTRY_PATH: registry.yml\n"
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
+        + uncertainty_yaml
+    )
+    return Config(
+        config_path=str(config_path),
+        registry_path=str(tmp_path / "registry.yml"),
+        lightning_registry_path=str(tmp_path / "lightning_registry.yml"),
+    )
+
+
+def test_the_interval_block_is_read_from_the_config(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        interval:
+            method: sigma
+            k: 2.0
+""")
+    assert config.UNCERTAINTY_INTERVAL_METHOD == "sigma"
+    assert config.UNCERTAINTY_INTERVAL_K == 2.0
+
+
+def test_a_config_predating_the_interval_block_still_works(tmp_path):
+    """`calibration.method` is what configs in the wild set; it must keep resolving."""
+    config = _config_with(tmp_path, """    uncertainty:
+        calibration:
+            method: split_conformal
+            alpha: 0.10
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
+    assert config.UNCERTAINTY_ALPHA == pytest.approx(0.10)
+
+
+def test_the_legacy_none_still_means_none(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        calibration:
+            method: none
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "none"
+
+
+def test_the_interval_block_wins_over_the_legacy_key(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        interval:
+            method: gaussian
+        calibration:
+            method: split_conformal
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "gaussian"
+
+
+def test_the_default_is_conformal_when_nothing_is_configured(tmp_path):
+    config = _config_with(tmp_path, "")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
