@@ -1,32 +1,41 @@
-"""The one regression metric set both training families report.
+"""The accuracy scores every model reports, and which scale each score is on.
 
-Before this module the two paths logged different numbers under the same name. sklearn logged a
-POSITIVE cross-validated RMSE as ``mean_test_score`` (its ``GridSearchCV`` runs
-``neg_root_mean_squared_error``, and the logger negated the already-negative value), while the
-Lightning path logged ``-test_loss`` - a negated MSE in standardized log1p space, so a NEGATIVE
-number - under that same name. The leaderboard then plotted both on one axis, mixing three units and
-two signs.
+Every trained model - scikit-learn or deep learning - is scored with the same function,
+:func:`regression_metrics`, on the same test points, in the target's own units (g/kg, %, pH).
+So ``rmse_test`` means exactly the same thing on every row of the :term:`leaderboard`.
 
-The fix is this module. Both families call :func:`regression_metrics` on the same object - the test
-split's prediction frame, in ORIGINAL target units - so every name below means exactly one thing no
-matter which framework produced it, and no caller ever flips a sign.
+The scores, for predictions compared with lab measurements:
 
-Two rules keep it that way:
+``rmse``
+    Root mean squared error: the typical size of an error, in the target's units. Lower is better.
+``mae``
+    Mean absolute error: the average size of an error, in the target's units. Lower is better.
+``bias``
+    The average of (prediction - measurement). Positive means the model predicts too high on
+    average; best near zero.
+``r2``
+    Coefficient of determination: the share of the variation between points that the model
+    explains. 1 is perfect, 0 is no better than always predicting the average, and it can be
+    negative for a model worse than that.
+``rpd``
+    Ratio of performance to deviation: the spread of the measurements (standard deviation) divided
+    by the RMSE. Common in soil spectroscopy; higher is better.
+``rpiq``
+    Ratio of performance to interquartile range: like ``rpd``, but with the interquartile range,
+    which is less affected by a few extreme values. Higher is better.
+``n``
+    How many points were scored.
 
-* **No metric here is ever negative by convention.** ``r2_test`` and ``bias_test`` can be negative
-  because the quantity genuinely is; nothing is negated to express "higher is better". Direction
-  lives in :data:`METRIC_DIRECTION`, not in the sign.
-* **:func:`cv_rmse_from_search` is the only place a ``neg_*`` scorer sign is flipped.** If you find
-  yourself writing a unary minus on a metric anywhere else, that is the bug this module exists to
-  prevent.
+No score is made negative to mean "higher is better": :data:`METRIC_DIRECTION` says which way
+each one is better.
 
-Deliberately NOT covered here: the Lightning module's own ``train_loss`` / ``val_loss`` /
-``test_loss`` / ``{stage}_r2`` / ``{stage}_pred_std_ratio``. Those are computed in STANDARDIZED LOG1P
-space (``_shared_step`` compares against the transformed target; only ``predict_step`` inverts), and
-they are wired into EarlyStopping monitors, ModelCheckpoint, the LR scheduler, the HPO objective
-whitelist and every exported tuned config. They keep their names and their space. The metrics here
-are logged ALONGSIDE them, and :data:`METRIC_SPACE` records which is which so a reader of an MLflow
-run never has to guess.
+Two scales
+----------
+The deep-learning models also record their own training scores - ``train_loss``, ``val_loss``,
+``test_loss``, ``val_r2`` and so on. These are computed on the scale the model trains on (the
+target log-transformed, then rescaled to mean 0 and standard deviation 1), not in the target's
+units, so they cannot be compared with ``rmse_test``. :data:`METRIC_SPACE` records which scale
+each name is on, and every run stores that information alongside its scores.
 """
 
 from __future__ import annotations
@@ -39,8 +48,9 @@ from sklearn.metrics import mean_absolute_error, r2_score, root_mean_squared_err
 
 from yg_eo_soilnet.utils import rpd_score, rpiq_score
 
-# name stem -> which way is better. "zero" means a bias-like metric best read as |value|.
-# None means the metric is a count, not a score.
+#: For each score name, which way is better: "lower", "higher", or "zero" (best near zero, like
+#: bias). ``None`` means it is not a score to rank by (a count, or a value that should sit near a
+#: target rather than be maximized).
 METRIC_DIRECTION: dict[str, str | None] = {
     "rmse": "lower",
     "mae": "lower",
@@ -49,21 +59,16 @@ METRIC_DIRECTION: dict[str, str | None] = {
     "rpiq": "higher",
     "bias": "zero",
     "n": None,
-    # The uncertainty stems are merged in below, after their table is declared, so that
-    # METRIC_DIRECTION stays the one lookup every reader needs.
+    # The uncertainty scores are added below, so this stays the one table to look in.
 }
 
-# The unified set, in the order they are logged and reported.
+#: The scores :func:`regression_metrics` computes, in the order they are recorded.
 METRIC_STEMS: tuple[str, ...] = ("rmse", "mae", "r2", "rpd", "rpiq", "bias", "n")
 
-# Uncertainty metric stems, computed by yg_eo_soilnet.uncertainty.metrics. Declared HERE rather than
-# there so that this module stays the single registry of what a metric name means - the dependency
-# runs one way (uncertainty.metrics imports from this module) and cannot become a cycle.
-#
-# `picp` has direction None on purpose. It should sit CLOSE TO 1-alpha, not be maximized: an
-# interval spanning the whole target range covers 100% of observations and says nothing. A "higher"
-# direction would rank that as the best possible result, so the rankable form is `coverage_error`,
-# which is zero-centred and signed the way `bias` is.
+#: Which way is better for the uncertainty scores computed by :mod:`yg_eo_soilnet.uncertainty.metrics`.
+#: ``picp`` (how often the true value falls inside the predicted range) has no direction: it should
+#: be close to the promised coverage (for example 95%), not as high as possible - a range covering
+#: every possible value would reach 100% and say nothing. ``coverage_error`` is the rankable form.
 UNCERTAINTY_METRIC_DIRECTION: dict[str, str | None] = {
     "picp": None,
     "coverage_error": "zero",
@@ -81,25 +86,23 @@ UNCERTAINTY_METRIC_STEMS: tuple[str, ...] = tuple(UNCERTAINTY_METRIC_DIRECTION)
 
 METRIC_DIRECTION.update(UNCERTAINTY_METRIC_DIRECTION)
 
-# Which numeric space a metric name lives in. Recorded in every run summary so that a reader
-# comparing test_loss against rmse_test knows they are not the same quantity in different units -
-# they are different quantities in different spaces.
+#: The two scales a score can be on. See "Two scales" at the top of this module.
 ORIGINAL_UNITS = "original_units"
 STANDARDIZED_LOG1P = "standardized_log1p"
 
+#: For each score name, the scale it is on: ``"original_units"`` or ``"standardized_log1p"``.
 METRIC_SPACE: dict[str, str] = {
-    # computed by this module, from the prediction frame, after inverse_transform_targets
+    # computed by this module, from the predictions converted back to the target's units
     **{f"{stem}_test": ORIGINAL_UNITS for stem in METRIC_STEMS},
-    # computed by yg_eo_soilnet.uncertainty.metrics, from the same frame and therefore in the same
-    # space. This is what makes a mean_sigma readable against an rmse_test on the same target - the
-    # comparison that says whether the model's stated uncertainty is the size of its actual error.
+    # computed by yg_eo_soilnet.uncertainty.metrics from the same predictions, so a mean_sigma can
+    # be compared directly with the rmse_test of the same target
     **{f"{stem}_test": ORIGINAL_UNITS for stem in UNCERTAINTY_METRIC_STEMS},
     "conformal_q": ORIGINAL_UNITS,
     "rmse_cv_mean": ORIGINAL_UNITS,
     "rmse_cv_std": ORIGINAL_UNITS,
     "rmse_cv_train_mean": ORIGINAL_UNITS,
     "r2_train_fit": ORIGINAL_UNITS,
-    # logged by SoilRegressionLightningBase, against the standardized log1p target
+    # recorded by the deep-learning models during training, on their training scale
     "train_loss": STANDARDIZED_LOG1P,
     "val_loss": STANDARDIZED_LOG1P,
     "test_loss": STANDARDIZED_LOG1P,
@@ -111,14 +114,13 @@ METRIC_SPACE: dict[str, str] = {
     "test_pred_std_ratio": STANDARDIZED_LOG1P,
 }
 
-# Retired names, kept only so readers of pre-existing mlruns can still be interpreted. Nothing
-# logs these any more. `mean_test_score` meant a POSITIVE cv RMSE on the sklearn side and a
-# NEGATIVE -test_loss on the Lightning side, which is the whole reason this module exists.
+#: Score names used by older runs. Nothing records them any more; they are listed so older runs
+#: can still be read.
 LEGACY_METRIC_NAMES: tuple[str, ...] = ("mean_test_score", "mean_train_score", "r2_test_legacy")
 
 
 def _reject_multi_column(name: str, values: Any) -> None:
-    """Raise when `values` carries more than one target column."""
+    """Raise ``ValueError`` if ``values`` holds more than one target column."""
     array = np.asarray(values)
     if array.ndim > 1 and array.shape[-1] > 1:
         raise ValueError(
@@ -129,14 +131,10 @@ def _reject_multi_column(name: str, values: Any) -> None:
 
 
 def _finite_pairs(y_true: Any, y_pred: Any) -> tuple[np.ndarray, np.ndarray]:
-    """Both series as float arrays, keeping only positions where BOTH are finite.
+    """Return both inputs as float arrays, keeping only positions where both have a number.
 
-    Dropping per-array rather than pairwise would misalign them, which is why the mask is built
-    from the conjunction.
-
-    Refuses a multi-column input. The reshape below would otherwise flatten several targets into
-    one pooled score - an RMSE mixing pH with g/kg, reported under a name that claims to describe
-    one target. Callers with several targets must call once per target with ``suffix``.
+    A missing value in either one drops that position from both, so measurements and predictions
+    stay paired. Several target columns at once are refused: scores are per target.
     """
     _reject_multi_column("y_true", y_true)
     _reject_multi_column("y_pred", y_pred)
@@ -159,19 +157,50 @@ def regression_metrics(
     split: str = "test",
     suffix: str = "",
 ) -> dict[str, float]:
-    """The unified metric set for one (observed, predicted) pair, in original target units.
+    """Score predictions against lab measurements for one target.
 
-    Args:
-        y_true: observed values.
-        y_pred: predicted values, same length and order.
-        split: name stitched into every key, e.g. ``"test"`` -> ``rmse_test``.
-        suffix: appended after the split, used for per-target keys on a multi-target run,
-            e.g. ``suffix="_organic_matter_pct"`` -> ``rmse_test_organic_matter_pct``.
+    Computes every score listed at the top of this module. Points where the measurement or the
+    prediction is missing are left out.
 
-    Returns an empty dict when there are fewer than two finite pairs, rather than emitting NaN
-    metrics that would then poison the leaderboard. Metrics whose denominator is degenerate
-    (zero target variance for R2, zero RMSE for RPD/RPIQ) are individually omitted for the same
-    reason - the same policy `_log_epoch_metrics` already applies on the Lightning side.
+    Parameters
+    ----------
+    y_true : array-like
+        Measured values for one target, in its own units.
+    y_pred : array-like
+        Predicted values, in the same order and units.
+    split : str, default "test"
+        Added to every score name: ``"test"`` gives ``rmse_test``, ``mae_test``, ...
+    suffix : str, default ""
+        Added after that, to tell targets apart when one model predicts several:
+        ``suffix="_clay_pct"`` gives ``rmse_test_clay_pct``.
+
+    Returns
+    -------
+    dict of str to float
+        One entry per score. Empty if fewer than two points can be scored. A score that cannot be
+        computed is left out rather than recorded as NaN: ``r2`` when every measurement is the same,
+        ``rpd`` and ``rpiq`` when the predictions are perfect.
+
+    Raises
+    ------
+    ValueError
+        If the two inputs have different lengths, or either holds more than one target column.
+
+    Examples
+    --------
+    >>> scores = regression_metrics([10, 20, 30, 40], [12, 18, 33, 39])
+    >>> {name: round(value, 3) for name, value in scores.items()}
+    {'rmse_test': 2.121, 'mae_test': 2.0, 'bias_test': 0.5, 'n_test': 4.0, 'r2_test': 0.964, 'rpd_test': 6.086, 'rpiq_test': 7.071}
+
+    One target of several, named with ``suffix``:
+
+    >>> sorted(regression_metrics([7.1, 7.9], [7.0, 8.2], suffix="_ph_water"))[:3]
+    ['bias_test_ph_water', 'mae_test_ph_water', 'n_test_ph_water']
+
+    Too few points to score:
+
+    >>> regression_metrics([5.0], [4.0])
+    {}
     """
     true_values, predicted_values = _finite_pairs(y_true, y_pred)
 
@@ -186,9 +215,7 @@ def regression_metrics(
     metrics: dict[str, float] = {
         key("rmse"): rmse,
         key("mae"): float(mean_absolute_error(true_values, predicted_values)),
-        # Signed on purpose: the magnitude says how far off the model is on average, the sign says
-        # in which direction. A model collapsing toward the target mean shows near-zero bias with a
-        # large rmse, which is exactly the pair that identifies it.
+        # Kept with its sign: positive means the model predicts too high on average.
         key("bias"): float(np.mean(predicted_values - true_values)),
         key("n"): float(count),
     }
@@ -198,10 +225,8 @@ def regression_metrics(
         metrics[key("r2")] = float(r2_score(true_values, predicted_values))
 
     if rmse > 0.0:
-        # Argument order matters: both take (predictions, targets), and the numerator (the spread)
-        # is read off the SECOND argument. Passing them the other way round measures the spread of
-        # the predictions instead of the observations, which under-reports both scores because
-        # predictions are systematically under-dispersed.
+        # Order matters: both take (predictions, measurements) and measure the spread of the
+        # measurements, the second argument.
         metrics[key("rpd")] = float(rpd_score(predicted_values, true_values))
         metrics[key("rpiq")] = float(rpiq_score(predicted_values, true_values))
 
@@ -209,15 +234,29 @@ def regression_metrics(
 
 
 def cv_rmse_from_search(cv_results: Any, best_index: int) -> dict[str, float]:
-    """Cross-validated RMSE at the best grid point, as a POSITIVE number.
+    """Read the :term:`cross-validation` RMSE of the best settings out of a scikit-learn search.
 
-    This is the only sign flip in the codebase. ``GridSearchCV`` is built with
-    ``scoring="neg_root_mean_squared_error"``, so ``mean_test_score`` in ``cv_results_`` is a
-    negative RMSE and reads "higher is better". One negation here turns it into the plain RMSE
-    every other metric in this module is expressed as.
+    scikit-learn's search reports errors as negative numbers (so that "higher is better"). This
+    turns them back into ordinary positive RMSE values, in the target's units.
 
-    ``std_test_score`` is NOT flipped: negating every fold score leaves their standard deviation
-    unchanged, so flipping it would make the spread negative.
+    Parameters
+    ----------
+    cv_results : dict or pandas.DataFrame
+        The ``cv_results_`` of a finished ``GridSearchCV`` (or the same as a table).
+    best_index : int
+        Which row of it holds the chosen settings.
+
+    Returns
+    -------
+    dict of str to float
+        ``rmse_cv_mean`` (average RMSE over the folds), ``rmse_cv_std`` (how much it varied between
+        folds) and, if recorded, ``rmse_cv_train_mean`` (the RMSE on the points each fold trained
+        on). A value that is missing is left out.
+
+    Examples
+    --------
+    >>> cv_rmse_from_search({"mean_test_score": [-3.2, -2.9], "std_test_score": [0.4, 0.3]}, best_index=1)
+    {'rmse_cv_mean': 2.9, 'rmse_cv_std': 0.3}
     """
     if isinstance(cv_results, pd.DataFrame):
         columns: Mapping[str, Any] = {name: cv_results[name].to_numpy() for name in cv_results.columns}
@@ -252,26 +291,35 @@ def cv_rmse_from_search(cv_results: Any, best_index: int) -> dict[str, float]:
 
 
 def metric_space_for(metric_names: Any) -> dict[str, str]:
-    """The subset of :data:`METRIC_SPACE` covering the names actually logged on a run.
+    """Say which scale each of the given score names is on.
 
-    Unknown names are reported as ``"unknown"`` rather than dropped, so a metric someone adds
-    without registering it here shows up as a gap instead of silently looking like original units.
+    Parameters
+    ----------
+    metric_names : iterable of str
+        Score names, as recorded on a run. Per-target names such as ``rmse_test_clay_pct`` are
+        understood.
+
+    Returns
+    -------
+    dict of str to str
+        ``"original_units"``, ``"standardized_log1p"``, or ``"unknown"`` for a name not listed in
+        :data:`METRIC_SPACE` - shown, rather than left out, so a new score nobody registered is
+        noticed.
+
+    Examples
+    --------
+    >>> metric_space_for(["rmse_test", "val_loss", "rmse_test_clay_pct", "my_new_metric"])
+    {'rmse_test': 'original_units', 'val_loss': 'standardized_log1p', 'rmse_test_clay_pct': 'original_units', 'my_new_metric': 'unknown'}
     """
     return {str(name): _space_of(str(name)) for name in metric_names}
 
 
 def _space_of(name: str) -> str:
-    """The space a metric name lives in, resolving per-target suffixes to their stem.
-
-    A joint run logs ``rmse_test_clay_pct`` and ``val_r2_clay_pct`` alongside the unsuffixed pair.
-    Those are the same quantity in the same space as their stem, so they are resolved by prefix
-    rather than needing one registry entry per configured target.
-    """
+    """Return the scale of one score name; ``rmse_test_clay_pct`` is looked up as ``rmse_test``."""
     known = METRIC_SPACE.get(name)
     if known is not None:
         return known
-    # Longest first: "test_r2" must not match a name that "test_r2_..." also starts with by way of
-    # some shorter stem like "test_r".
+    # Longest names first, so the most specific match wins.
     for stem in sorted(METRIC_SPACE, key=len, reverse=True):
         if name.startswith(f"{stem}_"):
             return METRIC_SPACE[stem]

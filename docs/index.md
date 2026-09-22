@@ -8,4 +8,6 @@ capacity - at sample points, from satellite time series, climate, terrain and ex
 :caption: Contents
 
 glossary
+contributing
+reference/index
 ```
