@@ -1,18 +1,23 @@
-"""Optuna hyperparameter search over any entry in the Lightning registry.
+"""Search for the best hyperparameters of a deep-learning model, with Optuna.
+
+Run it from the repository root::
 
     python tune.py --entry soil_cnn --n-trials 200
 
-Nothing here is specific to a model. The entry name selects a registry entry and a matching search
-space; the trial mutates that entry and hands it to the ordinary LightningConfigFactory, so a model
-added to the registry tomorrow is tunable by writing a search space for it and nothing else.
+``--entry`` names a model in the deep-learning :term:`model list <model registry>` and its
+:term:`search space` in ``configs/lightning/search_spaces/``. Each :term:`trial` trains the model
+once with one combination of hyperparameters, on the same data and split as ``main.py``, and is
+scored on the validation set (``val_loss`` by default). Unpromising trials are stopped early.
 
-The winner is exported as a ready-to-run registry file, named for the study that produced it:
+The best trial is written as a ready-to-train model-list file, named after the :term:`study`::
 
     LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_cnn-e6c9f8_best.yml python main.py
 
-A study is named `<entry>-<fingerprint of its search space>` and resumed by name, so re-running the
-same command continues the sweep while editing the entry's search space starts a clean one. `--reset`
-discards a study, and `--study-name` pins one across edits (which is then checked, not assumed).
+A study is named ``<entry>-<fingerprint>``, where the :term:`fingerprint` summarises the search
+space. Running the same command again adds trials to the same study; editing the search space
+starts a new one. ``--reset`` deletes a study; ``--study-name`` chooses the name yourself.
+Studies are stored in ``optuna_studies/soilnet.db`` and logged to the MLflow experiment
+``Soil_HPO_Experiment``.
 """
 
 from __future__ import annotations
@@ -48,63 +53,112 @@ from yg_eo_soilnet.logger.training_logger import TrainingLogger
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Tune a Lightning registry entry with Optuna")
-    parser.add_argument("--entry", required=True, help="Registry entry to tune, e.g. soil_cnn")
-    parser.add_argument("--config-path", default="configs/main_config.yml", help="Path to the main YAML config file")
+    """Read the command-line options."""
+    parser = argparse.ArgumentParser(
+        description="Search for the best hyperparameters of a deep-learning model, with Optuna."
+    )
+    parser.add_argument(
+        "--entry", required=True, help="The model to tune, as named in the deep-learning model list, e.g. soil_cnn."
+    )
+    parser.add_argument(
+        "--config-path",
+        default="configs/main_config.yml",
+        help="Main configuration file (default: configs/main_config.yml); the data and split come from it.",
+    )
     parser.add_argument(
         "--target",
         default=None,
         help=(
-            "Which target group to tune, when MULTI_TARGET_MODE fits several models. Required in "
-            "that case: a study optimizes one objective, and picking a group silently would tune "
-            "one target and export the result as though it described the run."
+            "Which target group to tune, e.g. clay_pct. Needed only with MULTI_TARGET_MODE: "
+            "per_target, where each target has its own model: a study tunes one model at a time."
         ),
     )
     parser.add_argument(
         "--search-spaces",
         default="configs/lightning/search_spaces",
         help=(
-            "Where the search spaces live: either a folder of one-model-per-file YAMLs (the "
-            "default) or a single YAML holding several. Pointing at <name>.yml also picks up a "
-            "<name>/ folder beside it, so both layouts load the same spaces."
+            "Where the search spaces are (default: configs/lightning/search_spaces): a folder with "
+            "one file per model, or a single YAML file holding several."
         ),
     )
     parser.add_argument(
-        "--n-trials", type=int, default=50, help="Trials to run NOW; on a resumed study they are added to it"
+        "--n-trials",
+        type=int,
+        default=50,
+        help="How many trials to run now (default 50); they are added to the study if it already exists.",
     )
-    parser.add_argument("--timeout", type=float, default=None, help="Seconds; stops after the running trial")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=None,
+        help="Stop starting new trials after this many seconds; the running trial is finished first.",
+    )
     parser.add_argument(
         "--study-name",
         default=None,
-        help="Defaults to <entry>-<search space fingerprint>, so an unedited space resumes and an "
-        "edited one starts clean. Naming it yourself pins it across edits, which is checked.",
+        help="Study name (default: <entry>-<fingerprint of the search space>, so editing the search "
+        "space starts a new study). A name you choose is kept across edits; an incompatible edit "
+        "is refused.",
     )
-    parser.add_argument("--storage", default=DEFAULT_STORAGE)
-    parser.add_argument("--reset", action="store_true", help="Delete the study before running, discarding its trials")
-    parser.add_argument("--seed", type=int, default=None, help="Defaults to config.RANDOM_SEED")
     parser.add_argument(
-        "--seed-repeats", type=int, default=1, help="Average the objective over this many seeds per trial"
+        "--storage",
+        default=DEFAULT_STORAGE,
+        help=f"Where studies are stored, as an Optuna storage URL (default: {DEFAULT_STORAGE}).",
     )
-    parser.add_argument("--max-epochs", type=int, default=None, help="Override trainer.max_epochs for every trial")
+    parser.add_argument(
+        "--reset", action="store_true", help="Delete the study, and all its trials, before running."
+    )
+    parser.add_argument(
+        "--seed", type=int, default=None, help="Random seed for the trials (default: RANDOM_SEED from the config)."
+    )
+    parser.add_argument(
+        "--seed-repeats",
+        type=int,
+        default=1,
+        help="Train each trial this many times with different seeds and score the average (default 1).",
+    )
+    parser.add_argument(
+        "--max-epochs",
+        type=int,
+        default=None,
+        help="Maximum epochs per trial, overriding the search space. This changes the study's "
+        "fingerprint, so it starts a new study.",
+    )
     parser.add_argument(
         "--cache-datamodules",
         action="store_true",
-        help="Reuse a datamodule across trials that do not change its arguments",
+        help="Reuse the prepared data between trials whose data settings (such as batch size) are "
+        "the same; saves time.",
     )
-    parser.add_argument("--fail-fast", action="store_true", help="Raise on a failing trial instead of pruning it")
+    parser.add_argument(
+        "--fail-fast",
+        action="store_true",
+        help="Stop with the error when a trial fails, instead of marking it failed and going on.",
+    )
     parser.add_argument(
         "--progress",
         choices=MODES,
         default="auto",
-        help="Progress display: bars on a terminal, one line per trial when piped (default: auto)",
+        help="How progress is shown: bar, plain (one line per trial), none, or auto (bars in a "
+        "terminal, plain when the output goes to a file; the default).",
     )
-    parser.add_argument("--top-n", type=int, default=10, help="How many trials to list at the end")
-    parser.add_argument("--verbose", action="store_true", help="Keep Lightning's per-trial logging")
-    parser.add_argument("--no-mlflow", action="store_true", help="Write only to the Optuna study database")
+    parser.add_argument(
+        "--top-n", type=int, default=10, help="How many of the best trials to list at the end (default 10)."
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Show Lightning's own training output for every trial."
+    )
+    parser.add_argument(
+        "--no-mlflow",
+        action="store_true",
+        help="Do not log the study to MLflow; trials are still saved in the study storage. The "
+        "data-preparation run is still logged.",
+    )
     parser.add_argument(
         "--export-only",
         action="store_true",
-        help="Re-export the best trial of an existing study and exit; runs no trials and loads no data",
+        help="Write the tuned config for the best trial of an existing study and stop, without "
+        "loading data or running trials.",
     )
     parser.add_argument(
         "--rerank-top",
@@ -112,9 +166,9 @@ def parse_args() -> argparse.Namespace:
         default=None,
         metavar="K",
         help=(
-            "Re-run the K best trials of an existing study over several seeds and export the winner "
-            "on the averaged score, instead of the single best trial. Runs no new trials. Budget "
-            "K x --rerank-seeds full training runs"
+            "Re-train the K best trials of an existing study with several seeds each and export "
+            "the one with the best average score, instead of the single best trial. Runs no new "
+            "trials; costs K x --rerank-seeds training runs."
         ),
     )
     parser.add_argument(
@@ -122,13 +176,19 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         metavar="N",
-        help="Seeds per candidate when re-ranking (default 3). The first is the trial's own seed",
+        help="Seeds per trial when re-ranking (default 3); the first is the trial's own seed.",
     )
-    parser.add_argument("--export-path", default=None, help="Defaults to configs/lightning/tuned/<entry>_best.yml")
+    parser.add_argument(
+        "--export-path",
+        default=None,
+        help="Where to write the tuned config (default: configs/lightning/tuned/<study name>_best.yml, "
+        "or _reranked.yml after --rerank-top).",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
+    """Run (or continue) a study, then export the best trial as a tuned config."""
     args = parse_args()
     if not args.verbose:
         silence_lightning()
@@ -154,9 +214,7 @@ def main() -> None:
         reset_study(study_name, args.storage, logger)
 
     if args.export_only:
-        # Re-exporting needs the stored study, the registry entry and the objective - no data at
-        # all. Skipping data preparation and study.optimize turns a re-export of a long finished
-        # study into a few seconds instead of another full run.
+        # Re-exporting needs only the stored study and the model entry, not the data.
         study = create_or_load_study(space, study_name, args.storage)
         tracker = ObjectiveTracker(space.objective)
         tracker.prime(study)
@@ -164,22 +222,17 @@ def main() -> None:
         report_and_export(study, space, tracker, deepcopy(registry_entry), args, config, logger)
         return
 
-    # Before any data work: the sklearn splitter logs its split artifacts to MLflow unconditionally,
-    # which auto-starts a run in whatever experiment is current. Unset, that is Default - whose
-    # artifact location may not even be writable. Naming the run keeps those artifacts findable
-    # instead of scattering an auto-named run per invocation.
+    # Data preparation logs the split to MLflow, so it is done inside a named run of the tuning
+    # experiment.
     set_hpo_experiment()
 
-    # Load and split exactly as main.py does, then build the datamodule payload once. Every trial
-    # reuses it; rebuilding per trial would cost far more than the training it feeds.
+    # Load and split the data exactly as main.py does, once; every trial reuses it.
     stage_start = time.perf_counter()
     with mlflow.start_run(run_name=f"{study_name}_data"):
         scikit_datamodule = ScikitDataModule(config, logger, DataManager(config, logger))
         split_data = scikit_datamodule.prepare()
-        # `split_data` carries the run's shared split_plan, and build_lightning_input copies the
-        # dict, so every trial's datamodule resolves the SAME split. Rebuilding it per trial would
-        # re-fit the scaler and the vocabulary against a different train set and quietly invalidate
-        # the objective - which is why val_size/test_size/seed stay unsearchable in overrides.py.
+        # Every trial uses this same split, so trials are compared on the same validation points.
+        # (That is also why the search space may not change the split.)
         mlflow.log_params(split_data["split_plan"].describe())
         data = build_lightning_input(
             args.entry, registry_entry, config, split_data, logger=logger, data_manager=scikit_datamodule.data_manager
@@ -233,8 +286,7 @@ def main() -> None:
             artifact_dir=Path("optuna_studies") / study_name,
         )
     except BaseException as error:
-        # BaseException on purpose: Ctrl-C on a long sweep used to lose the export exactly the same
-        # way a lost GPU did.
+        # Also on Ctrl-C: the best trial so far is still exported.
         handle_study_abort(error, space, tracker, context, args, config, logger, study_name)
         raise
 
@@ -242,11 +294,31 @@ def main() -> None:
 
 
 def rerank_and_export(objective, space, args, config, logger, study_name: str) -> None:
-    """Re-run the shortlist over several seeds and export the winner on the averaged score.
+    """Re-train the best trials with several seeds and export the one with the best average score.
 
-    The study's headline value is the best of hundreds of trials, each itself the best epoch of a
-    noisy run - a maximum over noise, so it overstates what a retrain will give. This picks the
-    configuration that holds up across seeds and records the figure to actually expect.
+    A study's best score is the best of many noisy trials, so a retrain usually does a little worse.
+    Re-training the shortlist with several seeds picks the settings that hold up, and reports the
+    score to expect from a retrain. See :term:`rerank`.
+
+    Parameters
+    ----------
+    objective : yg_eo_soilnet.hpo.objective.TrialObjective
+        Trains and scores one set of hyperparameters.
+    space : yg_eo_soilnet.hpo.search_space.SearchSpace
+        The study's search space.
+    args : argparse.Namespace
+        The command-line options (``--rerank-top``, ``--rerank-seeds``, ``--export-path``, ...).
+    config : config.Config
+        The run configuration.
+    logger : logging.Logger
+        Where progress is reported.
+    study_name : str
+        The study to re-rank; it must already exist.
+
+    Raises
+    ------
+    SystemExit
+        If none of the shortlisted trials could be re-trained.
     """
     study = create_or_load_study(space, study_name, args.storage)
     logger.info(
@@ -263,8 +335,7 @@ def rerank_and_export(objective, space, args, config, logger, study_name: str) -
 
     not_reproduced = [r.trial_number for r in results if r.reproduced is False]
     if not_reproduced:
-        # Seed 0 of each candidate re-runs the trial's own seed, so this is a direct check that
-        # seeding reaches the weights. A miss means a run cannot be reproduced from its record.
+        # The first seed of each trial is its own, so its score should come out the same.
         logger.warning(
             f"Trials {not_reproduced} did not reproduce at their own seed - runs are not "
             f"reproducible from their recorded seed, so treat the re-ranked means as noisy."
@@ -304,17 +375,12 @@ def rerank_and_export(objective, space, args, config, logger, study_name: str) -
 
 
 def handle_study_abort(error, space, tracker, context, args, config, logger, study_name: str) -> None:
-    """Salvage an aborted study, then leave the caller to re-raise.
+    """Export the best completed trial of a study that stopped early, then let the caller re-raise.
 
-    A sweep that ran for hours must not lose its winner because trial N+1 crashed - which is exactly
-    what a lost GPU driver did to a 266-trial study whose 174 completed trials never reached
-    `configs/lightning/tuned/`. Every trial is in the storage the whole time, so the study is simply
-    reloaded and exported.
-
-    Exporting never raises: it runs while another exception is in flight, and masking that one with
-    a failure to export would hide why the study stopped. The one exception raised deliberately is
-    SystemExit for a dead accelerator, whose traceback names whatever CUDA call came next rather than
-    the failure and is therefore misleading noise.
+    Every finished trial is already saved in the study storage, so a study interrupted by Ctrl-C or
+    a crash still exports its best result. Failing to export is logged, not raised, so the original
+    error stays visible. If the GPU stopped working, the run ends with a short message saying how to
+    recover instead of a long traceback.
     """
     try:
         study = create_or_load_study(space, study_name, args.storage)
@@ -331,7 +397,13 @@ def handle_study_abort(error, space, tracker, context, args, config, logger, stu
 
 
 def report_and_export(study, space, tracker, registry_entry, args, config, logger) -> None:
-    """Log the trial leaderboard and write the tuned registry file."""
+    """Log the best trials and their hyperparameters, and write the tuned config file.
+
+    Raises
+    ------
+    SystemExit
+        If no trial of the study completed.
+    """
     summary = summarize(study, space)
     logger.info(f"Study finished: {summary}")
     if summary["best_trial"] is None:
@@ -342,10 +414,8 @@ def report_and_export(study, space, tracker, registry_entry, args, config, logge
     best_params = "\n".join(f"  {key} = {value}" for key, value in sorted(tracker.best_params(study).items()))
     logger.info(f"Best trial {study.best_trial.number} parameters:\n{best_params}")
 
-    # Keyed on the STUDY, not the entry. Keying on the entry meant any throwaway study on the same
-    # model - a smoke run, an A/B, or the same model under an edited search space - silently
-    # overwrote the production file a long study had written. Study names carry the search-space
-    # fingerprint, so two spaces on one entry now export side by side.
+    # Named after the study, not the model, so studies of the same model never overwrite each
+    # other's tuned file.
     export_path = Path(args.export_path or f"configs/lightning/tuned/{study.study_name}_best.yml")
     export_best_config(
         study,

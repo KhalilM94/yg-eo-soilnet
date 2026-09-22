@@ -81,7 +81,7 @@ test = "pytest ./tests"
 test-fast = "pytest -m 'not slow' ./tests"
 test-with-cov = "pytest --cov=yg_eo_soilnet tests/"
 # Runs the ">>>" examples written inside the docstrings, so they cannot drift from the code.
-doctest = "pytest --doctest-modules src/yg_eo_soilnet"
+doctest = "pytest --doctest-modules src/yg_eo_soilnet config.py main.py"
 lint = "ruff check"
 # Builds the documentation website into docs/_build/html; any warning fails the build.
 docs = "sphinx-build -W --keep-going -b html docs docs/_build/html"

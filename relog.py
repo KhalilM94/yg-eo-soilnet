@@ -1,22 +1,18 @@
-"""Recover a trained model from its checkpoint, without retraining.
+"""Save and register a deep-learning model from its checkpoint file, without retraining.
 
-A run can train perfectly and still fail to package: the weights are on disk, the metrics are
-logged, and yet no model was saved and nothing reached the registry. Retraining to recover a model
-that already exists is the wrong trade, and it is unnecessary - a checkpoint written by this project
-is self-describing. Besides the weights it carries the hyper-parameters and the fitted
-``preprocessing_state``: the scalers, the categorical vocabularies and every feature-name list. So
-the model can be rebuilt, packaged and registered with no dataset present at all.
+Use this when a training run finished but its model was not saved to MLflow (for example because
+saving failed at the end). The checkpoint file holds everything needed to rebuild the model: its
+weights, its hyperparameters, and the scaling statistics and category lists it uses to prepare new
+data - so no dataset is needed.
 
-    python relog.py \\
-        --checkpoint lightning_logs/version_119/checkpoints/epoch=70-step=3763.ckpt \\
-        --run-id 80849677a7d14c41b622726b95a876c7
+    python relog.py --checkpoint lightning_logs/version_12/checkpoints/<file>.ckpt --run-id <run id>
 
-The model is logged into the ORIGINAL run rather than a fresh one, because champion promotion reads
-``rmse_test`` from the run behind a version - the score that justifies a model has to sit with it.
+The model is saved into the ORIGINAL run (the one whose id you give), next to the scores it earned
+there, and registered as a new version of ``<target>_<model>``; it becomes the champion if its
+rmse_test beats the current champion's. A summary is written to meta/relog_summary.json in the run.
 
-The one thing a checkpoint cannot tell us is its own class: it records ``hparams_name`` but no
-import path. That is resolved from the run's ``model_name`` tag against the Lightning registry, with
-``--model-class`` as the override.
+The model class is found from the run's model_name tag and the deep-learning model list; pass
+--model-class to give it yourself.
 """
 
 from __future__ import annotations
@@ -34,42 +30,53 @@ from yg_eo_soilnet.artifacts import ArtifactLayout, log_json
 from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
 from yg_eo_soilnet.tracking import CHAMPION_METRIC, configure_tracking_uri, promote_if_better
 
+#: File name of the summary written into the run's ``meta/`` folder.
 RELOG_SUMMARY_FILE = "relog_summary.json"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Read the command-line options; ``argv`` defaults to the real command line."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--checkpoint", required=True, help="Path to the .ckpt to rebuild from")
-    parser.add_argument("--run-id", required=True, help="The run the model belongs to")
+    parser.add_argument("--checkpoint", required=True, help="The checkpoint (.ckpt) file to rebuild the model from.")
+    parser.add_argument("--run-id", required=True, help="Id of the MLflow run the model was trained in.")
     parser.add_argument(
         "--model-class",
         default=None,
-        help="Dotted path to the LightningModule; inferred from the run's model_name tag otherwise",
+        help="Import path of the model class, e.g. "
+        "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule. "
+        "Default: found from the run's model_name tag.",
     )
     parser.add_argument(
-        "--config-path", default="configs/main_config.yml", help="Main config, for the registry lookup"
+        "--config-path",
+        default="configs/main_config.yml",
+        help="Main configuration file (default: configs/main_config.yml), read for the MLflow "
+        "location and the model list.",
     )
-    parser.add_argument("--no-register", action="store_true", help="Log the model without registering it")
+    parser.add_argument(
+        "--no-register", action="store_true", help="Save the model in the run but do not register it."
+    )
     parser.add_argument(
         "--allow-ensemble-member",
         action="store_true",
         help=(
-            "Register a single checkpoint from a run that trained an ensemble. Refused by default: "
-            "one member is not the ensemble, and the run's metrics describe the ensemble."
+            "Accept a run that trained an ensemble (several copies of the model). Refused by "
+            "default: one copy is not the ensemble, and the run's scores describe the ensemble."
         ),
     )
-    parser.add_argument("--rows", type=int, default=3, help="Rows in the input example")
+    parser.add_argument(
+        "--rows", type=int, default=3, help="Rows in the example input saved with the model (default 3)."
+    )
     return parser.parse_args(argv)
 
 
 def resolve_model_class(class_path: str):
+    """Import and return the class named by a dotted path such as ``package.module.ClassName``."""
     module_name, class_name = class_path.rsplit(".", 1)
     return getattr(importlib.import_module(module_name), class_name)
 
 
-# Registry entries since folded into soil_cnn's switches. A run logged before that still carries the
-# old model_name, and its checkpoint's hyper_parameters lack the switches - the legacy class is what
-# supplies them, as its defaults. Used only when the registry no longer has the entry.
+#: Older model names, now options of ``soil_cnn``, and the class that still loads their checkpoints.
+#: Used for runs whose ``model_name`` is no longer in the model list.
 LEGACY_MODEL_CLASSES = {
     "soil_residual_cnn": (
         "yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module."
@@ -83,7 +90,13 @@ LEGACY_MODEL_CLASSES = {
 
 
 def infer_model_class_path(config, model_name: str) -> str:
-    """The import path for a registry entry, so the checkpoint's architecture is not guesswork."""
+    """Return the import path of a model's class, from the model list (or the older names above).
+
+    Raises
+    ------
+    SystemExit
+        If the model name is in neither; pass ``--model-class`` in that case.
+    """
     entry = (getattr(config, "LIGHTNING_MODEL_REGISTRY", None) or {}).get(model_name)
     import_path = (entry or {}).get("import_path") or LEGACY_MODEL_CLASSES.get(model_name)
     if not import_path:
@@ -95,11 +108,10 @@ def infer_model_class_path(config, model_name: str) -> str:
 
 
 def load_static_frame(run_id: str, rows: int):
-    """The run's own test features, when its eval CSV is still reachable.
+    """Return the first ``rows`` rows of the run's test predictions table, or ``None`` if missing.
 
-    Only the static block: that artifact never carried the lab roster or the ragged sequences, so
-    those are synthesized regardless. Absent artifact is not an error - the example falls back to
-    the checkpoint's stored training means.
+    Their static covariates make the saved example input realistic; without them the example uses
+    the training averages stored in the checkpoint.
     """
     import pandas as pd
 
@@ -115,23 +127,40 @@ def load_static_frame(run_id: str, rows: int):
 
 
 def relog(args: argparse.Namespace) -> dict[str, Any]:
+    """Rebuild the model from its checkpoint and save (and register) it into the original run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        The options from :func:`parse_args`.
+
+    Returns
+    -------
+    dict
+        The summary also written to ``meta/relog_summary.json``: the run, the model name, the new
+        registered version (or ``None``) and whether it became the champion.
+
+    Raises
+    ------
+    SystemExit
+        If the run trained an ensemble (without ``--allow-ensemble-member``), if the model class
+        cannot be found, or if the checkpoint lacks the scaling statistics needed to prepare data.
+    """
     config = Config(config_path=args.config_path)
-    # The URI only. Switching to the config's experiment would make start_run(run_id=...) fail
-    # whenever the run belongs to a different one - a run is reached by id, not by experiment.
+    # Only the MLflow location is taken from the config: the run is opened by its id, in its own
+    # experiment.
     configure_tracking_uri(config)
 
     client = mlflow.MlflowClient()
     run = client.get_run(args.run_id)
-    # Align the active experiment with the RUN's own, which is what start_run(run_id=...) requires.
+    # Reopening a run requires its own experiment to be the active one.
     mlflow.set_experiment(experiment_id=run.info.experiment_id)
     tags = run.data.tags
     model_name = tags.get("model_name") or "model"
     target = tags.get("target") or "target"
 
-    # An ensemble run's prediction is the MEAN of n_members checkpoints, and its interval comes from
-    # their spread. One checkpoint carries neither. Re-registering it here would silently replace an
-    # ensemble with a single member under the same registered name - the point estimate would shift
-    # and the uncertainty would vanish, with the run's own metrics still describing the ensemble.
+    # An ensemble's prediction is the average of several checkpoints, and its uncertainty their
+    # spread. One checkpoint reproduces neither, so registering it would misrepresent the run.
     n_members = run.data.params.get("uncertainty_n_members")
     if n_members and not args.allow_ensemble_member:
         raise SystemExit(
@@ -145,8 +174,7 @@ def relog(args: argparse.Namespace) -> dict[str, Any]:
     class_path = args.model_class or infer_model_class_path(config, model_name)
     module_class = resolve_model_class(class_path)
 
-    # load_from_checkpoint calls on_load_checkpoint, which restores preprocessing_state - the
-    # scalers and vocabulary without which the model cannot consume raw data.
+    # Loading also restores the scaling statistics and category lists saved in the checkpoint.
     model = module_class.load_from_checkpoint(args.checkpoint, map_location="cpu")
     model.eval()
 
@@ -201,14 +229,14 @@ def relog(args: argparse.Namespace) -> dict[str, Any]:
             CHAMPION_METRIC: run.data.metrics.get(CHAMPION_METRIC),
             "champion": champion,
         }
-        # Beside the original run summary, not over it: that file records the packaging failure,
-        # and erasing the evidence of what went wrong would be worse than a second file.
+        # A separate file, so the run's original summary is kept as it was.
         log_json(summary, RELOG_SUMMARY_FILE, ArtifactLayout.META)
 
     return summary
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run :func:`relog`, print its summary, and return 1 if registration was asked for but failed."""
     summary = relog(parse_args(argv))
     print(json.dumps(summary, indent=2, default=str))
     if summary["registered_model_version"] is None and summary["champion"].get("reason") != (

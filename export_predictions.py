@@ -1,28 +1,20 @@
-"""Backfill the per-point prediction export onto a run that has already finished.
+"""Add a table of every point's predictions to a training run that has already finished.
 
-The export - one file answering "what did every model predict for this point?" - is written during
-training, behind ``export_point_predictions.enabled``. Every run trained before that switch existed
-has no such file, and retraining to get one is the wrong trade when the fitted models are still
-sitting in the run.
+During training this table is written only when export_point_predictions.enabled is on. This tool
+writes it afterwards, from the models the run saved, without retraining:
 
-    python export_predictions.py --parent-run-id 7d09124142a74a079a11be68a19268a8
+    python export_predictions.py --parent-run-id <main run id>
 
-What makes this possible is that each child run kept its model: a sklearn child records a loadable
-``models:/m-...`` URI in its run summary, and a Lightning child's ``checkpoints/best.ckpt`` is
-self-describing - it carries the hyper-parameters and the fitted ``preprocessing_state``, the same
-property ``relog.py`` depends on. The features are rebuilt from the configured source data and the
-result is checked against what the run itself recorded before a single model is loaded.
+For every model of the run, it rebuilds the features from the data named in the configuration,
+checks they match what the run trained on (same columns, same points), reloads the saved model and
+predicts every point - training points included. Each model's run gets
+predictions/point_predictions.csv; the main run gets point_predictions_wide.csv (one column per
+target and model) and point_predictions_long.csv (one row per point, target and model).
 
-A sklearn ensemble needs no special handling: the whole ``EnsembleRegressor`` is one logged object
-whose ``predict`` already returns the mean.
-
-A **Lightning ensemble** does. Runs trained before members logged their own weights kept only the
-reference member's checkpoint in MLflow; the other members exist solely as local files under
-``lightning_logs``. Those are matched back to their member runs by **validation loss** - a property
-of the fit, recorded on both sides, and distinct between members of the same target - never by file
-time or by version ordering, both of which are accidents of when the run happened. Every member has
-to be found: averaging the subset that survived and calling it the ensemble would be neither one
-member's prediction nor the ensemble's. Pass ``--no-member-recovery`` to skip them instead.
+scikit-learn models are reloaded from MLflow. Deep-learning models are rebuilt from their
+checkpoint file. For a deep-learning ensemble, every copy's checkpoint is needed: copies not saved in
+MLflow are looked for in lightning_logs/ and matched to their run by validation loss. If any copy is
+missing, that model is skipped rather than averaging an incomplete ensemble.
 """
 
 from __future__ import annotations
@@ -51,56 +43,63 @@ from yg_eo_soilnet.predictions_export import point_id_column
 from yg_eo_soilnet.targets import split_target_names
 from yg_eo_soilnet.tracking import configure_tracking_uri
 
+#: File name of the summary written into the main run's ``predictions/`` folder.
 BACKFILL_SUMMARY_FILE = "backfill_summary.json"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Read the command-line options; ``argv`` defaults to the real command line."""
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("--parent-run-id", required=True, help="The finished parent run to backfill")
+    parser.add_argument(
+        "--parent-run-id", required=True, help="Id of the finished main (parent) run to add the predictions to."
+    )
     parser.add_argument(
         "--config-path",
         default="configs/main_config.yml",
-        help="Main config, used to rebuild the features and to resolve model classes",
+        help="Main configuration file (default: configs/main_config.yml). Its data must be the "
+        "data the run trained on: the features are rebuilt from it.",
     )
     parser.add_argument(
         "--models",
         default=None,
-        help="Comma-separated registry entries to export; default is every child the run trained",
+        help="Only export these models, comma-separated (e.g. Ridge,soil_cnn). Default: every model "
+        "the run trained.",
     )
     parser.add_argument(
         "--skip-models",
         default=None,
-        help="Comma-separated entries to leave out; defaults to the config's skip list",
+        help="Models to leave out, comma-separated. Default: export_point_predictions.skip_models "
+        "from the config.",
     )
     parser.add_argument(
         "--allow-population-drift",
         action="store_true",
         help=(
-            "Continue when the rebuilt population differs from the one the run recorded, instead "
-            "of stopping. Use it to pick up points added to the dataset since the run; the "
-            "feature-schema check still refuses, because different columns mean the models cannot "
-            "predict at all."
+            "Go on even if the rebuilt data has different points from the run (for example points "
+            "added since), instead of stopping. Different feature columns still stop the export: "
+            "the models could not predict on them."
         ),
     )
     parser.add_argument(
         "--member-checkpoint-dir",
         default="lightning_logs",
         help=(
-            "Where to look for a Lightning ensemble's member checkpoints when the member runs did "
-            "not log their own. Matched on validation loss, never on file times."
+            "Folder to search for the checkpoints of a deep-learning ensemble's copies that were "
+            "not saved in MLflow (default: lightning_logs). Each is matched to its run by "
+            "validation loss."
         ),
     )
     parser.add_argument(
         "--no-member-recovery",
         action="store_true",
-        help="Do not scavenge member checkpoints; Lightning ensembles are then skipped.",
+        help="Do not search for ensemble checkpoints; deep-learning ensembles are then skipped.",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Rebuild, check for drift and report what would be exported, writing nothing",
+        help="Rebuild the data, run the checks and list what would be exported, without writing.",
     )
     return parser.parse_args(argv)
 
@@ -109,16 +108,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def rebuild_features(config, logger) -> tuple[pd.DataFrame, pd.Series]:
-    """The full featurized population and its point ids, rebuilt from the configured source.
+    """Rebuild the model inputs of every point from the configured data, as training did.
 
-    Deliberately NOT ``ScikitDataModule.prepare()``. That builds a split plan and its splitter calls
-    ``mlflow.log_artifacts``, which would write ``data_splits/`` into whichever run is active - and
-    this command reopens a FINISHED run, so it would overwrite that run's own split artifacts with
-    a fresh split. Prediction needs no split at all, so the splitter is skipped entirely.
+    No split is made (that would overwrite the finished run's own split record); predicting every
+    point needs none.
 
-    ``filter_schema`` is not optional: it is applied inside ``split_data``, not by the preprocessor,
-    so it is the step that turns the preprocessor's X into the columns the models were actually
-    fitted on. It drops columns only, which is what keeps ``point_ids`` aligned by index.
+    Returns
+    -------
+    features : pandas.DataFrame
+        One row per point, with the same columns and column types the scikit-learn models were
+        trained on.
+    point_ids : pandas.Series
+        Each row's point id, on the same index.
     """
     from yg_eo_soilnet.data_manager import DataManager
     from yg_eo_soilnet.datamodules.scikit.tabular_preprocessor import TabularPreprocessor
@@ -128,8 +129,7 @@ def rebuild_features(config, logger) -> tuple[pd.DataFrame, pd.Series]:
     processed = TabularPreprocessor(config, logger, data_manager).preprocess_data(frame)
 
     features = data_manager.filter_schema(processed["X"], list(config.TARGET_COLUMNS))
-    # The same conversion ModelTrainer applies before fitting, so the estimators see the dtypes they
-    # were trained with rather than integer columns a pipeline may treat differently.
+    # Integer columns become floats, as they did before training.
     features = features.astype(
         {column: "float64" for column in features.select_dtypes(include=["int64", "int32"]).columns}
     )
@@ -141,6 +141,7 @@ def rebuild_features(config, logger) -> tuple[pd.DataFrame, pd.Series]:
 
 
 def _download(run_id: str, artifact_path: str):
+    """Download one file from a run and return its local path, or ``None`` if it is not there."""
     try:
         return mlflow.artifacts.download_artifacts(run_id=run_id, artifact_path=artifact_path)
     except Exception:
@@ -155,24 +156,39 @@ def check_for_drift(
     allow_population_drift: bool,
     logger,
 ) -> dict[str, Any]:
-    """Compare the rebuilt data against what the run recorded, before any model is loaded.
+    """Check the rebuilt data against what the run recorded, before any model is loaded.
 
-    Cheap, and it runs first for that reason: discovering a schema change after loading and running
-    every model wastes the expensive part of the command.
+    Two checks, against the run's ``data_splits/`` files: the feature columns must be exactly the
+    same, and the set of points should be the same.
 
-    The feature-column check never relaxes. Models fitted on a different column set cannot
-    legitimately predict on this one - sklearn would eventually raise anyway, from somewhere deep in
-    a ColumnTransformer, and the message would not say which column moved.
+    Parameters
+    ----------
+    parent_run_id : str
+        The main run.
+    features, point_ids
+        The output of :func:`rebuild_features`.
+    allow_population_drift : bool
+        Go on, with a warning, when the points differ (or the run recorded no split to compare
+        with) instead of stopping.
+    logger : logging.Logger
+        Where warnings go.
+
+    Returns
+    -------
+    dict
+        What was compared: point counts, points added or removed, and any column differences.
+
+    Raises
+    ------
+    SystemExit
+        If the columns differ, or if the points differ without ``allow_population_drift``.
     """
     report: dict[str, Any] = {"checked": False}
 
     split_path = _download(parent_run_id, f"{ArtifactLayout.DATA_SPLITS}/split_assignments.parquet")
     test_path = _download(parent_run_id, f"{ArtifactLayout.DATA_SPLITS}/X_test.parquet")
     if split_path is None or test_path is None:
-        # Older runs wrote data_splits without a point_id column and with no split_assignments at
-        # all, so there is nothing to check the rebuilt data against. Strict means "prove it
-        # matches", and an unverifiable run cannot - so it stops here rather than exporting numbers
-        # nobody can tie back to what the run actually trained on.
+        # Older runs recorded no usable split, so the data cannot be checked against them.
         message = (
             "This run logged no usable data_splits/ artifacts (no split_assignments.parquet or no "
             "X_test.parquet), so the rebuilt data cannot be checked against what it trained on."
@@ -219,12 +235,8 @@ def check_for_drift(
             f"{len(removed)} removed."
         )
         if added and not removed:
-            # Very often this is not drift at all. A run whose split used population_policy:
-            # intersect recorded only the points EVERY active family could use, and the sequence
-            # builder drops rows with non-finite statics that the tabular preprocessor keeps - so a
-            # Lightning run's recorded population is legitimately narrower than a tabular rebuild of
-            # the same data. Points that vanished are the alarming direction; points that appeared
-            # usually mean this.
+            # Extra points with none missing usually just mean the run's population_policy was
+            # `intersect`, which recorded only the points every model family could use.
             message += (
                 " Nothing was removed, so this is most likely the split's population_policy rather "
                 "than changed data: a run whose families disagreed about usable rows records only "
@@ -244,12 +256,9 @@ def check_for_drift(
 
 
 def _export_config(config, args: argparse.Namespace):
-    """A copy of the config with the export forced on, plus the CLI's model filters.
+    """Return a copy of the config with the export switched on and the command's model filters applied.
 
-    Running this command IS the opt-in - the config switch governs training runs, and a user who
-    typed the command has already asked for the export. FAIL_ON_ERROR is forced too so a child that
-    cannot be exported raises here, where this command can attribute it, rather than returning a
-    quiet error dict.
+    Errors are also switched to raise, so this command can report which model failed.
     """
     proxy = copy.copy(config)
     proxy.EXPORT_POINT_PREDICTIONS = True
@@ -266,6 +275,7 @@ def _export_config(config, args: argparse.Namespace):
 
 
 def _run_summary(run_id: str) -> dict:
+    """Return a run's ``meta/run_summary.json`` as a dict, or ``{}`` if it has none."""
     path = _download(run_id, f"{ArtifactLayout.META}/{ArtifactLayout.RUN_SUMMARY_FILE}")
     if path is None:
         return {}
@@ -277,12 +287,10 @@ def _run_summary(run_id: str) -> dict:
 
 
 def _version_candidates(checkpoint_dir: str, target_names: list[str]) -> list[dict]:
-    """Version directories whose ``hparams.yaml`` declares exactly this target group.
+    """List the ``lightning_logs/version_*`` folders holding a checkpoint for exactly these targets.
 
-    The yaml rather than the checkpoint: it carries the same ``target_names`` for a fraction of the
-    I/O, and these checkpoints are ~75 MB each. Note ``fitted_target_names`` in the same file lists
-    every target the RUN fitted and so discriminates nothing - ``target_names`` is the model's own
-    output roster and is the one that identifies it.
+    Each record gives the folder, its checkpoint file and its lowest recorded validation loss.
+    The targets are read from the small ``hparams.yaml`` rather than the large checkpoint.
     """
     import glob
 
@@ -313,6 +321,7 @@ def _version_candidates(checkpoint_dir: str, target_names: list[str]) -> list[di
 
 
 def _min_val_loss_from_csv(metrics_path: str) -> Optional[float]:
+    """Return the lowest ``val_loss`` in a Lightning ``metrics.csv``, or ``None``."""
     if not os.path.isfile(metrics_path):
         return None
     try:
@@ -326,6 +335,7 @@ def _min_val_loss_from_csv(metrics_path: str) -> Optional[float]:
 
 
 def _min_val_loss_from_run(client, run_id: str) -> Optional[float]:
+    """Return the lowest ``val_loss`` an MLflow run recorded, or ``None``."""
     try:
         history = client.get_metric_history(run_id, "val_loss")
     except Exception:
@@ -334,17 +344,34 @@ def _min_val_loss_from_run(client, run_id: str) -> Optional[float]:
 
 
 def match_member_checkpoints(client, child_run, checkpoint_dir: str, target_names: list[str]) -> list[dict]:
-    """Match each of a Lightning ensemble's member runs to the checkpoint it actually wrote.
+    """Find the checkpoint file of each copy of a deep-learning ensemble.
 
-    Matched on ``min(val_loss)``, NOT on file times or on version ordering. Both of those are
-    accidents here: a run's end_time is rewritten every time it is reopened, and the version numbers
-    are only contiguous because nothing else happened to train in between. The validation loss is a
-    property of the fit itself, it is recorded on both sides, and within a target the members'
-    values are distinct - so it identifies a checkpoint by what it is.
+    A copy that saved its checkpoint in MLflow is taken from there. Otherwise its checkpoint is
+    looked for in ``checkpoint_dir`` and matched by the lowest validation loss, which both the run
+    and the checkpoint folder record and which differs between copies (file dates and folder
+    numbers are not reliable).
 
-    Returns one record per member, in member order. Raises SystemExit only on an ambiguous match;
-    a member that simply cannot be found is returned with ``checkpoint: None`` so the caller can
-    report how many of how many were recovered.
+    Parameters
+    ----------
+    client : mlflow.MlflowClient
+        Used to find the copies' runs.
+    child_run : mlflow.entities.Run
+        The ensemble's model run.
+    checkpoint_dir : str
+        The folder to search, usually ``lightning_logs``.
+    target_names : list of str
+        The targets the model predicts.
+
+    Returns
+    -------
+    list of dict
+        One record per copy, in order, with its ``checkpoint`` path (``None`` if not found) and
+        where it came from (``"mlflow"`` or ``"lightning_logs"``).
+
+    Raises
+    ------
+    SystemExit
+        If a copy matches several checkpoints equally well.
     """
     members = [
         run
@@ -361,8 +388,7 @@ def match_member_checkpoints(client, child_run, checkpoint_dir: str, target_name
     used: set[str] = set()
 
     for member in members:
-        # A member that logged its own checkpoint - every run trained after the structural fix -
-        # needs none of this. Take it straight from MLflow.
+        # Recent runs save each copy's checkpoint in MLflow.
         logged = _download(
             member.info.run_id, f"{ArtifactLayout.CHECKPOINTS}/{ArtifactLayout.CHECKPOINT_FILE}"
         )
@@ -409,12 +435,15 @@ def match_member_checkpoints(client, child_run, checkpoint_dir: str, target_name
 
 
 def sklearn_predictor(run, features: pd.DataFrame):
-    """``(predict_callable, n_expected)`` for a sklearn child, from its logged model.
+    """Reload a scikit-learn model from its run and return ``(predict, number of rows expected)``.
 
-    Two URI forms, in this order. ``runs:/<run_id>/<logged_model_name>`` needs nothing but the run's
-    own tags, so it still works when ``meta/run_summary.json`` is missing or predates the field.
-    The ``models:/m-...`` id recorded in that summary is the fallback for a run whose logged name no
-    longer resolves.
+    The model is loaded as ``runs:/<run id>/<model name>``, or else from the model address recorded
+    in the run's summary.
+
+    Raises
+    ------
+    SystemExit
+        If neither address can be loaded.
     """
     import mlflow.sklearn
 
@@ -441,15 +470,15 @@ def sklearn_predictor(run, features: pd.DataFrame):
     )
 
 
+# Sequence bundles already built in this invocation, by model name.
 _BUNDLE_CACHE: dict[str, Any] = {}
 
 
 def sequence_bundle_for(model_name: str, config, logger):
-    """The sequence bundle for one registry entry, built once per invocation.
+    """Return the deep-learning model's input data for every point, building it only once.
 
-    Cached because the bundle depends on the config and the data, never on the model: an ensembled
-    entry would otherwise rebuild the identical object once per member, which for six children of
-    five members is thirty builds of the same thing.
+    The data depends only on the configuration, so the copies of an ensemble and the runs of the
+    same model all reuse it.
     """
     if model_name not in _BUNDLE_CACHE:
         from yg_eo_soilnet.data_manager import DataManager
@@ -464,6 +493,7 @@ def sequence_bundle_for(model_name: str, config, logger):
 
 
 def _restore_lightning_model(checkpoint: str, model_name: str, config):
+    """Rebuild a deep-learning model from its checkpoint file, ready to predict."""
     from relog import infer_model_class_path, resolve_model_class
 
     module_class = resolve_model_class(infer_model_class_path(config, model_name))
@@ -473,7 +503,19 @@ def _restore_lightning_model(checkpoint: str, model_name: str, config):
 
 
 def lightning_predictor(run, config, logger):
-    """``(predict_callable, point_ids, target_names)`` for a single Lightning child."""
+    """Rebuild a single deep-learning model from its run's checkpoint.
+
+    Returns
+    -------
+    tuple
+        ``(predict, point_ids, target_names)``: a function returning the predictions for every
+        point, the points in that order, and the targets in column order.
+
+    Raises
+    ------
+    SystemExit
+        If the run saved no checkpoint.
+    """
     from yg_eo_soilnet.serving.sequence_predictor import SoilSequencePredictor
 
     model_name = run.data.tags.get("model_name") or ""
@@ -486,18 +528,16 @@ def lightning_predictor(run, config, logger):
 
     predictor = SoilSequencePredictor(_restore_lightning_model(checkpoint, model_name, config))
     bundle = sequence_bundle_for(model_name, config, logger)
-    # The MODEL's own target names, not the run's tag: the checkpoint knows exactly how many columns
-    # it emits and in what order, and that is what the predictions have to be labelled with.
+    # The target names stored in the model, in its own output order.
     target_names = list(predictor.preprocessing_state.get("target_names") or [])
     point_ids = list(bundle.point_ids)
     return (lambda: predictor.predict(bundle)), point_ids, target_names
 
 
 def lightning_ensemble_predictor(run, config, logger, matched: list[dict]):
-    """``(predict_callable, point_ids, target_names)`` averaging every recovered member.
+    """Like :func:`lightning_predictor`, but predicting the average of every copy of an ensemble.
 
-    The mean only. This export carries estimates; the members' spread is the run's uncertainty and
-    lives in eval_results.csv and the uncertainty/ artifacts.
+    Only the average is exported; the spread between copies is in the run's own uncertainty files.
     """
     from yg_eo_soilnet.serving.sequence_predictor import SoilSequencePredictor
     from yg_eo_soilnet.uncertainty import aggregate
@@ -519,7 +559,14 @@ def lightning_ensemble_predictor(run, config, logger, matched: list[dict]):
 def backfill_child(
     run, *, client, config, export_config, features, point_ids, logger, checkpoint_dir
 ) -> dict[str, Any]:
-    """Write one child's ``predictions/point_predictions.csv``. Returns an outcome record."""
+    """Predict every point with one model and write ``predictions/point_predictions.csv`` to its run.
+
+    Returns
+    -------
+    dict
+        What happened: the run, model and target, and the number of points written, or why it was
+        skipped.
+    """
     model_name = run.data.tags.get("model_name")
     framework = run.data.tags.get("framework", "sklearn")
     target = run.data.tags.get("target") or ""
@@ -532,9 +579,7 @@ def backfill_child(
 
     n_members = run.data.params.get("uncertainty_n_members")
     if framework == "lightning" and n_members:
-        # Every member has to be found. Averaging the subset that happens to be recoverable and
-        # labelling it the ensemble is the one outcome worth refusing outright - it would be neither
-        # a member's prediction nor the ensemble's, under a column claiming to be the model's.
+        # Every copy is needed: the average of some copies is not the ensemble's prediction.
         if not checkpoint_dir:
             outcome["skipped"] = (
                 f"trained as an ensemble of {n_members} members and member recovery is disabled"
@@ -591,10 +636,27 @@ def backfill_child(
 
 
 def backfill(args: argparse.Namespace) -> dict[str, Any]:
+    """Export every point's predictions for each model of a finished run.
+
+    Parameters
+    ----------
+    args : argparse.Namespace
+        The options from :func:`parse_args`.
+
+    Returns
+    -------
+    dict
+        The summary also saved as ``predictions/backfill_summary.json`` on the main run: the data
+        check and one outcome per model.
+
+    Raises
+    ------
+    SystemExit
+        If the rebuilt data does not match the run (see :func:`check_for_drift`).
+    """
     config = Config(config_path=args.config_path)
-    # The URI only, exactly as relog.py does: switching to the config's experiment would make
-    # start_run(run_id=...) fail whenever the run belongs to a different one. A run is reached by
-    # id, not by experiment.
+    # Only the MLflow location is taken from the config: runs are opened by id, in their own
+    # experiment.
     configure_tracking_uri(config)
 
     logger = TrainingLogger(name="prediction-backfill", enable_file_logging=False).get_logger()
@@ -621,8 +683,7 @@ def backfill(args: argparse.Namespace) -> dict[str, Any]:
     children = [run for run in children if run.data.tags.get("model_name")]
     logger.info(f"{len(children)} child model run(s) to back-fill.")
 
-    # Where a Lightning ensemble's member checkpoints are scavenged from, for runs that predate
-    # members logging their own. None disables recovery and restores the plain skip.
+    # Where to look for ensemble checkpoints not saved in MLflow; None switches the search off.
     checkpoint_dir = None if args.no_member_recovery else args.member_checkpoint_dir
 
     if args.dry_run:
@@ -656,8 +717,7 @@ def backfill(args: argparse.Namespace) -> dict[str, Any]:
                 "model_name": run.data.tags.get("model_name"),
                 "error": f"{type(exc).__name__}: {exc}",
             }
-        # One child failing must not cost the others their export, so the loop records and
-        # continues; the summary is where the failures are answered for.
+        # One model failing does not stop the others; failures are listed in the summary.
         if outcome.get("error"):
             logger.warning(f"  {label}: {outcome['error']}")
         elif outcome.get("skipped"):
@@ -683,9 +743,7 @@ def backfill(args: argparse.Namespace) -> dict[str, Any]:
     with mlflow.start_run(run_id=args.parent_run_id):
         if exported:
             ParentRunLogger()._log_point_prediction_export(args.parent_run_id, export_config)
-        # Written whether or not anything was exported: "this run was back-filled and produced
-        # nothing" is exactly as worth recording as a success, and without this file a back-filled
-        # export is indistinguishable from one the run itself produced.
+        # Always written, even if nothing was exported, so the run shows it was processed here.
         log_json(summary, BACKFILL_SUMMARY_FILE, ArtifactLayout.PREDICTIONS)
         mlflow.set_tags({"point_predictions_backfilled": "true"})
 
@@ -693,6 +751,7 @@ def backfill(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run :func:`backfill` and print its summary; returns 0."""
     args = parse_args(argv)
     summary = backfill(args)
     print(json.dumps(summary, indent=2, default=str))

@@ -1,3 +1,29 @@
+"""Read the project's YAML configuration files into one :class:`Config` object.
+
+A run is configured by a main file (``configs/main_config.yml`` by default) which names the other
+files it needs, relative to its own folder:
+
+- ``DATA_SPEC_PATH`` - which columns are targets, lab columns, categorical, ignored
+  (``configs/data_spec.yml``);
+- ``SKLEARN_CONFIG_PATH`` and ``LIGHTNING_CONFIG_PATH`` - options for the two model families;
+- ``SKLEARN_REGISTRY_PATH`` and ``LIGHTNING_REGISTRY_PATH`` - the two :term:`model lists
+  <model registry>`, with ``enabled: true/false`` per model.
+
+Every setting ends up as an upper-case attribute of :class:`Config` (``config.TARGET_COLUMNS``,
+``config.SPLIT_TEST_SIZE``, ...), which every other part of the code reads.
+
+Where a setting's value comes from, first match wins:
+
+1. an environment variable with the same name (``RANDOM_SEED=7 python main.py``);
+2. the ``common:`` block of the main file;
+3. ``data_spec.yml``, then the scikit-learn config, then the Lightning config;
+4. the top level of the main file;
+5. the default written in this module.
+
+Nested blocks (``split:``, ``uncertainty:``, ``data_quality:``, ``export_point_predictions:``)
+have their own flat environment-variable names, listed in the configuration guide.
+"""
+
 import os
 import random
 import yaml
@@ -5,16 +31,37 @@ import json
 from copy import deepcopy
 from typing import Any, Mapping, Optional
 
-# Reserved top-level key in the Lightning registry holding settings shared by every entry.
+#: The top-level key of a Lightning model-list file that holds settings shared by every model.
 LIGHTNING_REGISTRY_DEFAULTS_KEY = 'defaults'
 
 
 def deep_merge(base: Mapping, override: Mapping) -> dict:
-    """`override` on top of `base`, recursing into nested mappings.
+    """Merge ``override`` on top of ``base``, recursing into nested dictionaries.
 
-    A mapping on both sides merges key by key; anything else in `override` - a scalar, a list -
-    replaces. So an entry naming `trainer_args.max_epochs` keeps the rest of the shared trainer args,
-    while `head_hidden_dims: [64]` replaces the default list outright rather than merging into it.
+    Where both sides hold a dictionary, they are merged key by key; anything else in ``override`` (a
+    number, a string, a list) replaces the value in ``base``. So a model entry that sets only
+    ``trainer_args.max_epochs`` keeps the other shared trainer settings, while a list such as
+    ``head_hidden_dims: [64]`` replaces the default list outright.
+
+    Parameters
+    ----------
+    base : Mapping
+        The shared defaults.
+    override : Mapping
+        The values that win.
+
+    Returns
+    -------
+    dict
+        A new dictionary; neither input is modified.
+
+    Examples
+    --------
+    >>> deep_merge(
+    ...     {"trainer": {"max_epochs": 500, "devices": 1}, "dims": [64, 32]},
+    ...     {"trainer": {"max_epochs": 100}, "dims": [16]},
+    ... )
+    {'trainer': {'max_epochs': 100, 'devices': 1}, 'dims': [16]}
     """
     merged = deepcopy(dict(base))
     for key, value in override.items():
@@ -26,30 +73,47 @@ def deep_merge(base: Mapping, override: Mapping) -> dict:
 
 
 def load_lightning_registry(registry_path: str) -> dict:
-    """Load the Lightning model registry at `registry_path`, with `defaults:` merged into every entry.
+    """Load the deep-learning model list, with the shared ``defaults:`` merged into every model.
 
-    A file that declares NOTHING but `defaults:` - configs/lightning/models/defaults.yml - is the
-    shared header for a folder of one-model-per-file entries: every OTHER .yml/.yaml file sitting
-    beside it is loaded too, each one an entry in its own right, exactly as if all of them had been
-    written inline in a single registry file.
+    Two layouts are understood:
 
-    A file that declares an entry of its own is instead read alone. That is what keeps a single
-    tuned entry exported into configs/lightning/tuned/ from absorbing the unrelated exports parked
-    in the same folder.
+    - A file holding **only** a ``defaults:`` block (``configs/lightning/models/defaults.yml``) is
+      the shared part of a folder: every other ``.yml``/``.yaml`` file beside it is read as one or
+      more model entries.
+    - A file declaring a model entry itself (such as a :term:`tuned config`) is read on its own,
+      so the other tuned files in its folder are not picked up.
+
+    Parameters
+    ----------
+    registry_path : str
+        The ``defaults.yml`` of a model folder, or a single model-list file.
+
+    Returns
+    -------
+    dict
+        Model name to its complete settings, defaults included.
+
+    Raises
+    ------
+    ValueError
+        If the same model name is declared in two files of the folder.
+
+    Examples
+    --------
+    >>> registry = load_lightning_registry("examples/demo_config/lightning_models/defaults.yml")
+    >>> sorted(registry)
+    ['soil_cnn']
+    >>> registry["soil_cnn"]["trainer_args"]["max_epochs"]   # from defaults.yml
+    40
     """
     with open(registry_path, 'r') as f:
         document = yaml.safe_load(f) or {}
 
-    # The trainer args and the callbacks were byte-identical on every entry, so they live once
-    # under `defaults:` and are merged in here. Merging at load time rather than in the factory
-    # means every consumer - LightningConfigFactory, tune.py, the HPO exporter, the tests - keeps
-    # seeing one fully materialized entry and needs to know nothing about this. A tuned file from
-    # configs/lightning/tuned/ carries no `defaults:` key, so for it this is a no-op.
+    # Merged here, at load time, so everything downstream sees each model's complete settings.
+    # A tuned file has no `defaults:` block, so nothing is merged into it.
     defaults = document.pop(LIGHTNING_REGISTRY_DEFAULTS_KEY, None) or {}
 
-    # Tracks which file each entry came from, purely so a collision names both real files instead
-    # of always blaming registry_path - a second entry file colliding with a FIRST one would
-    # otherwise be misreported as colliding with registry_path itself.
+    # Which file each entry came from, so a duplicate name reports both files.
     sources = {name: registry_path for name in document}
 
     if not document:
@@ -74,6 +138,52 @@ def load_lightning_registry(registry_path: str) -> dict:
 
 
 class Config:
+    """All settings of a run, read from the YAML configuration files and the environment.
+
+    Every setting is an upper-case attribute. The ones most code reads:
+
+    - **data**: ``DATA_FOLDER``, ``STATIC_SOURCE``, ``TARGETS_SOURCE``, ``TIMESERIES_SOURCE``
+      (full paths to the three data sources), ``POINT_ID_COLUMN``, ``LAT_COLUMN``, ``LON_COLUMN``,
+      ``TIME_COLUMN``, ``MODALITY_PREFIX_MAP``;
+    - **columns**: ``TARGET_COLUMNS``, ``LABEL_COLUMNS``, ``CATEGORICAL_FEATURES``,
+      ``IGNORED_COLUMNS``, ``MULTI_TARGET_MODE``;
+    - **split**: ``SPLIT_HOLDOUT_STRATEGY``, ``SPLIT_TEST_SIZE``, ``SPLIT_VAL_SIZE``,
+      ``SPLIT_SEED``, ``SPLIT_POPULATION_POLICY``, ``SPLIT_PLAN_PATH``;
+    - **models**: ``MODEL_REGISTRY`` (scikit-learn) and ``LIGHTNING_MODEL_REGISTRY``
+      (deep learning), each a dict of model name to settings;
+    - **optional extras**: ``UNCERTAINTY_*``, ``EXPLAIN_*``, ``EXPORT_POINT_PREDICTIONS*``;
+    - **MLflow**: ``MLFLOW_TRACKING_URI``, ``MLFLOW_EXPERIMENT_NAME``, ``MLFLOW_REGISTER_MODELS``.
+
+    See the module description for the order in which sources are searched.
+
+    Parameters
+    ----------
+    config_path : str, optional
+        The main configuration file. Defaults to the ``CONFIG_PATH`` environment variable, then
+        ``configs/main_config.yml``.
+    registry_path : str, optional
+        The scikit-learn model list. Defaults to the ``MODEL_REGISTRY_PATH`` environment variable,
+        then ``SKLEARN_REGISTRY_PATH`` in the main file.
+    lightning_registry_path : str, optional
+        The deep-learning model list. Defaults to the ``LIGHTNING_MODEL_REGISTRY_PATH`` environment
+        variable, then ``LIGHTNING_REGISTRY_PATH`` in the main file.
+
+    Raises
+    ------
+    FileNotFoundError
+        If a configuration file or a model list named by the main file does not exist.
+
+    Examples
+    --------
+    >>> config = Config(config_path="examples/demo_config/main_config.yml")
+    >>> config.TARGET_COLUMNS
+    ['organic_matter_g_kg', 'clay_pct', 'ph_water']
+    >>> config.SPLIT_HOLDOUT_STRATEGY, config.SPLIT_TEST_SIZE
+    ('random', 0.15)
+    >>> sorted(config.MODEL_REGISTRY), sorted(config.LIGHTNING_MODEL_REGISTRY)
+    (['Ridge'], ['soil_cnn'])
+    """
+
     def __init__(
         self,
         config_path: Optional[str] = None,
@@ -137,7 +247,7 @@ class Config:
         if not self.TEMPORAL_FEATURES:
             self.TEMPORAL_FEATURES = self._normalize_mapping(self._get_config('TEMPORAL_FEATURES', {}))
 
-        # General settings
+        # --- data sources ----------------------------------------------------------------------
         self.DATA_FOLDER = self._get_data_config('root', 'DATA_FOLDER', 'doukkala_ssl_datasets')
         self.DATA_ROOT = self.DATA_FOLDER
         self.DATA_INDEX_MANIFEST = self._get_data_config('manifest', 'DATA_INDEX_MANIFEST', None)
@@ -159,7 +269,7 @@ class Config:
             or self._get_temporal_config('timeseries_csv_path', 'TIMESERIES_CSV_PATH', None)
         )
 
-        # Unified source resolution: one path per source, each a file or a folder.
+        # One full path per source; each may be a file or a folder of files.
         self.STATIC_SOURCE = self.STATIC_FEATURES_FOLDER or self.STATIC_CSV_PATH
         self.TARGETS_SOURCE = self.TARGETS_FOLDER or self._explicit_targets_path()
         self.TIMESERIES_SOURCE = self.TIMESERIES_FOLDER or self.TIMESERIES_CSV_PATH
@@ -191,54 +301,41 @@ class Config:
         self.LIGHTNING_GRADIENT_CLIP_VAL = self._get_config('LIGHTNING_GRADIENT_CLIP_VAL', 0.0)
         self.LIGHTNING_LOG_EVERY_N_STEPS = self._get_config('LIGHTNING_LOG_EVERY_N_STEPS', 1)
         self.MAIN_FILE_LOGGING_ENABLED = self._get_config('MAIN_FILE_LOGGING_ENABLED', True)
-        # Failure policy for the sklearn training loop.
+        # What happens when a scikit-learn model fails to train.
         self.FAIL_ON_MODEL_ERROR = self._get_config('FAIL_ON_MODEL_ERROR', False)
         self.FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET = self._get_config('FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET', True)
         self.SKLEARN_FILE_LOGGING_ENABLED = self._get_config('SKLEARN_FILE_LOGGING_ENABLED', True)
         self.MLFLOW_EXPERIMENT_EXPORT_ENABLED = self._get_config('MLFLOW_EXPERIMENT_EXPORT_ENABLED', False)
         self.MLFLOW_EXPERIMENT_EXPORT_PATH = self._get_config('MLFLOW_EXPERIMENT_EXPORT_PATH', 'mlflow_exports')
-        # Where runs are recorded, and under which experiment. Both are configurable because an
-        # experiment's artifact_location is an ABSOLUTE path baked in at creation time: the original
-        # experiment was created in a different checkout, so its metadata and its artifacts have
-        # been landing in two different directories ever since. A new experiment created under the
-        # current tracking root gets a correct artifact_location from MLflow automatically.
+        # Where MLflow records runs ('' means the repository's mlruns/ folder), and under which
+        # experiment name.
         self.MLFLOW_TRACKING_URI = self._get_config('MLFLOW_TRACKING_URI', '')
         self.MLFLOW_EXPERIMENT_NAME = self._get_config('MLFLOW_EXPERIMENT_NAME', 'Soil_Model_Training_v2')
-        # Enter each fitted model into the MLflow Model Registry as a new version of
-        # <target>_<model>, so deployment can reference models:/<name>/<version> or the champion
-        # alias instead of a run-scoped URI. false for throwaway experiments that should not
-        # accumulate versions.
+        # Register each trained model in the MLflow model registry as a new version of
+        # <target>_<model>, so it can be loaded as models:/<name>@champion. Set false for throwaway
+        # experiments.
         self.MLFLOW_REGISTER_MODELS = self._get_config('MLFLOW_REGISTER_MODELS', True)
-        # SHAP explainability. EXPLAIN_ENABLED is a real off-switch, not just a plot suppressor:
-        # when it is false the logger returns before importing shap at all, so a run that does not
-        # want explanations does not pay for numba's import either.
+        # --- SHAP explanations ------------------------------------------------------------------
+        # When EXPLAIN_ENABLED is false, the shap library is not even imported.
         self.EXPLAIN_ENABLED = self._get_config('EXPLAIN_ENABLED', True)
         self.EXPLAIN_MAX_SAMPLES = self._get_config('EXPLAIN_MAX_SAMPLES', 500)
         self.EXPLAIN_BACKGROUND_SAMPLES = self._get_config('EXPLAIN_BACKGROUND_SAMPLES', 100)
         self.EXPLAIN_MAX_DISPLAY = self._get_config('EXPLAIN_MAX_DISPLAY', 25)
-        # Ceiling on model evaluations for the model-agnostic explainer, which is what any model
-        # that is neither a tree nor linear falls back to. Without it, TabICL cost ~1.08M forward
-        # passes and the run never terminated.
+        # Maximum number of model predictions the generic (slow) SHAP explainer may make, used for
+        # models that are neither tree-based nor linear. A model that would need more is skipped.
         self.EXPLAIN_MAX_EVALS = self._get_config('EXPLAIN_MAX_EVALS', 200000)
-        # Empty means every model. Named entries restrict it, because SHAP on a large TabICL
-        # regressor costs far more than on XGBoost and you want that choice per model, not global.
+        # Models to explain; empty means every model.
         self.EXPLAIN_MODELS = self._get_config('EXPLAIN_MODELS', [])
-        # Models never explained unless EXPLAIN_MODELS names them explicitly. TabICL is an
-        # in-context learner: one prediction re-processes the training set, measured at ~13 ms per
-        # row against microseconds for a tree. EXPLAIN_MAX_EVALS counts evaluations and cannot see
-        # that difference, so the exclusion is by name rather than by budget.
+        # Models never explained unless EXPLAIN_MODELS names them. TabICL is skipped by default:
+        # each of its predictions re-reads the training set, which makes SHAP very slow.
         self.EXPLAIN_SKIP_MODELS = self._get_config('EXPLAIN_SKIP_MODELS', ['TabICL'])
         self.EXPLAIN_FAIL_ON_ERROR = self._get_config('EXPLAIN_FAIL_ON_ERROR', False)
 
-        # --- predictive uncertainty ------------------------------------------------------------
-        # Same shape as the EXPLAIN block above, and for the same reason: UNCERTAINTY_ENABLED is a
-        # real off-switch, not a plot suppressor. False means one fit per model and an eval frame
-        # with the columns it has always had, so a run that does not want uncertainty does not pay
-        # the n_members multiple on training time.
-        #
-        # Read UNCERTAINTY_CALIBRATION_SOURCE together with the sklearn fit pool: `val` moves the
-        # sklearn members onto X_train_only so the calibration set is genuinely held out. See
-        # configs/main_config.yml for why, and UNCERTAINTY_FIT_POOL below for what gets logged.
+        # --- uncertainty ------------------------------------------------------------------------
+        # When enabled, each model is trained UNCERTAINTY_N_MEMBERS times (an ensemble) and every
+        # prediction gets a standard deviation and an interval. With calibration source `val`, the
+        # scikit-learn models are fitted on the training points only, so the validation points stay
+        # unseen for calibration.
         self.UNCERTAINTY_CONFIG = {
             **self._normalize_mapping(self.config.get('uncertainty', {})),
             **self._normalize_mapping(self.COMMON_CONFIG.get('uncertainty', {})),
@@ -247,26 +344,22 @@ class Config:
         self.UNCERTAINTY_N_MEMBERS = int(
             self._get_uncertainty_config('n_members', 'UNCERTAINTY_N_MEMBERS', 5)
         )
-        # Member k trains at RANDOM_SEED + k * stride. A stride rather than consecutive integers so
-        # a member's seed never collides with SPLIT_SEED or with another entry's `random_seed`,
-        # which would silently correlate two members that are supposed to be independent draws.
+        # Ensemble member k uses seed RANDOM_SEED + k * stride, well away from any other seed.
         self.UNCERTAINTY_SEED_STRIDE = int(
             self._get_uncertainty_config('member_seed_stride', 'UNCERTAINTY_SEED_STRIDE', 1000)
         )
-        # auto | always | never. `auto` bootstraps only estimators that expose no random_state:
-        # refitting Ridge five times on the same rows gives five identical members and a zero
-        # standard deviation, which looks like a confident model and is actually no ensemble at all.
+        # auto | always | never: resample the training rows for each member. `auto` does it only for
+        # models with no randomness of their own (such as Ridge), whose members would otherwise be
+        # identical.
         self.UNCERTAINTY_BOOTSTRAP = str(
             self._get_uncertainty_config('bootstrap', 'UNCERTAINTY_BOOTSTRAP', 'auto')
         ).lower()
-        # Lightning only. The head emits (mu, log var) and the loss becomes beta-NLL, which is what
-        # gives an input-dependent bar width rather than one driven by ensemble spread alone.
+        # Deep learning only: also predict a per-point noise level (a variance head).
         self.UNCERTAINTY_HETEROSCEDASTIC = self._get_uncertainty_config(
             'heteroscedastic', 'UNCERTAINTY_HETEROSCEDASTIC', True
         )
-        # beta-NLL interpolation weight (Seitzer et al. 2022). 0.0 is plain Gaussian NLL, which is
-        # known to under-fit the mean where it has already decided the variance is large; 1.0 is
-        # fully variance-weighted. 0.5 is the paper's recommended middle.
+        # Weight of the beta-NLL loss used with a variance head (Seitzer et al. 2022): 0.0 is plain
+        # Gaussian negative log-likelihood, 1.0 fully variance-weighted; 0.5 is the recommended value.
         self.UNCERTAINTY_BETA_NLL = float(
             self._get_uncertainty_config('beta_nll', 'UNCERTAINTY_BETA_NLL', 0.5)
         )
@@ -276,12 +369,9 @@ class Config:
         self.UNCERTAINTY_INTERVAL = {
             **self._normalize_mapping(self.UNCERTAINTY_CONFIG.get('interval', {})),
         }
-        # conformal | gaussian | sigma | none. See yg_eo_soilnet.uncertainty.intervals - only
-        # conformal is calibrated, and only conformal needs held-out rows to fit against.
-        #
-        # `calibration.method` is the key this used to live under and is still read when `interval`
-        # is absent, so a config written before this block keeps working. `split_conformal` there
-        # means `conformal` here.
+        # How intervals are built: conformal | gaussian | sigma | none (see
+        # yg_eo_soilnet.uncertainty.intervals). Older configs set this as `calibration.method`,
+        # which is still read when `interval.method` is absent; `split_conformal` means `conformal`.
         self.UNCERTAINTY_INTERVAL_METHOD = str(
             self._get_interval_config(
                 'method',
@@ -291,13 +381,10 @@ class Config:
                 ),
             )
         ).lower()
-        # Retained under its old name because the sklearn trainer and the export CLI still read it,
-        # and because a run summary that records which calibration was asked for should keep saying
-        # so. It is the same choice, spelled the way the config used to spell it.
+        # The same setting under its older name, which some code still reads.
         self.UNCERTAINTY_CALIBRATION_METHOD = self.UNCERTAINTY_INTERVAL_METHOD
-        # The miscoverage rate. 0.05 is a 95% interval; the plotted bar and picp_test both read it,
-        # so there is one number behind the picture and the metric that checks the picture. Ignored
-        # by the `sigma` method, which is graded against what k implies instead.
+        # The share of true values allowed to fall outside the interval: 0.05 means a 95% interval.
+        # Not used by the `sigma` method.
         self.UNCERTAINTY_ALPHA = float(
             self._get_interval_config(
                 'alpha',
@@ -305,19 +392,18 @@ class Config:
                 self._get_calibration_config('alpha', 'UNCERTAINTY_ALPHA', 0.05),
             )
         )
-        # Half-width in standard deviations, read only by `method: sigma`.
+        # Interval half-width in standard deviations, for `method: sigma` only.
         self.UNCERTAINTY_INTERVAL_K = float(
             self._get_interval_config('k', 'UNCERTAINTY_INTERVAL_K', 1.0)
         )
-        # val | cv_oof. See configs/main_config.yml: `val` costs sklearn the val rows and buys a
-        # calibration set that is the same point ids as Lightning's, `cv_oof` costs no rows and
-        # calibrates on out-of-fold residuals instead.
+        # Which errors calibrate the intervals: `val` (the validation points, the same ones for both
+        # model families) or `cv_oof` (scikit-learn's cross-validation errors, which keeps the
+        # validation points in its fit pool).
         self.UNCERTAINTY_CALIBRATION_SOURCE = str(
             self._get_calibration_config('source', 'UNCERTAINTY_CALIBRATION_SOURCE', 'val')
         ).lower()
         self.UNCERTAINTY_MODELS = self._get_uncertainty_config('models', 'UNCERTAINTY_MODELS', [])
-        # TabICL is excluded by name for the same reason it is excluded from SHAP: n_members fits of
-        # an in-context model is the path that got a run OOM-killed by the kernel.
+        # TabICL is skipped by default: training it several times needs too much memory.
         self.UNCERTAINTY_SKIP_MODELS = self._get_uncertainty_config(
             'skip_models', 'UNCERTAINTY_SKIP_MODELS', ['TabICL']
         )
@@ -326,9 +412,8 @@ class Config:
         )
 
         # --- per-point prediction export --------------------------------------------------------
-        # One CSV per run keyed on POINT_ID_COLUMN, carrying every child model's prediction for
-        # every point. Off by default because it costs a full-population inference pass per model,
-        # which no other part of the run performs.
+        # One table per run with every model's prediction for every point (not only the test
+        # points). Off by default: it costs one prediction pass over all points per model.
         self.EXPORT_PREDICTIONS_CONFIG = {
             **self._normalize_mapping(self.config.get('export_point_predictions', {})),
             **self._normalize_mapping(self.COMMON_CONFIG.get('export_point_predictions', {})),
@@ -339,9 +424,7 @@ class Config:
         self.EXPORT_POINT_PREDICTIONS_MODELS = self._get_export_config(
             'models', 'EXPORT_POINT_PREDICTIONS_MODELS', []
         )
-        # Same exclusion as SHAP and uncertainty, for the same reason: one prediction from an
-        # in-context model re-processes the training set, so a pass over every point is measured in
-        # hours rather than seconds.
+        # TabICL is skipped by default: predicting every point with it takes hours.
         self.EXPORT_POINT_PREDICTIONS_SKIP_MODELS = self._get_export_config(
             'skip_models', 'EXPORT_POINT_PREDICTIONS_SKIP_MODELS', ['TabICL']
         )
@@ -360,26 +443,22 @@ class Config:
         self.CLUSTERING_STRATEGY = self._get_config('CLUSTERING_STRATEGY', None)
         self.CLUSTERING_STRATEGY = self._normalize_mapping(self.CLUSTERING_STRATEGY)
         self.ENABLE_CLUSTERING = self.CLUSTERING_STRATEGY.get('enabled', False)
-        # The INNER cross-validation strategy for sklearn's GridSearchCV ('kfold'/'groupkfold').
-        # Not the holdout: that is SPLIT_HOLDOUT_STRATEGY below. The two are different decisions and
-        # the names are kept distinct on purpose.
+        # How scikit-learn's cross-validation cuts its fit pool into folds ('kfold' or 'groupkfold').
+        # Not the train/validation/test split, which is SPLIT_HOLDOUT_STRATEGY below.
         self.SPLIT_STRATEGY = self._get_config('SPLIT_STRATEGY', 'kfold')
 
-        # --- the unified train/val/test holdout, shared by every training family ---------------
-        # One split, decided once over POINT_ID_COLUMN before the family fork, so sklearn and
-        # Lightning score on the same test points. See datamodules/splitting.py.
+        # --- the train/validation/test split, shared by every model --------------------------
+        # Decided once, by point id, before any model is trained. See datamodules/splitting.py.
         self.SPLIT_CONFIG = {
             **self._normalize_mapping(self.config.get('split', {})),
             **self._normalize_mapping(self.COMMON_CONFIG.get('split', {})),
         }
-        # ENABLE_CLUSTERING is the legacy spelling of split.strategy: spatial_group. A config that
-        # only ever turned clustering on keeps the grouped holdout it had - and now the Lightning
-        # families get it too, which they never did before.
+        # An older config that only sets CLUSTERING_STRATEGY.enabled gets the spatial split.
         legacy_grouped = 'spatial_group' if self.ENABLE_CLUSTERING else 'random'
         self.SPLIT_HOLDOUT_STRATEGY = self._get_split_config(
             'strategy', 'SPLIT_HOLDOUT_STRATEGY', legacy_grouped
         )
-        # TEST_SIZE is honoured as the fallback so a config predating `split:` keeps working.
+        # An older TEST_SIZE key is used when split.test_size is absent.
         self.SPLIT_TEST_SIZE = self._get_split_config('test_size', 'SPLIT_TEST_SIZE', self.TEST_SIZE)
         self.SPLIT_VAL_SIZE = self._get_split_config(
             'val_size', 'SPLIT_VAL_SIZE', self._get_config('LIGHTNING_VAL_SIZE', 0.2)
@@ -389,9 +468,8 @@ class Config:
             'population_policy', 'SPLIT_POPULATION_POLICY', 'intersect'
         )
         self.SPLIT_PLAN_PATH = self._get_split_config('plan_path', 'SPLIT_PLAN_PATH', None)
-        # Floor on what `intersect` may leave behind. Intersecting is only sound while the families
-        # roughly agree on which rows are usable; below this the narrowest family is dictating the
-        # whole run's population, which is a data problem to fix rather than a split to accept.
+        # With population_policy `intersect`, stop the run if fewer than this share of the points
+        # are usable by every model family: that points to a data problem worth fixing.
         self.SPLIT_MIN_POPULATION_RATIO = self._get_split_config(
             'min_population_ratio', 'SPLIT_MIN_POPULATION_RATIO', 0.5
         )
@@ -404,10 +482,9 @@ class Config:
                 "unified holdout. Remove TEST_SIZE to avoid the ambiguity."
             )
 
-        # --- data quality: one missingness rule for every training family ----------------------
-        # A covariate blank on more than MAX_MISSING_COLUMN_RATIO of rows stops the run; anything
-        # under it is median-filled and flagged rather than costing the whole row. See
-        # datamodules/frame_cleaning.assert_columns_are_dense_enough.
+        # --- missing data: one rule for every model ------------------------------------------------
+        # A covariate blank in more than MAX_MISSING_COLUMN_RATIO of rows stops the run; below that,
+        # gaps are median-filled and flagged. See datamodules/frame_cleaning.py.
         self.DATA_QUALITY_CONFIG = {
             **self._normalize_mapping(self.config.get('data_quality', {})),
             **self._normalize_mapping(self.COMMON_CONFIG.get('data_quality', {})),
@@ -422,49 +499,36 @@ class Config:
             'fail_on_sparse_columns', 'FAIL_ON_SPARSE_COLUMNS', True
         )
 
-        # Target and feature configuration
+        # --- targets and features ---------------------------------------------------------------
         self.IGNORE_BANDS = self._get_ignore_bands([])
         self.COLUMNS_TO_TRANSFORM = self._get_config('COLUMNS_TO_TRANSFORM', [])
         self.TARGET_COLUMNS = self._get_config('TARGET_COLUMNS', self._get_config('target_columns', []))
-        # How several targets are grouped into models. 'joint' fits ONE model with a target_dim-wide
-        # head over all of them; 'per_target' fits an independent model each. Both families obey
-        # this: before it existed Lightning was always joint and sklearn always per-target, and
-        # neither was switchable. A registry entry may override it with its own `multi_target:` key.
-        # Irrelevant when a single target is configured. See yg_eo_soilnet.targets.
+        # 'joint': one model predicts every target; 'per_target': one model per target. A model-list
+        # entry can override it with its own `multi_target:` key. See yg_eo_soilnet.targets.
         self.MULTI_TARGET_MODE = self._get_config('MULTI_TARGET_MODE', 'joint')
-        # Every measured label, whether or not a model is fitted for it. Defaults to empty so a
-        # config that has not adopted the key behaves exactly as before.
+        # Every lab-measured column, whether or not it is a target. Never used as ordinary features.
         self.LABEL_COLUMNS = self._get_config('LABEL_COLUMNS', self._get_config('label_columns', []))
-        # Whether measured lab values travel with the data as AUXILIARY INPUTS. Off by default, so
-        # a config that has not opted in behaves exactly as before. This governs availability only -
-        # which columns reach the frame and the bundle - never whether they are predictors, which
-        # metadata_columns still refuses for every LABEL_COLUMNS entry. A model then names the subset
-        # it wants; see soil_cnn's auxiliary_label_columns.
+        # Keep the lab columns in the loaded data so soil_cnn can use some of them as auxiliary
+        # inputs (its auxiliary_label_columns). They still never become ordinary features.
         self.CARRY_LABEL_COLUMNS = self._get_config('CARRY_LABEL_COLUMNS', False)
-        # Whether lat/lon travel with the data as a HARMONIC POSITIONAL INPUT. Off by default, so a
-        # config that has not opted in behaves exactly as before: the coordinates stay metadata and
-        # filter_schema keeps dropping them for every family. Turning it on does NOT make them
-        # ordinary predictors - they bypass the feature frame entirely and reach only the CNN's
-        # coordinate branch, which normalizes them against the train bbox and encodes them.
+        # Feed lat/lon to soil_cnn's location branch, encoded as sine/cosine waves. They are never
+        # ordinary features, and the scikit-learn models do not see them.
         self.USE_HARMONIC_COORDS = self._get_config('USE_HARMONIC_COORDS', False)
-        # Precomputed spatial-context columns (patch variance, neighbourhood statistics), declared
-        # as a named group so they can be ablated and attributed as a set. Empty means the group
-        # does not exist and nothing anywhere changes.
+        # Columns describing a point's surroundings (neighbourhood statistics), grouped so they can
+        # be switched off or explained together.
         self.CONTEXT_FEATURES = self._get_config('CONTEXT_FEATURES', [])
-        # The group's switch. Note the asymmetry with the flag above: naming a column in
-        # CONTEXT_FEATURES makes it switchable, so turning this OFF removes a column that would
-        # otherwise be an ordinary continuous covariate. That is the ablation, and it is intended.
+        # Switch for that group. Setting it false removes the CONTEXT_FEATURES columns from the
+        # inputs; true (the default) keeps them as ordinary features.
         self.USE_CONTEXT_FEATURES = self._get_config('USE_CONTEXT_FEATURES', True)
         self.PREDICTOR_COLUMNS = self._get_config('PREDICTOR_COLUMNS', self._get_config('predictor_columns', []))
         self.IGNORED_COLUMNS = self._get_config('IGNORED_COLUMNS', self._get_config('ignored_columns', []))
         self.TREE_CATEGORICAL_ENCODING = self._get_sklearn_categorical_config('TREE_CATEGORICAL_ENCODING', 'onehot')
         self.TREE_ONEHOT_MAX_CATEGORIES = self._get_sklearn_categorical_config('TREE_ONEHOT_MAX_CATEGORIES', 30)
         self.MIN_FEATURE_COUNT = self._get_sklearn_categorical_config('MIN_FEATURE_COUNT', 10)
-        # Whether to spend a full prediction pass over the TRAINING split on the r2_train_fit
-        # overfitting diagnostic. See configs/sklearn/config.yml.
+        # Also score scikit-learn models on their own training points (r2_train_fit): a large gap
+        # to r2_test points to overfitting.
         self.LOG_TRAIN_FIT_METRIC = self._get_config('LOG_TRAIN_FIT_METRIC', True)
-        # Models that decline it by name, so one expensive estimator does not force the diagnostic
-        # off for the cheap ones.
+        # Models that skip that extra score.
         self.LOG_TRAIN_FIT_METRIC_SKIP_MODELS = self._get_config(
             'LOG_TRAIN_FIT_METRIC_SKIP_MODELS', []
         )
@@ -477,11 +541,16 @@ class Config:
         self.EXCLUDE_CATEGORICAL = self._get_sklearn_categorical_config('EXCLUDE_CATEGORICAL', [])
         self.ELIMINATED_FEATURES = self._get_config('ELIMINATED_FEATURES', self.IGNORED_COLUMNS)
 
-        # Model registries loaded here
+        # --- the two model lists ---------------------------------------------------------------
         self.MODEL_REGISTRY = self._load_model_registry()
         self.LIGHTNING_MODEL_REGISTRY = self._load_lightning_model_registry()
 
     def _get_config(self, key: str, default: Any) -> Any:
+        """Return a setting: environment variable, then each config file, then ``default``.
+
+        An environment variable is converted to the type of ``default`` (true/1/yes for booleans,
+        comma-separated for lists, JSON for dictionaries).
+        """
         val = os.environ.get(key)
         if val is not None:
             if isinstance(default, bool):
@@ -515,6 +584,7 @@ class Config:
         return config_val
 
     def _load_yaml_mapping(self, path_value: Optional[str]) -> dict:
+        """Read one YAML file into a dictionary; raise ``FileNotFoundError`` if it does not exist."""
         if not path_value:
             raise FileNotFoundError("Expected a config file path, but none was provided.")
         resolved_path = self._resolve_config_path(path_value)
@@ -524,6 +594,7 @@ class Config:
             return self._normalize_mapping(yaml.safe_load(f) or {})
 
     def _load_model_registry(self):
+        """Read the scikit-learn model list."""
         try:
             with open(self.registry_path, 'r') as f:
                 return yaml.safe_load(f) or {}
@@ -531,6 +602,7 @@ class Config:
             raise FileNotFoundError(f"Model registry YAML not found at {self.registry_path}. Stopping execution.")
 
     def _load_lightning_model_registry(self):
+        """Read the deep-learning model list; see :func:`load_lightning_registry`."""
         try:
             return load_lightning_registry(self.lightning_registry_path)
         except FileNotFoundError:
@@ -539,16 +611,15 @@ class Config:
             )
 
     def _get_data_config(self, data_key: str, flat_key: str, default: Any) -> Any:
-        """Read from the unified `data:` block, falling back to the legacy flat key."""
+        """Return ``data.<data_key>``, or else the older flat key ``flat_key``."""
         if data_key in self.DATA_CONFIG and self.DATA_CONFIG[data_key] is not None:
             return self.DATA_CONFIG[data_key]
         return self._get_config(flat_key, default)
 
     def _explicit_targets_path(self) -> Optional[str]:
-        """Targets path only when separately configured.
+        """Return the targets file's path only if one is configured separately, else ``None``.
 
-        TARGETS_FILE defaults to DATA_FILE, so a joint dataset would otherwise look like it has a
-        separate targets source. Returning None here keeps 'joint file' detectable.
+        ``None`` means the targets are in the static file.
         """
         if self.DATA_CONFIG.get('targets'):
             return self._resolve_data_path(self.DATA_CONFIG['targets'])
@@ -559,16 +630,16 @@ class Config:
         return None
 
     def _get_temporal_config(self, temporal_key: str, flat_key: str, default: Any) -> Any:
+        """Return ``temporal.<temporal_key>``, or else the flat key, or else ``default``."""
         if temporal_key in self.TEMPORAL_FEATURES and self.TEMPORAL_FEATURES[temporal_key] is not None:
             return self.TEMPORAL_FEATURES[temporal_key]
         return self._get_config(flat_key, default)
 
     def _get_split_config(self, split_key: str, flat_key: str, default: Any) -> Any:
-        """Read `split.<split_key>`, falling back to a flat key and then the default.
+        """Return ``split.<split_key>``, or else the flat key, or else ``default``.
 
-        Mirrors _get_temporal_config, so the nested `split:` block behaves like `temporal:` - an
-        env var of the flat name still overrides everything, which is what makes an A/B of
-        SPLIT_POPULATION_POLICY a one-liner.
+        An environment variable named ``flat_key`` wins over the YAML, e.g.
+        ``SPLIT_POPULATION_POLICY=assign_all python main.py``.
         """
         env_value = os.environ.get(flat_key)
         if env_value is None and split_key in self.SPLIT_CONFIG and self.SPLIT_CONFIG[split_key] is not None:
@@ -576,11 +647,9 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_uncertainty_config(self, uncertainty_key: str, flat_key: str, default: Any) -> Any:
-        """Read `uncertainty.<uncertainty_key>`, falling back to a flat key and then the default.
+        """Return ``uncertainty.<uncertainty_key>``, or else the flat key, or else ``default``.
 
-        Same shape as _get_split_config, so an env var of the flat name still overrides the YAML -
-        which is what makes UNCERTAINTY_N_MEMBERS=2 a one-liner when iterating on the pipeline
-        rather than on the numbers.
+        An environment variable named ``flat_key`` wins, e.g. ``UNCERTAINTY_N_MEMBERS=2``.
         """
         env_value = os.environ.get(flat_key)
         if (
@@ -592,10 +661,9 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_export_config(self, export_key: str, flat_key: str, default: Any) -> Any:
-        """Read `export_point_predictions.<export_key>`, then a flat key, then the default.
+        """Return ``export_point_predictions.<export_key>``, or else the flat key, or else ``default``.
 
-        Same shape as _get_uncertainty_config, so an env var of the flat name still overrides the
-        YAML - which is what makes EXPORT_POINT_PREDICTIONS=true a one-liner on an existing config.
+        An environment variable named ``flat_key`` wins, e.g. ``EXPORT_POINT_PREDICTIONS=true``.
         """
         env_value = os.environ.get(flat_key)
         if (
@@ -607,11 +675,7 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_interval_config(self, interval_key: str, flat_key: str, default: Any) -> Any:
-        """Read `uncertainty.interval.<interval_key>`, then a flat key, then the default.
-
-        Its own reader for the same reason _get_calibration_config has one: `interval` is a nested
-        mapping under `uncertainty`, so looking `method` up one level would miss it.
-        """
+        """Return ``uncertainty.interval.<interval_key>``, or else the flat key, or else ``default``."""
         env_value = os.environ.get(flat_key)
         if (
             env_value is None
@@ -622,11 +686,7 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_calibration_config(self, calibration_key: str, flat_key: str, default: Any) -> Any:
-        """Read `uncertainty.calibration.<calibration_key>`, then a flat key, then the default.
-
-        Its own reader rather than a second call to _get_uncertainty_config: `calibration` is a
-        nested mapping under `uncertainty`, so looking `alpha` up one level would miss it.
-        """
+        """Return ``uncertainty.calibration.<calibration_key>``, or else the flat key, or else ``default``."""
         env_value = os.environ.get(flat_key)
         if (
             env_value is None
@@ -637,10 +697,9 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_data_quality_config(self, quality_key: str, flat_key: str, default: Any) -> Any:
-        """Read `data_quality.<quality_key>`, falling back to a flat key and then the default.
+        """Return ``data_quality.<quality_key>``, or else the flat key, or else ``default``.
 
-        Same shape as _get_split_config, so an env var of the flat name still overrides the YAML -
-        which is what makes MAX_MISSING_COLUMN_RATIO=0.9 a one-liner when triaging a new dataset.
+        An environment variable named ``flat_key`` wins, e.g. ``MAX_MISSING_COLUMN_RATIO=0.9``.
         """
         env_value = os.environ.get(flat_key)
         if (
@@ -652,11 +711,13 @@ class Config:
         return self._get_config(flat_key, default)
 
     def _get_sklearn_categorical_config(self, key: str, default: Any) -> Any:
+        """Return a key of the scikit-learn config's ``categorical:`` block, or else the flat key."""
         if key in self.SKLEARN_CATEGORICAL_CONFIG and self.SKLEARN_CATEGORICAL_CONFIG[key] is not None:
             return self.SKLEARN_CATEGORICAL_CONFIG[key]
         return self._get_config(key, default)
     
     def _get_ignore_bands(self, default: Any) -> list:
+        """Return the band columns to ignore, from ``existing_hs_features`` or ``IGNORE_BANDS``."""
         hs_config = self._normalize_mapping(getattr(self, 'EXISTING_HS_FEATURES', {}))
         if hs_config.get('enabled', False) and hs_config.get('ignore', False):
             band_names = hs_config.get('band_names', [])
@@ -677,6 +738,7 @@ class Config:
             return default if isinstance(default, list) else []
 
     def _resolve_data_path(self, path_value: Optional[str]) -> Optional[str]:
+        """Return the full path of a data file or folder named relative to ``DATA_FOLDER``."""
         if not path_value:
             return None
         if os.path.isabs(path_value):
@@ -686,6 +748,10 @@ class Config:
         return os.path.abspath(os.path.join(self.DATA_FOLDER, path_value))
 
     def _resolve_config_path(self, path_value: Optional[str]) -> Optional[str]:
+        """Return the path of a config file named in the main file.
+
+        A relative path is looked for next to the main file first, then in the current directory.
+        """
         if not path_value:
             return None
         if os.path.isabs(path_value):
@@ -703,6 +769,7 @@ class Config:
 
     @staticmethod
     def _normalize_mapping(value: Any) -> dict:
+        """Return ``value`` as a dictionary: a dict as-is, a JSON string parsed, anything else ``{}``."""
         if value is None:
             return {}
         if isinstance(value, dict):
