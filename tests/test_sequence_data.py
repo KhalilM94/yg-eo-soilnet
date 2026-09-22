@@ -2,7 +2,7 @@
 
 The model-level guarantees that let a trained checkpoint outlive the window it was trained on - era
 invariance, length agnosticism and cadence agnosticism - are pinned against the CNN in
-tests/test_cnn_pipeline.py. The embedding tests here run through the CNN too: it owns the static
+tests/test_soil_cnn.py. The embedding tests here run through the CNN too: it owns the static
 encoder that turns the datamodule's categorical contract into learned embeddings.
 """
 
@@ -16,17 +16,14 @@ import pandas as pd
 import pytest
 import torch
 
+from tests.support.builders import sequence_builder_config
+from tests.support.cnn import built_sequence_bundle
 from yg_eo_soilnet.data_manager import DataManager
 from yg_eo_soilnet.datamodules.categorical import CategoricalEncoder
-from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder, to_decimal_year
+from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
-
-from tests.support.builders import sequence_builder_config
-
-
-# --- fixtures --------------------------------------------------------------
 
 
 def _write_csvs(tmp_path: Path, *, year_offset: int = 0, dates_by_point=None, with_categoricals=False):
@@ -498,3 +495,209 @@ def test_without_a_plan_the_legacy_ratio_carve_still_applies(tmp_path, logger):
 
     assert datamodule.test_idx_.size > 0
     assert datamodule.train_idx_.size > 0
+
+
+# --- labels, validity and the calendar grid on the data path ----------------------------------
+# x
+
+
+@pytest.mark.parametrize(
+    "dates_by_point, expected_years",
+    [
+        ({1: ["2022-01-01", "2022-06-01"], 2: ["2022-03-01"], 3: ["2022-09-01"]}, 1),
+        ({1: ["2020-01-01", "2022-06-01"], 2: ["2021-03-01"], 3: ["2022-09-01"]}, 3),
+        ({1: ["2017-01-01", "2025-12-01"], 2: ["2021-03-01"], 3: ["2022-09-01"]}, 9),
+        # 0.2 decimal years but two calendar rows: measuring the decimal span would under-allocate.
+        ({1: ["2021-11-01", "2022-01-01"], 2: ["2021-12-01"], 3: ["2022-02-01"]}, 2),
+    ],
+)
+def test_grid_years_is_inferred_from_the_data(tmp_path: Path, logger, dates_by_point, expected_years) -> None:
+    datamodule = SoilSequenceDataModule(built_sequence_bundle(tmp_path, logger, dates_by_point), batch_size=3)
+    assert datamodule.grid_years == expected_years
+
+
+def test_validity_reaches_the_batch_and_survives_padding(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01", "2022-03-01"], 2: ["2022-01-01"], 3: ["2022-05-01"]},
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+
+    batch = datamodule._collate_points(np.arange(3))
+    validity = batch["sequence_validity"]["s2"]
+
+    assert validity.shape == batch["sequences"]["s2"].shape
+    assert validity.dtype == torch.bool
+    # Point 2's first reading had a NaN S2_b3, which the builder median-filled.
+    assert bool(validity[1, 0, 0]) is True
+    assert bool(validity[1, 0, 1]) is False
+    # Padding is never claimed as measured.
+    assert not bool(validity[1, 1:].any())
+
+
+def test_standardization_ignores_median_filled_cells(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01", "2022-02-01"], 3: ["2022-01-01"]},
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+
+    measured = np.concatenate(
+        [
+            bundle.sequences["s2"][index][bundle.validity_for("s2", index)[:, 1], 1]
+            for index in datamodule.train_idx_
+            if len(bundle.sequences["s2"][index])
+        ]
+    )
+    np.testing.assert_allclose(datamodule.sequence_mean_["s2"][1], measured.mean(), rtol=1e-5)
+
+
+def test_label_columns_travel_on_the_bundle_without_becoming_features(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+    )
+
+    # Every LABEL_COLUMNS entry the frame carries, target included - selection happens in the model.
+    assert bundle.label_feature_names == ["target_a", "lab_dense", "lab_sparse"]
+    assert bundle.label_dim == 3
+    # ...and none of them leaked into the predictors.
+    assert bundle.static_feature_names == ["static_1"]
+    # NaN is preserved at build time: the fill value is a train-split median and the split does not
+    # exist yet.
+    assert bundle.label_missing_fraction("lab_sparse") > 0
+    assert bundle.label_missing_fraction("lab_dense") == 0
+    assert not np.isfinite(bundle.label_features[:, 2]).all()
+
+
+def test_a_split_targets_file_offers_the_same_lab_columns_as_a_joint_one(tmp_path: Path, logger) -> None:
+    """The regression: the join used to carry only the ACTIVE targets, so the same LABEL_COLUMNS
+    declaration meant 3 selectable columns on a joint file and 1 on split files."""
+    dates = {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]}
+    joint = built_sequence_bundle(tmp_path / "joint", logger, dates)
+    split = built_sequence_bundle(tmp_path / "split", logger, dates, split=True)
+
+    assert split.label_feature_names == joint.label_feature_names == ["target_a", "lab_dense", "lab_sparse"]
+    np.testing.assert_array_equal(
+        np.isfinite(split.label_features), np.isfinite(joint.label_features)
+    )
+    # The join must not have promoted anything: features come from filter_schema either way.
+    assert split.static_feature_names == joint.static_feature_names == ["static_1"]
+
+
+@pytest.mark.parametrize("split", [False, True])
+def test_the_carry_flag_off_leaves_no_lab_columns_on_the_bundle(tmp_path: Path, logger, split: bool) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+        carry_labels=False,
+        split=split,
+    )
+
+    assert bundle.label_feature_names == []
+    assert bundle.label_dim == 0
+    # Everything else is untouched, so a run that never opted in is unaffected.
+    assert bundle.static_feature_names == ["static_1"]
+    assert bundle.target_names == ["target_a"]
+
+
+def test_the_carry_flag_off_produces_batches_without_lab_values(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+        carry_labels=False,
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+
+    batch = datamodule._collate_points(np.arange(3))
+    assert datamodule.label_feature_names == []
+    assert batch["x_labels"].shape == (3, 0)
+    assert datamodule.label_median_ is None
+
+
+def test_selecting_a_column_with_nothing_carried_names_the_flag(tmp_path: Path, logger) -> None:
+    """The message the failing run should have shown: the config was right, the flag was off."""
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+        carry_labels=False,
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+
+    with pytest.raises(ValueError, match="CARRY_LABEL_COLUMNS"):
+        SoilCNNLightningModule(
+            static_dim=datamodule.static_dim,
+            target_dim=datamodule.target_dim,
+            target_names=datamodule.target_names,
+            modality_dims=datamodule.modality_dims,
+            auxiliary_available_names=datamodule.label_feature_names,
+            auxiliary_label_columns=["lab_dense"],
+        )
+
+
+def test_lab_values_reach_the_batch_standardized_with_validity(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+
+    assert datamodule.label_feature_names == ["target_a", "lab_dense", "lab_sparse"]
+    batch = datamodule._collate_points(np.arange(3))
+
+    assert batch["x_labels"].shape == (3, 3)
+    assert batch["x_label_validity"].dtype == torch.bool
+    # Filling happens, but never silently: the flag is what tells a fill from a measurement.
+    sparse_valid = batch["x_label_validity"][:, 2]
+    assert not bool(sparse_valid.all())
+    assert torch.isfinite(batch["x_labels"]).all()
+
+
+def test_lab_fill_and_scaling_come_from_the_train_split_only(tmp_path: Path, logger) -> None:
+    """A median fitted over val/test would leak their distribution into every filled cell."""
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {point: ["2022-01-01", "2022-02-01"] for point in range(1, 9)},
+    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.25, test_size=0.25, seed=5)
+    datamodule.setup("fit")
+
+    column = bundle.label_feature_names.index("lab_sparse")
+    train_values = bundle.label_features[datamodule.train_idx_, column]
+    measured = train_values[np.isfinite(train_values)]
+
+    assert measured.size and measured.size < train_values.size
+    np.testing.assert_allclose(datamodule.label_median_[column], np.median(measured), rtol=1e-5)
+
+
+def test_a_lab_column_with_no_measured_train_value_stays_inert(tmp_path: Path, logger) -> None:
+    bundle = built_sequence_bundle(
+        tmp_path,
+        logger,
+        {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
+    )
+    column = bundle.label_feature_names.index("lab_sparse")
+    bundle.label_features[:, column] = np.nan
+
+    datamodule = SoilSequenceDataModule(bundle, batch_size=3, val_size=0.0, test_size=0.0)
+    datamodule.setup("fit")
+    batch = datamodule._collate_points(np.arange(3))
+
+    # Nothing to fill from, so it becomes a constant the model can only ignore - not a NaN, and not
+    # a fabricated centre.
+    assert datamodule.label_median_[column] == 0.0
+    assert torch.isfinite(batch["x_labels"]).all()
+    assert not bool(batch["x_label_validity"][:, column].any())

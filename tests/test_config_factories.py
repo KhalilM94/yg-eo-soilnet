@@ -156,7 +156,7 @@ class FakeGridModel:
 
 
 class FakeGridFreeModel:
-    """Does NOT accept grid_years; stands in for the sequence encoders."""
+    """Does NOT accept grid_years; stands in for a model that does not rasterise."""
 
     def __init__(
         self,
@@ -528,7 +528,7 @@ def test_load_splitter_from_config_returns_none_when_disabled() -> None:
 # network, the checkpoint is only fetched on the first fit(), which is why the one test that really
 # fits is opt-in.
 #
-#     TABICL_INTEGRATION=1 pixi run -e dev pytest tests/test_tabicl_registry.py
+#     TABICL_INTEGRATION=1 pixi run -e dev pytest tests/test_config_factories.py -k tabicl
 #
 # If the download dies with "Network error: Request middleware error", the HuggingFace xet CDN is
 # blocked; prefix HF_HUB_DISABLE_XET=1 to fall back to the plain HTTP transfer.
