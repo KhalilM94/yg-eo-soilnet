@@ -66,14 +66,25 @@ core-gpu = { features = ["prod-core", "gpu-backend"], solve-group = "default" }
 dev = { features = ["prod-core", "gpu-backend", "dev"], solve-group = "core-gpu" }
 explore = { features = ["prod-core", "cpu-backend", "explore"]}
 
+# Tasks every environment can run (core, core-gpu, dev, explore).
+[tool.pixi.tasks]
+# Opens the MLflow results browser at http://127.0.0.1:5000
+mlflow = { cmd = "mlflow ui", env = { MLFLOW_ALLOW_FILE_STORE = "true" } }
+# A small made-up dataset, and a full pipeline run on it - see the Quickstart in README.md.
+demo-data = "python examples/make_demo_data.py"
+demo = "python main.py --config-path examples/demo_config/main_config.yml"
+
 [tool.pixi.feature.dev.tasks]
 dev-env = "pixi shell -e dev"
-mlflow = { cmd = "mlflow ui", env = { MLFLOW_ALLOW_FILE_STORE = "true" } }
 test = "pytest ./tests"
 # Everything but the tests marked slow (a subprocess, a numba compile, end-to-end sklearn training).
 test-fast = "pytest -m 'not slow' ./tests"
 test-with-cov = "pytest --cov=yg_eo_soilnet tests/"
-lint = "ruff lint"
+# Runs the ">>>" examples written inside the docstrings, so they cannot drift from the code.
+doctest = "pytest --doctest-modules src/yg_eo_soilnet"
+lint = "ruff check"
+# Builds the documentation website into docs/_build/html; any warning fails the build.
+docs = "sphinx-build -W --keep-going -b html docs docs/_build/html"
 
 [tool.pixi.feature.explore.tasks]
 notebook = "jupyter lab"
@@ -84,9 +95,24 @@ py-xgboost = ">=3.3.0,<4"
 [dependency-groups]
 explore = ["jupyterlab", "scikit-gstat", "pykrige", "xarray"]
 test = ["pytest", "ruff", "pytest-cov"]
-docs = ["sphinx"]
+docs = ["sphinx", "sphinx-rtd-theme", "myst-parser"]
 dev = [{include-group = "test"}, {include-group = "docs"}]
 
+
+[tool.ruff]
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+# D1: every public module, class, method and function must have a docstring.
+extend-select = ["D1"]
+# __init__ and magic methods are described in their class docstring (NumPy convention).
+ignore = ["D105", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D"]
 
 [tool.pytest.ini_options]
 # Registered because warnings are errors: an unknown mark would fail collection.
