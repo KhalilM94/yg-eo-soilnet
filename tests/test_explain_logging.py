@@ -1,17 +1,16 @@
-"""A joint model is explained ONCE, and each target run gets only its own slice.
+"""How explanations are gated and logged: the off-switch, the allow/deny lists, the budget skip,
+and one explanation per joint model, sliced per target.
 
-An explanation is a property of the fitted MODEL, not of a target, but it used to be built inside
-the per-target fan-out - so a joint fit paid for the same answer once per target. On the Lightning
-side that was worse than wasteful: the explainer returns every output whatever `target` says, so
-each of the N child runs received all N results, nested them under explain/<target>/, and reported
-in its own run summary that it had explained the other targets too. Run
-45c78e72b5c94aedaf6e771b7c0a893f shows it: three children of one soil_cnn model run, nine artifact
-sets, and three copies of explain/clay_pct/shap_values.parquet that disagree with each other by up
-to 2.8% of the mean |SHAP| because GradientExplainer is stochastic.
+EXPLAIN_ENABLED has to be a real off-switch, not a plot suppressor.
 
-These tests pin the two halves of the fix: built once, logged one slice per run.
+shap 0.48 pulls in numba and is slow to import, and the suite runs with
+``filterwarnings = ["error"]``, so a run that asked for no explanations must not import it at all.
+The `"shap" not in sys.modules` assertion here is what fails if anyone hoists the import to module
+scope in mlflow_loggers or explain/__init__.
 """
 
+import pathlib
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -20,9 +19,252 @@ import pandas as pd
 import pytest
 
 import yg_eo_soilnet.logger.mlflow_loggers as loggers_module
+from tests.support.fakes import RecordingRuns
+from yg_eo_soilnet.explain.sklearn_explainer import ExplainBudgetExceeded
 from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
 
-from tests.support.fakes import RecordingRuns
+
+@pytest.fixture
+def child_logger() -> ChildRunLogger:
+    return ChildRunLogger()
+
+
+def test_disabled_switch_returns_without_logging_anything(child_logger, monkeypatch) -> None:
+    log_artifact = MagicMock()
+    monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", log_artifact)
+
+    summary = child_logger._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=False),
+        target="om",
+        model_name="soil_cnn",
+        backend="lightning",
+        payload={},
+    )
+
+    assert summary == {"enabled": False, "reason": "EXPLAIN_ENABLED is false"}
+    log_artifact.assert_not_called()
+
+
+def test_disabled_switch_does_not_import_shap(child_logger, monkeypatch) -> None:
+    monkeypatch.delitem(sys.modules, "shap", raising=False)
+
+    child_logger._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=False),
+        target="om",
+        model_name="soil_cnn",
+        backend="lightning",
+        payload={"model": object(), "bundle": object(), "target": "om"},
+    )
+
+    assert "shap" not in sys.modules, (
+        "shap was imported on a run with EXPLAIN_ENABLED false; keep the import inside the "
+        "explainer functions and the guard ahead of it"
+    )
+
+
+def test_explain_models_allowlist_skips_models_it_does_not_name(child_logger, monkeypatch) -> None:
+    log_artifact = MagicMock()
+    monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", log_artifact)
+
+    summary = child_logger._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_MODELS=["XGBoost"]),
+        target="om",
+        model_name="TabICL",
+        backend="sklearn",
+        payload={},
+    )
+
+    assert summary["enabled"] is False
+    assert "TabICL" in summary["reason"]
+    log_artifact.assert_not_called()
+
+
+def test_a_named_model_is_not_skipped(child_logger) -> None:
+    """The allowlist must not skip the model it names; the explainer then fails on the empty
+    payload, which is recorded rather than raised."""
+    summary = child_logger._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_MODELS=["XGBoost"]),
+        target="om",
+        model_name="XGBoost",
+        backend="sklearn",
+        payload={},
+    )
+
+    assert summary["enabled"] is True
+    assert summary["logged"] is False
+
+
+def test_explainer_failure_is_recorded_not_raised(child_logger) -> None:
+    """Losing a finished training run because an explainer choked is a bad trade."""
+    summary = child_logger._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=True),
+        target="om",
+        model_name="soil_cnn",
+        backend="not_a_backend",
+        payload={},
+    )
+
+    assert summary["enabled"] is True
+    assert summary["logged"] is False
+    assert "ValueError" in summary["error"]
+
+
+def test_explain_fail_on_error_re_raises(child_logger) -> None:
+    with pytest.raises(ValueError, match="Unknown explain backend"):
+        child_logger._log_shap_artifacts(
+            config=SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_FAIL_ON_ERROR=True),
+            target="om",
+            model_name="soil_cnn",
+            backend="not_a_backend",
+            payload={},
+        )
+
+
+def test_switch_defaults_to_on_when_the_config_predates_the_key(child_logger) -> None:
+    """A SimpleNamespace config with no EXPLAIN_* attributes at all must not crash."""
+    summary = child_logger._log_shap_artifacts(
+        config=SimpleNamespace(),
+        target="om",
+        model_name="soil_cnn",
+        backend="not_a_backend",
+        payload={},
+    )
+
+    assert summary["enabled"] is True
+
+
+# The switch's config plumbing is covered in tests/test_config.py, beside the base_config_paths
+# fixture that builds a complete config tree.
+
+
+# --- the budget skip and the TabICL denylist --------------------------------------------------
+# The explain gate: a budget skip is a decision, and the TabICL denylist.
+
+
+def test_the_logger_reports_a_budget_skip_as_a_decision_not_a_crash() -> None:
+    """A skipped explanation must not read like a failed run, and must not be escalated."""
+    summary = ChildRunLogger()._log_shap_artifacts(
+        config=SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_FAIL_ON_ERROR=True),
+        target="om",
+        model_name="TabICL",
+        backend="sklearn",
+        payload={"fitted_estimator": _Exploder(), "X_train": None, "X_test": None, "target": "om"},
+    )
+
+    assert summary["skipped"] is True
+    assert summary["logged"] is False
+    assert "error" not in summary
+    assert "EXPLAIN_MAX_EVALS" in summary["reason"]
+
+
+class _Exploder:
+    """Raises the budget error the moment the explainer touches it."""
+
+    @property
+    def named_steps(self):
+        raise ExplainBudgetExceeded(
+            "model-agnostic SHAP would need about 1,080,000 model evaluations, over the "
+            "EXPLAIN_MAX_EVALS budget of 200,000."
+        )
+
+
+# --- the TabICL denylist ----------------------------------------------------
+
+
+def _skip_summary(config, model_name: str) -> dict:
+    """Run the guard alone; the payload is never reached when a model is skipped."""
+    return ChildRunLogger()._log_shap_artifacts(
+        config=config,
+        target="om",
+        model_name=model_name,
+        backend="sklearn",
+        payload={},
+    )
+
+
+def test_tabicl_is_skipped_by_name_with_a_reason() -> None:
+    summary = _skip_summary(SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"]), "TabICL")
+
+    assert summary["skipped"] is True
+    assert summary["logged"] is False
+    assert "EXPLAIN_SKIP_MODELS" in summary["reason"]
+    # It reads as a decision, not a crash.
+    assert "error" not in summary
+
+
+@pytest.mark.parametrize("model_name", ["XGBoost", "GradientBoosting", "Ridge", "PLSRegression"])
+def test_every_other_model_is_still_explained(model_name: str) -> None:
+    """'Explainability for all models except TabICL' stated directly.
+
+    These get past the guard and fail later on the empty payload, which is what distinguishes
+    "was not skipped" from "was skipped".
+    """
+    summary = _skip_summary(
+        SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"]), model_name
+    )
+
+    assert summary.get("skipped") is not True
+    assert summary["enabled"] is True
+
+
+def test_the_allowlist_overrides_the_denylist() -> None:
+    """Naming a model explicitly is a deliberate request and must win.
+
+    Otherwise the two settings contradict each other and EXPLAIN_MODELS silently does nothing -
+    the user asks for the expensive explanation and gets neither a plot nor a reason.
+    """
+    summary = _skip_summary(
+        SimpleNamespace(
+            EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"], EXPLAIN_MODELS=["TabICL"]
+        ),
+        "TabICL",
+    )
+
+    assert summary.get("skipped") is not True
+    assert summary["enabled"] is True
+
+
+def test_the_off_switch_still_wins_over_everything() -> None:
+    summary = _skip_summary(
+        SimpleNamespace(EXPLAIN_ENABLED=False, EXPLAIN_MODELS=["TabICL"], EXPLAIN_SKIP_MODELS=[]),
+        "TabICL",
+    )
+
+    assert summary["enabled"] is False
+
+
+def test_a_config_without_the_key_skips_nothing() -> None:
+    """A SimpleNamespace config predating EXPLAIN_SKIP_MODELS must not start skipping models."""
+    summary = _skip_summary(SimpleNamespace(EXPLAIN_ENABLED=True), "TabICL")
+
+    assert summary.get("skipped") is not True
+
+
+def test_the_shipped_default_excludes_tabicl_and_nothing_else(tmp_path) -> None:
+    """No per-run configuration should be needed for the behaviour the user asked for."""
+    import yaml
+
+    document = yaml.safe_load(
+        (pathlib.Path(__file__).resolve().parents[1] / "configs" / "main_config.yml").read_text()
+    )
+
+    assert document["common"]["EXPLAIN_SKIP_MODELS"] == ["TabICL"]
+    assert document["common"]["EXPLAIN_MODELS"] == []
+
+
+# --- explained once per joint model -----------------------------------------------------------
+# A joint model is explained ONCE, and each target run gets only its own slice.
+#
+# An explanation is a property of the fitted MODEL, not of a target, but it used to be built inside
+# the per-target fan-out - so a joint fit paid for the same answer once per target. On the Lightning
+# side that was worse than wasteful: the explainer returns every output whatever `target` says, so
+# each of the N child runs received all N results, nested them under explain/<target>/, and reported
+# in its own run summary that it had explained the other targets too. Run
+# 45c78e72b5c94aedaf6e771b7c0a893f shows it: three children of one soil_cnn model run, nine artifact
+# sets, and three copies of explain/clay_pct/shap_values.parquet that disagree with each other by up
+# to 2.8% of the mean |SHAP| because GradientExplainer is stochastic.
+#
+# These tests pin the two halves of the fix: built once, logged one slice per run.
 
 
 def _quiet_logger(monkeypatch):

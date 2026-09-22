@@ -11,7 +11,7 @@ package at module scope.** ``shap`` pulls in numba and is slow to import, so a r
 ``EXPLAIN_ENABLED: false`` must not pay for it - and, because the test suite runs with
 ``filterwarnings = ["error"]``, must not risk a warning from a library it never asked for.
 ``ChildRunLogger._shap_gate`` checks the switch before this module is imported;
-``tests/test_explain_switch.py`` asserts ``"shap" not in sys.modules`` after a disabled run.
+``tests/test_explain_logging.py`` asserts ``"shap" not in sys.modules`` after a disabled run.
 """
 
 from __future__ import annotations

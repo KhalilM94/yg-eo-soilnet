@@ -978,9 +978,9 @@ class ChildRunLogger:
         The whole seam in one call. Both training families now use the two halves separately - they
         build on the model run and log each slice in its target's run - so nothing in src calls
         this; it is kept because it is the smallest thing that exercises the gate, the budget skip
-        and the failure summary end to end, which is what tests/test_explain_switch.py and
-        tests/test_explain_budget.py do with it. It composes the same units production uses, so
-        there is no second copy of that logic to drift.
+        and the failure summary end to end, which is what tests/test_explain_logging.py does with
+        it. It composes the same units production uses, so there is no second copy of that logic
+        to drift.
         """
         results, summary = self._build_shap_results(config, target, model_name, backend, payload)
         if results is None:

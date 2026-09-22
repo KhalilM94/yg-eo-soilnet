@@ -16,7 +16,7 @@ one flat, comparable feature space.
 Attribution is summed within each group (over embedding dimensions, over a band's value and validity
 channels, and over the year and month axes). Summing is the correct reduction: SHAP values are
 additive, so a group's contribution is the sum of its parts', and the additivity check in
-tests/test_explain.py is what pins that.
+tests/test_explain_lightning.py is what pins that.
 """
 
 from __future__ import annotations

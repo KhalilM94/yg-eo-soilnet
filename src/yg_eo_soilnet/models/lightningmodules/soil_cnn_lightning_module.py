@@ -925,7 +925,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         BOTH the encoder input and the additive offset are derived. Splitting them across two parts,
         or reading the offset off the batch, would break the equality
         ``forward_from_parts(explanation_parts(batch)[0]) == forward(batch)`` that
-        tests/test_explain.py pins.
+        tests/test_explain_lightning.py pins.
         """
         values = batch_get(batch, "x_labels")
         if values is None:
@@ -1075,7 +1075,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
     # forward_from_parts() rebuilds the prediction from exactly those tensors. The pair must agree:
     # forward_from_parts(explanation_parts(batch)[0]) has to equal forward(batch) exactly, because
     # any drift between the two silently attributes importance to a model that is not the one being
-    # scored. tests/test_explain.py pins that equality.
+    # scored. tests/test_explain_lightning.py pins that equality.
     #
     # Neither method is called by forward, _shared_step or predict_step. Training is bit-identical
     # whether or not anything ever explains the model.
