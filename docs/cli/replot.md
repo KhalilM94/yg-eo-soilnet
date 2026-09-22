@@ -28,7 +28,7 @@ Exactly one of `--run-id`, `--parent-run-id` or `--experiment` is required.
 
 | Option | Default | What it does |
 |---|---|---|
-| `--run-id` | - | Redraw one run's figures. For a main run, that means its two leaderboard figures. |
+| `--run-id` | - | Redraw one run's figures. For a {term}`main run`, that means its two leaderboard figures. |
 | `--parent-run-id` | - | Redraw a whole training run: every model's figures, then the leaderboard figures. |
 | `--experiment` | - | Redraw every training run in this MLflow experiment, by name or id. |
 | `--config-path` | `configs/main_config.yml` | The main configuration file, read only to find where the runs are recorded. |

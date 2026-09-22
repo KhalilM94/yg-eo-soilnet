@@ -117,8 +117,8 @@ Every model is scored on the test points in the target's own units: RMSE, MAE, b
 Both families are scored by the same code, so the numbers mean the same thing.
 
 Everything goes into MLflow: the settings, the scores, a predicted-against-measured figure, the
-table of test predictions, the saved model, and on the main run a leaderboard comparing every model
-on the same points. See [Reading the results](outputs.md).
+table of test predictions, the saved model, and on the {term}`main run` a leaderboard comparing
+every model on the same points. See [Reading the results](outputs.md).
 
 ## The two scales
 

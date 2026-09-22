@@ -26,7 +26,7 @@ python main.py
 pixi run -e core mlflow
 ```
 
-`leaderboard.csv` on the main run has one row per model per target, ranked. Rows are comparable
+`leaderboard.csv` on the {term}`main run` has one row per model per target, ranked. Rows are comparable
 because the points behind them are the same ones.
 
 ## 2. One model per target instead of one for all
