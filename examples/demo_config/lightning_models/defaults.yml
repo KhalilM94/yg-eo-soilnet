@@ -1,0 +1,28 @@
+# Settings shared by every deep-learning model in the demo. Each model's own settings live in its
+# own file beside this one (soil_cnn.yml). configs/lightning/models/defaults.yml explains each key.
+
+defaults:
+  modeltype: dl
+  trainer_args:
+    max_epochs: 40                # at most 40 passes over the training points
+    accelerator: cpu              # the demo runs on the processor; "cuda" uses a GPU
+    devices: 1
+    precision: 32-true
+    gradient_clip_val: 1.0
+    log_every_n_steps: 5
+    enable_checkpointing: true
+    deterministic: true
+  callbacks:
+    early_stopping:
+      monitor: val_loss           # stop once the validation error stops improving...
+      mode: min
+      patience: 8                 # ...for 8 passes in a row
+    checkpoint:
+      monitor: val_loss           # keep the version of the model with the lowest validation error
+      mode: min
+      save_top_k: 1
+  datamodule_init_args:
+    batch_size: 32
+    target_transform: log1p       # train on log-transformed targets; predictions come back in units
+    num_workers: 0
+    shuffle: true
