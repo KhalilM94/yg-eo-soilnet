@@ -6,7 +6,7 @@ import geopandas as gpd
 from shapely.geometry import box
 from shapely.ops import transform as shapely_transform
 from pyproj import CRS, Transformer
-from sklearn.metrics import make_scorer, root_mean_squared_error
+from sklearn.metrics import root_mean_squared_error
 from mlflow.models import make_metric
 
 class LogTransformer(BaseEstimator, TransformerMixin):
