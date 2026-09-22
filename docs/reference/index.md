@@ -9,5 +9,6 @@ docstring.
 scripts
 data
 models
+training
 utilities
 ```

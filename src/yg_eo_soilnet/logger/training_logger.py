@@ -1,3 +1,5 @@
+"""Where a run's messages go: the terminal, and a log file saved with the run."""
+
 import logging
 import os
 import sys
@@ -5,9 +7,27 @@ import tempfile
 from typing import Optional
 
 class TrainingLogger:
-    """
-    A utility class for configuring and retrieving a logger for training pipelines.
-    Logs are written to both console and a timestamped log file.
+    """Set up where a run's messages go: the terminal, and a log file.
+
+    The log file is uploaded with the run at the end, so the messages stay with the results.
+
+    Parameters
+    ----------
+    name : str, default "ML"
+        The logger's name, shown in every line.
+    log_dir : str, optional
+        Where the log file is written. By default a new temporary directory, which is not cleaned
+        up while the run is going: the file is uploaded once training has finished.
+    log_filename : str, default "logger"
+        The file is named ``<log_filename>_training.log``.
+    enable_file_logging : bool, default True
+        Write a file at all; false leaves only the terminal.
+
+    Examples
+    --------
+    >>> logger = TrainingLogger(name="demo").get_logger()
+    >>> logger.name
+    'demo'
     """
 
     def __init__(
@@ -17,24 +37,12 @@ class TrainingLogger:
         log_filename: str = "logger",
         enable_file_logging: bool = True,
     ) -> None:
-        """
-        Initialize the logger with a given name and log directory.
-
-        Args:
-            name (str): Name of the logger. Default is 'ML'.
-            log_dir (str): Directory where log files are written. Defaults to a private
-                temporary directory owned by this logger.
-        """
         self.logger: logging.Logger = logging.getLogger(name)
         self.logger.setLevel(logging.INFO)
         self.logger.propagate = False
 
-        # mkdtemp, not TemporaryDirectory: a log file must outlive the logger object. The previous
-        # default argument `os.path.join(tempfile.TemporaryDirectory().name, "logs")` was evaluated
-        # once at import (so every logger shared one directory) and kept only `.name`, so the
-        # discarded handle's finalizer deleted that directory out from under the open file
-        # handlers - and main.py uploads that file to MLflow after training. mkdtemp has no
-        # finalizer, so the logs survive until the OS reaps /tmp.
+        # A directory nothing will clean up while the run is going: the log file has to outlive
+        # this object, because it is uploaded with the run after training.
         self._owns_log_dir = log_dir is None
         if log_dir is None:
             log_dir = os.path.join(tempfile.mkdtemp(prefix="yg_eo_soilnet_logs_"), "logs")
@@ -44,13 +52,7 @@ class TrainingLogger:
         self._setup_handlers()
 
     def _setup_handlers(self) -> None:
-        """
-        Sets up file and stream handlers for the logger.
-
-        Args:
-            log_dir (str): Directory where log files will be saved.
-            name (str): Name of the logger used in the filename.
-        """
+        """Send the messages to the terminal, and to the log file when one is wanted."""
         if self.logger.hasHandlers():
             self.logger.handlers.clear()
 
@@ -73,10 +75,10 @@ class TrainingLogger:
             self.logger.addHandler(file_handler)
 
     def get_logger(self) -> logging.Logger:
-        """
-        Returns the configured logger.
+        """The configured logger, ready to use.
 
-        Returns:
-            logging.Logger: The configured logger instance.
+        Returns
+        -------
+        logging.Logger
         """
         return self.logger

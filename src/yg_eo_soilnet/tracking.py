@@ -1,18 +1,14 @@
-"""Where MLflow records runs, under which experiment, and which registered version ships.
+"""Where runs are recorded, how abandoned ones are tidied up, and which saved model is champion.
 
-Both entry points - ``main.py`` for training and ``tune.py`` for HPO - configure tracking through
-this module, because two properties have to hold and neither is MLflow's default.
+Every tool configures MLflow through this module, so runs always land in the same place: the
+``mlruns/`` folder beside the project unless ``MLFLOW_TRACKING_URI`` says otherwise, under the
+:term:`experiment` named by ``MLFLOW_EXPERIMENT_NAME``.
 
-**An experiment's ``artifact_location`` is an absolute path fixed at creation time.** The original
-``Soil_Model_Training_Experiment`` was created in a different checkout, so its metadata has been
-written under this repo's ``mlruns/`` while its artifacts went to the old checkout's - a split that
-survives any amount of copying, because it lives in the experiment's ``meta.yaml``. Creating the
-experiment under the intended tracking root is the only thing that fixes it, and it is why the
-experiment name is configurable rather than hardcoded.
-
-**MLflow 3.14 put the filesystem backend in maintenance mode** and raises unless
-``MLFLOW_ALLOW_FILE_STORE`` is set. Until now only the ``pixi run mlflow`` task set it, so whether a
-process could write to ``mlruns/`` at all depended on how it happened to be launched.
+It also repairs what a killed process leaves behind. A run whose process is killed outright stays
+marked as still running for ever, and if it died at the wrong moment its record can be left empty,
+which makes MLflow unable to read the whole experiment. Both are cleaned up at the start of a run,
+and only for runs whose process is genuinely gone: a run another process is still writing is never
+touched.
 """
 
 from __future__ import annotations
@@ -29,18 +25,28 @@ import mlflow
 import numpy as np
 import yaml
 
+#: The experiment runs land in unless ``MLFLOW_EXPERIMENT_NAME`` says otherwise.
 DEFAULT_EXPERIMENT_NAME = "Soil_Model_Training_v2"
 
 _TRACKING_KEYS = ("MLFLOW_TRACKING_URI", "MLFLOW_EXPERIMENT_NAME")
 
 
 def tracking_settings(config_path: str | os.PathLike | None) -> SimpleNamespace:
-    """Read just the tracking keys from a main config, env first.
+    """Read where runs should go, from a configuration file and the environment.
 
-    Deliberately NOT a full :class:`Config`. Tracking has to be configured before anything else
-    happens, and building the whole config tree first would make "where do runs go" depend on the
-    data spec, the registries and every path they reference being valid - so a typo in an unrelated
-    file would decide that runs land nowhere.
+    Only those two settings, not the whole configuration: where runs go must not depend on every
+    other file being valid, or a typo somewhere unrelated would decide that a run is recorded
+    nowhere. The environment wins over the file.
+
+    Parameters
+    ----------
+    config_path : str or path-like or None
+        The main configuration file. An unreadable one is treated as empty.
+
+    Returns
+    -------
+    types.SimpleNamespace
+        With ``MLFLOW_TRACKING_URI`` and ``MLFLOW_EXPERIMENT_NAME``.
     """
     values: dict[str, str] = {}
 
@@ -57,7 +63,7 @@ def tracking_settings(config_path: str | os.PathLike | None) -> SimpleNamespace:
                     values[key] = str(source[key] or "")
                     break
 
-    # Env wins, matching Config._get_config's precedence.
+    # The environment wins, as it does everywhere else in the configuration.
     for key in _TRACKING_KEYS:
         override = os.environ.get(key)
         if override is not None:
@@ -70,26 +76,22 @@ def tracking_settings(config_path: str | os.PathLike | None) -> SimpleNamespace:
 
 
 def default_tracking_uri() -> str:
-    """``<repo>/mlruns`` as a file URI.
+    """The ``mlruns/`` folder beside the project, as a URI.
 
-    Anchored to this package's location rather than to the working directory: a run launched from
-    elsewhere would otherwise silently start a second, empty ``mlruns/`` beside itself.
+    Found from this file's own location, not the working directory, so a run started from another
+    folder does not quietly begin a second, empty store beside itself.
     """
     return (Path(__file__).resolve().parents[2] / "mlruns").as_uri()
 
 
 def resolve_tracking_uri(config=None) -> str:
+    """Where runs are recorded: ``MLFLOW_TRACKING_URI`` if set, else :func:`default_tracking_uri`."""
     configured = str(getattr(config, "MLFLOW_TRACKING_URI", "") or "").strip()
     return configured or default_tracking_uri()
 
 
 def resolve_local_tracking_root(tracking_uri: str) -> Path | None:
-    """The directory a file-backed tracking URI points at, or ``None`` for a real backend.
-
-    Lives here rather than in ``main.py`` because two callers now need it: the run-folder export,
-    and :func:`repair_corrupt_runs`, which has to reach the store as files because the thing it
-    repairs is exactly what stops MLflow's own API from reading it.
-    """
+    """The folder a file-based tracking URI points at, or None for a server or database."""
     parsed = urlparse(tracking_uri)
     if parsed.scheme not in ("", "file"):
         return None
@@ -99,11 +101,14 @@ def resolve_local_tracking_root(tracking_uri: str) -> Path | None:
 
 
 def configure_tracking_uri(config=None) -> str:
-    """Point MLflow at the tracking root, without touching the current experiment.
+    """Point MLflow at where runs are recorded, leaving the current experiment alone.
 
-    Split out because resuming an existing run by id must NOT switch experiments: MLflow refuses
-    ``start_run(run_id=...)`` when the active experiment is not the one that run belongs to, so a
-    caller that only wants to reach an existing run needs the URI without the rest.
+    Used by the tools that reopen an existing run - which belongs to its own experiment already.
+
+    Returns
+    -------
+    str
+        The tracking URI now in force.
     """
     tracking_uri = resolve_tracking_uri(config)
 
@@ -115,11 +120,22 @@ def configure_tracking_uri(config=None) -> str:
 
 
 def configure_tracking(config=None, experiment_name: str | None = None) -> str:
-    """Point MLflow at the configured tracking root and experiment; return the experiment name.
+    """Point MLflow at where runs are recorded, and at the experiment to record them under.
 
-    Must run before any run starts - including the implicit one that
-    ``SklearnDataSplitter.split_data`` triggers by calling ``mlflow.log_artifacts`` - or the run
-    lands in whatever experiment happened to be current.
+    Must be called before anything opens a run, or that run lands in whatever experiment happened
+    to be current.
+
+    Parameters
+    ----------
+    config : Config, optional
+        Read for ``MLFLOW_TRACKING_URI`` and ``MLFLOW_EXPERIMENT_NAME``.
+    experiment_name : str, optional
+        Use this experiment instead of the configured one.
+
+    Returns
+    -------
+    str
+        The experiment name in force.
     """
     configure_tracking_uri(config)
 
@@ -129,41 +145,39 @@ def configure_tracking(config=None, experiment_name: str | None = None) -> str:
     try:
         mlflow.set_experiment(name)
     except mlflow.exceptions.MlflowException:  # type: ignore[attr-defined]
-        # Restore or create a new experiment if previously deleted.
+        # Create it, or bring back one that was deleted.
         mlflow.create_experiment(name)
         mlflow.set_experiment(name)
     return name
 
 
-# --- run ownership and stale-run cleanup ----------------------------------------------------
-# An MLflow run that dies without unwinding stays RUNNING forever. `ActiveRun.__exit__` marks a run
-# FAILED on a normal exception, but it never runs when the process is SIGKILLed - which is what the
-# kernel's OOM killer sends. A run left RUNNING reads as "still working", or worse as a model that
-# was successfully made, and it is what made an OOM-killed multi-target run look like a bug in the
-# target grouping.
-#
-# The fix has to be a SWEEP rather than a signal handler, because SIGKILL cannot be caught. The
-# handlers below only cover the signals that can be.
+# --- tidying up runs whose process died ----------------------------------------------------
+# A run whose process is killed outright stays marked as running for ever, which reads as "still
+# working" or, worse, as a model that was made successfully. That kind of death cannot be caught,
+# so the next run sweeps up after it. Each run records who wrote it, which is how a later process
+# can tell an abandoned run from one still being written.
 
+#: Tag recording which machine wrote a run.
 HOST_NAME_TAG = "host_name"
+#: Tag recording which process wrote it.
 HOST_PID_TAG = "host_pid"
 
 
 def run_owner_tags() -> dict[str, str]:
-    """Who is writing this run. Tagged so a later process can tell finished from abandoned."""
+    """This machine and process, tagged on every run so abandoned ones can be recognised."""
     import socket
 
     return {HOST_NAME_TAG: socket.gethostname(), HOST_PID_TAG: str(os.getpid())}
 
 
 def _process_is_alive(pid: int) -> bool:
-    """Whether a pid on THIS host still exists. Signal 0 checks without delivering anything."""
+    """Whether a process with this id is still running on this machine."""
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
     except PermissionError:
-        # Alive, owned by somebody else. Not ours to clean up either way.
+        # Running, but someone else's. Not ours to tidy up either way.
         return True
     except (OverflowError, ValueError):
         return False
@@ -171,12 +185,22 @@ def _process_is_alive(pid: int) -> bool:
 
 
 def close_stale_runs(experiment_name: str | None = None, logger: Any = None) -> list[str]:
-    """Mark runs abandoned by a dead process as KILLED. Returns the run ids closed.
+    """Mark as killed the runs whose process is gone, so they stop reading as still running.
 
-    Deliberately narrow. Only a run that is RUNNING, tagged with THIS hostname, and whose recorded
-    pid no longer exists is touched. Sweeping on "status is RUNNING" alone would let one training
-    process terminate a second one running concurrently, which is a far worse failure than the
-    phantom runs this cleans up.
+    Deliberately narrow: only a run still marked running, written by this machine, whose process no
+    longer exists. Sweeping more broadly would let one run end another that is still going.
+
+    Parameters
+    ----------
+    experiment_name : str, optional
+        Which experiment to sweep; the configured one unless given.
+    logger : logging.Logger, optional
+        Where the report goes.
+
+    Returns
+    -------
+    list of str
+        The runs closed. Never raises: failing to tidy up is not a reason to refuse to train.
     """
     import socket
 
@@ -192,8 +216,7 @@ def close_stale_runs(experiment_name: str | None = None, logger: Any = None) -> 
             max_results=1000,
         )
     except Exception as exc:  # pragma: no cover - tracking store unreachable
-        # Never fatal: a failed sweep is cosmetic, and refusing to train because old runs could not
-        # be tidied would be the worse trade.
+        # Never fatal: refusing to train because old runs could not be tidied is the worse trade.
         if logger is not None:
             logger.warning(f"Could not sweep stale runs: {type(exc).__name__}: {exc}")
         return []
@@ -207,7 +230,7 @@ def close_stale_runs(experiment_name: str | None = None, logger: Any = None) -> 
             continue
         raw_pid = tags.get(HOST_PID_TAG)
         if raw_pid is None:
-            # Written before runs carried ownership tags. Left alone rather than guessed at.
+            # Written before runs recorded who owned them. Left alone rather than guessed at.
             continue
         try:
             pid = int(raw_pid)
@@ -230,30 +253,21 @@ def close_stale_runs(experiment_name: str | None = None, logger: Any = None) -> 
     return closed
 
 
-# --- corrupt run repair ---------------------------------------------------------------------
-# The sweep above assumes it can LIST the runs. It cannot, if the same process death that stranded
-# a run also truncated its `meta.yaml`: MLflow rewrites that file in place to terminate a run, and
-# `write_yaml` truncates before it writes, so dying inside that window leaves zero bytes behind.
-#
-# One such file poisons the whole experiment. `FileStore._read_yaml` retries an empty file twice -
-# it assumes a CONCURRENT write - then returns None, and `_read_persisted_run_info_dict` calls
-# `.copy()` on it. `_list_run_infos` catches only `MissingConfigException`, so the AttributeError
-# escapes every `search_runs`. A MISSING meta.yaml is handled; an EMPTY one has no handler in the
-# read path at all, which is why this is ours to work around rather than MLflow's to skip.
-#
-# It reads as a crash in whatever happened to touch MLflow next. Here it surfaced at the END of a
-# successful run, in the parent summary, after the models had already been written.
+# --- repairing runs whose record was left empty --------------------------------------------
+# The sweep above has to be able to list the runs, and it cannot if a process died while rewriting
+# a run's own record: that file is emptied before it is rewritten, so dying in between leaves
+# nothing behind. One such file makes MLflow unable to read the whole experiment, which surfaces as
+# a crash in whatever touches MLflow next - here, at the end of an otherwise successful run.
 
-# Mirrors FileStore.RESERVED_EXPERIMENT_FOLDERS. These sit beside the run directories and are not
-# runs; none carries a top-level meta.yaml, so this is belt-and-braces over the corruption check.
+# Folders that sit beside the runs and are not runs.
 _RESERVED_EXPERIMENT_FOLDERS = ("tags", "datasets", "traces", "models")
 
-# The timestamp main.py builds run names from: `Run_%Y%m%d_%H%M%S`.
+# The timestamp in a run name, as main.py writes it: Run_20260922_113000.
 _RUN_NAME_TIMESTAMP = re.compile(r"\d{8}_\d{6}")
 
 
 def _read_run_tag(run_dir: Path, tag: str) -> str | None:
-    """A tag as MLflow stores it: one file per tag, the value its entire contents."""
+    """Read one of a run's tags straight off disk: MLflow keeps one file per tag."""
     try:
         return (run_dir / "tags" / tag).read_text().strip()
     except OSError:
@@ -261,10 +275,10 @@ def _read_run_tag(run_dir: Path, tag: str) -> str | None:
 
 
 def _meta_is_corrupt(meta_path: Path) -> bool:
-    """Whether ``meta.yaml`` exists but no longer describes a run.
+    """Whether a run's record exists but no longer describes a run.
 
-    A missing file is deliberately NOT corruption: MLflow raises `MissingConfigException` for it and
-    `_list_run_infos` already skips it. Only the file that exists and parses to nothing is fatal.
+    A missing file is not counted: MLflow skips those by itself. Only an empty or unreadable one is
+    what breaks reading the experiment.
     """
     try:
         loaded = yaml.safe_load(meta_path.read_text())
@@ -274,16 +288,14 @@ def _meta_is_corrupt(meta_path: Path) -> bool:
 
 
 def _owned_by_live_process(run_dir: Path) -> bool:
-    """Whether a run's writer is still running on this host.
+    """Whether the process that wrote this run is still going.
 
-    MLflow guards the same case with a sleep-and-retry; the ownership tags make it a decision rather
-    than a guess. Same rule as :func:`close_stale_runs`: a run another live process is writing is
-    never touched, because stomping a concurrent training run is worse than the crash being fixed.
+    Same rule as :func:`close_stale_runs`: a run another process is still writing is never touched.
     """
     import socket
 
     if _read_run_tag(run_dir, HOST_NAME_TAG) != socket.gethostname():
-        # Not this machine's run, so its pid means nothing here.
+        # Another machine's run, so its process id means nothing here.
         return False
     raw_pid = _read_run_tag(run_dir, HOST_PID_TAG)
     if raw_pid is None:
@@ -295,7 +307,7 @@ def _owned_by_live_process(run_dir: Path) -> bool:
 
 
 def _experiment_artifact_location(experiment_dir: Path) -> str:
-    """Where the experiment puts artifacts, which is fixed at creation and need not be under root."""
+    """Where this experiment stores its files, which is fixed when the experiment is created."""
     try:
         loaded = yaml.safe_load((experiment_dir / "meta.yaml").read_text())
     except (OSError, yaml.YAMLError):
@@ -305,12 +317,11 @@ def _experiment_artifact_location(experiment_dir: Path) -> str:
 
 
 def _rebuild_meta(run_dir: Path, experiment_id: str, experiment_dir: Path) -> dict:
-    """Reconstruct the lost run metadata from the sidecar files that survived.
+    """Rebuild a run's lost record from the files beside it that survived.
 
-    Everything MLflow needs is recoverable: the run id IS the directory name, and the tags and
-    params were written as separate files that a truncation of meta.yaml never touched. The times
-    are the only estimates - the run name carries the start to the second, and the truncated file's
-    own mtime is when the process died.
+    Everything needed is recoverable: the run id is its folder name, and its tags and settings were
+    written as separate files. Only the times are estimated - the run's name carries its start, and
+    the emptied file's own timestamp is when the process died.
     """
     run_id = run_dir.name
     run_name = _read_run_tag(run_dir, "mlflow.runName") or run_id
@@ -319,7 +330,7 @@ def _rebuild_meta(run_dir: Path, experiment_id: str, experiment_dir: Path) -> di
     start_time = None
     if match:
         try:
-            # Named with datetime.now(), so it is local time - which is what .timestamp() assumes.
+            # The name was written in local time, which is what this reads it back as.
             start_time = int(datetime.datetime.strptime(match.group(), "%Y%m%d_%H%M%S").timestamp() * 1000)
         except ValueError:
             start_time = None
@@ -341,8 +352,8 @@ def _rebuild_meta(run_dir: Path, experiment_id: str, experiment_dir: Path) -> di
         "source_type": 4,
         "source_version": "",
         "start_time": start_time,
-        # KILLED. The run's process died without unwinding - that is why the file was truncated -
-        # so this is the same status close_stale_runs gives a run whose process is gone.
+        # Killed: the process died partway through ending the run, which is why the file was
+        # emptied. The same status the sweep above gives an abandoned run.
         "status": 5,
         "tags": [],
         "user_id": _read_run_tag(run_dir, "mlflow.user") or "",
@@ -350,10 +361,10 @@ def _rebuild_meta(run_dir: Path, experiment_id: str, experiment_dir: Path) -> di
 
 
 def _write_meta_atomically(meta_path: Path, payload: dict) -> None:
-    """Write through a temp file in the same directory, then rename.
+    """Write to a temporary file and move it into place.
 
-    The corruption being repaired is a truncate-then-die, so a repair that truncated in place could
-    leave the store in precisely the state it was called to fix.
+    The damage being repaired is an emptied file, so a repair that emptied the file first could
+    leave things exactly as it found them.
     """
     tmp_path = meta_path.parent / f".{meta_path.name}.repair"
     with open(tmp_path, "w") as handle:
@@ -364,23 +375,31 @@ def _write_meta_atomically(meta_path: Path, payload: dict) -> None:
 
 
 def repair_corrupt_runs(experiment_name: str | None = None, logger: Any = None) -> list[str]:
-    """Rebuild run directories whose ``meta.yaml`` was truncated by a process death.
+    """Rebuild the records of runs whose process died partway through ending them.
 
-    Returns the run ids repaired. Never fatal, for the same reason :func:`close_stale_runs` is not:
-    refusing to train because an old run could not be tidied is the worse trade. A repaired run
-    comes back as KILLED, keeping the params and artifacts that were never lost in the first place.
+    Reads the store as plain files, because the damage is exactly what stops MLflow reading it. A
+    repaired run comes back marked killed, keeping the settings and files that were never lost.
 
-    Reads the store as files rather than through MLflow, because the corruption is exactly what
-    stops MLflow from reading it.
+    Parameters
+    ----------
+    experiment_name : str, optional
+        Which experiment to check; the configured one unless given.
+    logger : logging.Logger, optional
+        Where the report goes.
+
+    Returns
+    -------
+    list of str
+        The runs repaired. Never raises.
     """
     name = experiment_name or os.environ.get("MLFLOW_EXPERIMENT_NAME") or DEFAULT_EXPERIMENT_NAME
     try:
         root = resolve_local_tracking_root(mlflow.get_tracking_uri())
         if root is None:
-            # A database or HTTP backend has no meta.yaml to truncate.
+            # A server or database keeps no such files.
             return []
         client = mlflow.tracking.MlflowClient()  # type: ignore[attr-defined]
-        # Reads only the experiment's own meta.yaml, so a corrupt RUN cannot break this lookup.
+        # Reads the experiment's own record only, so a damaged run cannot break this lookup.
         experiment = client.get_experiment_by_name(name)
         if experiment is None:
             return []
@@ -422,43 +441,48 @@ def repair_corrupt_runs(experiment_name: str | None = None, logger: Any = None) 
 
 
 def start_child_run(run_name: str, tags: dict | None = None):
-    """Open a run for one model, nested under the current one when there is one.
+    """Open a :term:`sub-run`, inside the current run when there is one.
 
-    `nested=True` is an ERROR when nothing is active, so hardcoding it ties the trainers to being
-    called from inside main.py's parent run. They are also used directly - by tests, and by anyone
-    driving a single model - and there a top-level run is the right thing. Deciding from
-    `active_run()` keeps both working.
+    Every run opened here records who wrote it, which is what lets a later run tell an abandoned
+    run from one still being written.
 
-    Owner tags go on here rather than at each call site, so every run this project opens can be
-    told apart from an abandoned one by :func:`close_stale_runs`.
+    Parameters
+    ----------
+    run_name : str
+        The run's name, such as ``clay_pct_soil_cnn``.
+    tags : dict, optional
+        Extra tags to record on it.
+
+    Returns
+    -------
+    mlflow.ActiveRun
+        Use it as a context manager: ``with start_child_run(name): ...``.
     """
     run = mlflow.start_run(run_name=run_name, nested=mlflow.active_run() is not None)
     try:
         mlflow.set_tags({**run_owner_tags(), **(tags or {})})
     except Exception:
-        # start_run has already pushed this run onto MLflow's active-run stack, but the ActiveRun
-        # never reaches the caller's `with`, so nothing would ever pop it. That matters more than it
-        # looks: mlflow.end_run() pops the TOP of the stack rather than a named run, so one leaked
-        # entry makes the PARENT's `with` close the orphan instead of itself - and the parent then
-        # sits at RUNNING forever. Pop it here, then let the caller see the failure.
+        # The run is already open but never reaches the caller, so nothing would ever close it -
+        # and the run above it would then be closed in its place, leaving the real one open for
+        # ever. Close it here, then let the caller see the failure.
         mlflow.end_run("FAILED")
         raise
     return run
 
 
 def log_params_once(params: Any, logger: Any = None) -> None:
-    """Log params, skipping any key already recorded on this run with a DIFFERENT value.
+    """Record settings on the current run, keeping any value already recorded under that name.
 
-    MLflow params are immutable: re-logging the same value is fine, changing one raises. That
-    exception is worth avoiding rather than propagating, because of WHERE it lands. The parent run's
-    params are written partly at the start of training and partly in the summary at the end, so a
-    duplicated key does not fail fast - it fails after every model has been fitted, logged and
-    registered, and takes the summary, the leaderboard and the run's FINISHED status with it. One
-    such clash discarded the tail of an hour-long run.
+    A recorded setting cannot be changed: writing a different value for the same name is an error.
+    That error would land at the very end of a run, after every model was trained, and would take
+    the summary and the leaderboard with it - so the clash is reported and skipped instead.
 
-    Filtering BEFORE the call rather than catching after it: the file store's ``log_batch`` applies
-    params one at a time and raises partway through, so a rejected batch can leave some keys written
-    and others not.
+    Parameters
+    ----------
+    params : mapping
+        The settings to record.
+    logger : logging.Logger, optional
+        Where a clash is reported.
     """
     params = dict(params)
     if not params:
@@ -474,7 +498,7 @@ def log_params_once(params: Any, logger: Any = None) -> None:
 
     writable = {}
     for key, value in params.items():
-        # str() is the form MLflow stores, so it is the form to compare against.
+        # Compared as text, which is how MLflow stores them.
         current = existing.get(str(key))
         if current is not None and current != str(value):
             if logger is not None:
@@ -490,9 +514,9 @@ def log_params_once(params: Any, logger: Any = None) -> None:
 
 
 def install_run_signal_handlers(logger: Any = None) -> None:
-    """End the active run stack as KILLED on SIGINT/SIGTERM, then re-raise.
+    """Mark the open runs as killed when the process is interrupted, then exit as usual.
 
-    Covers Ctrl-C and `kill`. It cannot cover SIGKILL - nothing can - which is why
+    Covers Ctrl-C and an ordinary ``kill``. Nothing can cover a forced kill, which is why
     :func:`close_stale_runs` exists as well.
     """
     import signal
@@ -505,7 +529,7 @@ def install_run_signal_handlers(logger: Any = None) -> None:
             pass
         if logger is not None:
             logger.warning(f"Received signal {signum}; marked the active run(s) KILLED.")
-        # Restore the default and re-raise, so the exit status still says what happened.
+        # Then behave as the process normally would, so the exit status still says what happened.
         signal.signal(signum, signal.SIG_DFL)
         os.kill(os.getpid(), signum)
 
@@ -516,15 +540,15 @@ def install_run_signal_handlers(logger: Any = None) -> None:
             pass
 
 
+#: The alias marking the best saved version of a model; see :term:`champion`.
 CHAMPION_ALIAS = "champion"
-# The metric the promotion decision reads. It is the one that means the same thing for both
-# training families and is in the target's original units; yg_eo_soilnet.metrics is the authority
-# on which direction is better, so this module does not restate it.
+#: The score the champion is chosen by. It means the same thing for both model families and is in
+#: the target's own units; :mod:`yg_eo_soilnet.metrics` says which direction is better.
 CHAMPION_METRIC = "rmse_test"
 
 
 def _version_metric(client, version, metric_name: str) -> float | None:
-    """The metric of a registered version, read from the run that produced it."""
+    """One score of a saved model version, read from the run that produced it."""
     run_id = getattr(version, "run_id", None)
     if not run_id:
         return None
@@ -545,24 +569,36 @@ def promote_if_better(
     alias: str = CHAMPION_ALIAS,
     metric_name: str = CHAMPION_METRIC,
 ) -> dict:
-    """Move ``alias`` onto ``version`` only when it genuinely beats the incumbent.
+    """Make a newly saved model the :term:`champion`, but only if it beats the current one.
 
-    Returns the decision - both scores and a reason - so the caller can record it and a promotion is
-    auditable rather than a surprise.
+    **What "champion" means here:** the best version *of this model, for this target* - not the best
+    model for the target. Choosing between `soil_cnn` and XGBoost is the :term:`leaderboard`\'s job.
 
-    Scope worth being precise about: an MLflow alias belongs to one REGISTERED MODEL NAME. Models
-    are registered per target and architecture, so ``champion`` means "the best version of this
-    model on this target", not "the best model for this target". Choosing between soil_cnn and
-    XGBoost is the leaderboard's job, not this function's.
+    The rules: with no champion yet, or one whose score can no longer be read, the new version
+    takes the alias. A new version with no score never does - a model that failed to produce one
+    must not ship because it has "no worse" score. Equal scores keep the current champion, so
+    re-running the same configuration does not shuffle the alias.
 
-    The rules, and why each one is not the obvious alternative:
+    Parameters
+    ----------
+    name : str
+        The registered model's name, ``<target>_<model>``.
+    version : str or int or None
+        The newly saved version.
+    metric_value : float or None
+        Its score on the test points.
+    client : mlflow.MlflowClient, optional
+        A client to use instead of a new one.
+    alias : str, default "champion"
+        The alias to move.
+    metric_name : str, default "rmse_test"
+        Which score decides.
 
-    * **no incumbent** -> promote. The first measurable version should be reachable by alias.
-    * **incumbent unmeasurable** (its run or metric is gone) -> promote, and say so. A candidate we
-      can score beats one we cannot.
-    * **no metric on the new version** -> do NOT promote. A degenerate fit produces no metrics, and
-      silently shipping it because it "has no worse score" is the failure this guards against.
-    * **equal scores** -> keep the incumbent, so re-running the same config does not churn the alias.
+    Returns
+    -------
+    dict
+        What was decided: both scores, the versions, and a reason in words, so a promotion is on
+        the record rather than a surprise.
     """
     from yg_eo_soilnet.metrics import METRIC_DIRECTION
 

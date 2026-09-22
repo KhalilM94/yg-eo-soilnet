@@ -1,34 +1,26 @@
-"""The canonical artifact tree, and the three writers that put things in it.
+"""Where each file a run produces is stored, and the helpers that write them.
 
-Every artifact in this project is staged in a temporary directory and uploaded to MLflow - there is
-no on-disk results root, and this module does not introduce one. What it does introduce is a single
-place that decides WHERE inside a run an artifact lands, because before it every writer hardcoded
-its own ``artifact_path`` string and the two training families drifted apart:
-
-* sklearn CV plots were logged with no ``artifact_path`` at all, so they sat at the run root while
-  the matching CSVs went to ``cv_results/``;
-* Lightning wrote ``eval_plots/`` and ``lightning_metadata/``, neither of which had a sklearn
-  counterpart;
-* fitted models went to ``models/{model_name}`` on one side and a bare ``{target}_{model_name}`` on
-  the other.
-
-The tree below is what both families write now::
+Nothing is written to a results folder: every table, figure and summary is written to a temporary
+file and uploaded to the run, where :doc:`/outputs` describes how to read it. Both model families
+use the same layout, so a scikit-learn run and a deep-learning run can be compared file by file::
 
     <run>/
-      meta/          run_summary_<target>_<model>.json
-      eval_results/  eval_results_<target>_<model>.csv, split_summary_<target>.json
-      plots/         pred_obs_<target>_<model>.png, cv_val_curve_<target>_<model>.png
-      explain/       shap_beeswarm_*.png, shap_bar_*.png, shap_values_*.parquet, shap_summary_*.json
-      cv/            cv_results_<target>_<model>.csv        (sklearn only)
-      checkpoints/   <best>.ckpt                            (Lightning only)
+      meta/           run_summary.json
+      eval_results/   eval_results.csv, split_summary.json
+      plots/          pred_obs.png, cv_val_curve.png
+      explain/        shap_beeswarm.png, shap_bar.png, shap_values.parquet, shap_summary.json
+      uncertainty/    reliability.png, sigma_vs_error.png, uncertainty_summary.json
+      predictions/    point_predictions.csv
+      cv/             cv_results.csv        (scikit-learn only)
+      checkpoints/    best.ckpt             (deep learning only)
 
-Fitted models are the one thing that does NOT live in this tree: MLflow 3 stores them as LoggedModels
-under ``mlruns/<experiment>/models/``, addressed by name rather than by artifact path. Their shared
-naming convention is :meth:`ArtifactLayout.logged_model_name`.
+The saved model itself is the exception: MLflow keeps it outside this tree, addressed by the name
+:meth:`ArtifactLayout.logged_model_name` gives it.
 
-:data:`LEGACY_ARTIFACT_PATHS` maps each new location to the ones it replaced. Readers consult it so
-that runs recorded before this change - of which there are many in ``mlruns/`` - still resolve.
-Writers never use it.
+The file names do not carry the target or the model, because MLflow compares two runs by matching
+file paths, and names that differed between runs would leave nothing to compare. The run's own name
+and tags say which target and model it is. Runs recorded before that change are still readable:
+:data:`LEGACY_ARTIFACT_PATHS` lists where their files used to sit.
 """
 
 from __future__ import annotations
@@ -47,7 +39,11 @@ from yg_eo_soilnet.plot_style import SAVE_DPI
 
 
 class ArtifactLayout:
-    """Where each kind of artifact lives inside a run, and how its file is named."""
+    """Where each kind of file lives inside a run, and what it is called.
+
+    The class attributes are the folder names and the file names; the methods build a path for one
+    target when a run covers several.
+    """
 
     META = "meta"
     EVAL_RESULTS = "eval_results"
@@ -58,27 +54,20 @@ class ArtifactLayout:
     CV = "cv"
     CHECKPOINTS = "checkpoints"
 
-    # Parent-run only.
+    # On the main run only.
     LEADERBOARD_PLOTS = "leaderboard_plots"
     DATA_SPLITS = "data_splits"
 
-    # Stable leaf names. MLflow's compare-runs view matches artifacts by RELATIVE PATH, so a
-    # filename carrying the target and model - eval_results_organic_matter_pct_soil_cnn.csv - gives
-    # two runs zero paths in common and the compare tab renders "no common artifact to display".
-    # The run already identifies its target and model through its name and its target/model_name
-    # tags, so repeating them in every leaf bought nothing and cost comparability.
+    # The same file names in every run, so two runs can be compared file by file.
     EVAL_RESULTS_FILE = "eval_results.csv"
     SPLIT_SUMMARY_FILE = "split_summary.json"
     RUN_SUMMARY_FILE = "run_summary.json"
-    # Why a JOINT fit has no explanation under it. A joint model is explained once, so the reason it
-    # was not - disabled, skipped by name, over budget, errored - belongs to the model run, said
-    # once, rather than copied into every per-target child.
+    # Says why a model has no explanation - switched off, skipped, too slow, or it failed.
     EXPLAIN_SUMMARY_FILE = "explain_summary.json"
     CV_RESULTS_FILE = "cv_results.csv"
     PRED_OBS_FILE = "pred_obs.png"
-    # Lightning names its checkpoints epoch=NN-step=MMM.ckpt, which differs between any two runs
-    # even at identical target and model. The original name is preserved in the run summary and as
-    # a run tag rather than in the path.
+    # Lightning names its own checkpoints after the epoch they come from, which differs between
+    # runs; the original name is kept in the run summary and as a tag instead.
     CHECKPOINT_FILE = "best.ckpt"
 
     SHAP_BEESWARM_FILE = "shap_beeswarm.png"
@@ -87,101 +76,103 @@ class ArtifactLayout:
     SHAP_VALUES_FILE = "shap_values.parquet"
     SHAP_SUMMARY_FILE = "shap_summary.json"
 
-    # Uncertainty diagnostics. The calibrated bars themselves live on pred_obs.png under plots/;
-    # these are the two panels that say whether those bars are honest, kept separate because a
-    # reader checking calibration wants them side by side and not buried in a four-panel strip.
+    # The error bars themselves are drawn on pred_obs.png; these two figures say whether those
+    # bars are honest, and are kept together for a reader checking exactly that.
     RELIABILITY_FILE = "reliability.png"
     SIGMA_ERROR_FILE = "sigma_vs_error.png"
     UNCERTAINTY_SUMMARY_FILE = "uncertainty_summary.json"
 
-    # Per-point predictions. The child file is one model's contribution keyed on point id; the two
-    # parent files are every child's, combined. See yg_eo_soilnet.predictions_export.
+    # Per-point predictions: one model's in its own sub-run, every model's combined on the main
+    # run. See yg_eo_soilnet.predictions_export.
     POINT_PREDICTIONS_FILE = "point_predictions.csv"
     POINT_PREDICTIONS_WIDE_FILE = "point_predictions_wide.csv"
     POINT_PREDICTIONS_LONG_FILE = "point_predictions_long.csv"
 
     @classmethod
     def explain_path(cls, target: Any = None) -> str:
-        """``explain``, or ``explain/<target>`` when one run emits several targets."""
+        """Where the SHAP figures go: ``explain``, or ``explain/<target>`` with several targets."""
         return cls._per_target(cls.EXPLAIN, target)
 
     @classmethod
     def uncertainty_path(cls, target: Any = None) -> str:
-        """``uncertainty``, or ``uncertainty/<target>`` when one run emits several targets."""
+        """Where the uncertainty figures go, per target when a run covers several."""
         return cls._per_target(cls.UNCERTAINTY, target)
 
     @classmethod
     def plots_path(cls, target: Any = None) -> str:
-        """``plots``, or ``plots/<target>`` when one run emits several targets."""
+        """Where the figures go, per target when a run covers several."""
         return cls._per_target(cls.PLOTS, target)
 
     @classmethod
     def _per_target(cls, root: str, target: Any = None) -> str:
-        """Flat for a single target, nested for several.
+        """One folder for a single target, a folder per target for several.
 
-        A single-target run keeps the flat path so it compares directly against every other
-        single-target run - that comparability is the whole point of the stable names. A run that
-        emits SEVERAL targets has to nest, because otherwise its targets write the same leaf and
-        silently overwrite one another.
+        A single-target run keeps the plain path, so it can be compared with any other; a run
+        covering several must separate them, or its targets would overwrite each other's files.
         """
         return f"{root}/{cls.safe(target)}" if target else root
 
     @staticmethod
     def safe(component: Any) -> str:
-        """A path component with everything but ``[A-Za-z0-9_.-]`` collapsed to underscores.
+        """Make a name safe to use in a path: anything unusual becomes an underscore.
 
-        Target names reach here from user config and can carry spaces, slashes or unicode; an
-        unsanitised one would either break the upload or silently create a nested artifact folder.
+        Target names come from the configuration and may carry spaces or slashes, which would
+        otherwise break the upload or quietly create a folder.
+
+        Examples
+        --------
+        >>> ArtifactLayout.safe("organic matter (g/kg)")
+        'organic_matter_g_kg'
         """
         cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(component)).strip("_")
         return cleaned or "unnamed"
 
-    # --- legacy names -------------------------------------------------------
-    # Writers no longer call these. They exist so candidate_artifact_paths can still resolve the
-    # hundreds of runs already recorded under the old per-run naming; deleting them would make the
-    # parent-run leaderboard silently skip every historical run.
+    # --- the older file names ----------------------------------------------
+    # Nothing writes these any more. They are kept so the leaderboard can still read runs recorded
+    # before the names were made the same in every run.
 
     @classmethod
     def filename(cls, kind: str, target: Any, model_name: Any, extension: str) -> str:
-        """LEGACY ``<kind>_<target>_<model>.<ext>``. Read-only; use the stable *_FILE names."""
+        """The older ``<kind>_<target>_<model>.<ext>`` name. For reading old runs only."""
         suffix = extension.lstrip(".")
         return f"{kind}_{cls.safe(target)}_{cls.safe(model_name)}.{suffix}"
 
     @classmethod
     def eval_results_filename(cls, target: Any, model_name: Any) -> str:
-        """LEGACY. Use :attr:`EVAL_RESULTS_FILE` when writing."""
+        """The older name of the results table. Write :attr:`EVAL_RESULTS_FILE` instead."""
         return cls.filename("eval_results", target, model_name, "csv")
 
     @classmethod
     def split_summary_filename(cls, target: Any) -> str:
-        """LEGACY. Use :attr:`SPLIT_SUMMARY_FILE` when writing."""
+        """The older name of the split summary. Write :attr:`SPLIT_SUMMARY_FILE` instead."""
         return f"split_summary_{cls.safe(target)}.json"
 
     @classmethod
     def run_summary_filename(cls, target: Any, model_name: Any) -> str:
-        """LEGACY. Use :attr:`RUN_SUMMARY_FILE` when writing."""
+        """The older name of the run summary. Write :attr:`RUN_SUMMARY_FILE` instead."""
         return cls.filename("run_summary", target, model_name, "json")
 
     @classmethod
     def cv_results_filename(cls, target: Any, model_name: Any) -> str:
-        """LEGACY. Use :attr:`CV_RESULTS_FILE` when writing."""
+        """The older name of the search results. Write :attr:`CV_RESULTS_FILE` instead."""
         return cls.filename("cv_results", target, model_name, "csv")
 
     @classmethod
     def logged_model_name(cls, target: Any, model_name: Any) -> str:
-        """The name a fitted model is registered under, identical for both families.
+        """The name a saved model is stored under: ``<target>_<model>``, for both families.
 
-        This is a LoggedModel name, not a path. MLflow 3 deprecated ``artifact_path=`` on
-        ``log_model`` in favour of ``name=``, and a named model lands in
-        ``mlruns/<experiment>/models/m-<hash>/`` rather than inside the run's artifact tree - so
-        unifying the two families here means giving them one naming convention, which the sklearn
-        side already had (``{target}_{model}``) and the Lightning side did not (``models/{model}``,
-        with no target in it, so two targets overwrote each other's slot).
+        A name, not a path: MLflow keeps saved models outside the run's own files.
+
+        Examples
+        --------
+        >>> ArtifactLayout.logged_model_name("clay_pct", "soil_cnn")
+        'clay_pct_soil_cnn'
         """
         return f"{cls.safe(target)}_{cls.safe(model_name)}"
 
 
-# new artifact_path -> the paths it replaced, oldest last. Readers try the new one first.
+#: Where each kind of file used to be kept, for reading runs recorded earlier. Newest first;
+#: an empty string means the run's top level. Nothing writes to these.
 LEGACY_ARTIFACT_PATHS: dict[str, tuple[str, ...]] = {
     ArtifactLayout.META: ("lightning_metadata",),
     ArtifactLayout.PLOTS: ("eval_plots", ""),
@@ -193,15 +184,27 @@ LEGACY_ARTIFACT_PATHS: dict[str, tuple[str, ...]] = {
 
 
 def candidate_artifact_paths(artifact_path: str, *filenames: str) -> list[str]:
-    """Every location a reader should try for one artifact, current layout first.
+    """Every place a reader should look for one file, the current layout first.
 
-    Takes several filenames because the rename to stable leaves left two generations in ``mlruns/``:
-    a current run holds ``eval_results/eval_results.csv`` while an older one holds
-    ``eval_results/eval_results_<target>_<model>.csv``. Pass the stable name first and the legacy
-    one after it, and every directory in :data:`LEGACY_ARTIFACT_PATHS` is tried for each.
+    Runs recorded at different times keep their files in different places and under different
+    names, so a reader passes the current name first and the older ones after it.
 
-    The empty-string legacy entry means "the run root", which is where ``_log_plots`` used to put
-    its figures, so it yields the bare filename.
+    Parameters
+    ----------
+    artifact_path : str
+        The folder in the current layout.
+    *filenames : str
+        The file names to try, current first.
+
+    Returns
+    -------
+    list of str
+        Paths to try in order.
+
+    Examples
+    --------
+    >>> candidate_artifact_paths("cv", "cv_results.csv")
+    ['cv/cv_results.csv', 'cv_results/cv_results.csv']
     """
     directories = [artifact_path, *LEGACY_ARTIFACT_PATHS.get(artifact_path, ())]
 
@@ -217,7 +220,17 @@ def candidate_artifact_paths(artifact_path: str, *filenames: str) -> list[str]:
 
 
 def log_table(frame: pd.DataFrame, filename: str, artifact_path: str) -> None:
-    """Write a DataFrame to CSV in a temp dir and upload it."""
+    """Write a table as CSV and upload it to the current run.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        What to write.
+    filename : str
+        The file name, such as ``eval_results.csv``.
+    artifact_path : str
+        The folder inside the run.
+    """
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, filename)
         frame.to_csv(path, index=False)
@@ -225,10 +238,9 @@ def log_table(frame: pd.DataFrame, filename: str, artifact_path: str) -> None:
 
 
 def log_parquet(frame: pd.DataFrame, filename: str, artifact_path: str) -> None:
-    """Same as :func:`log_table` but columnar, for tables wide enough that CSV is wasteful.
+    """Write a table as Parquet and upload it, for tables too wide for CSV to be sensible.
 
-    Used for the full SHAP value matrix, which is (n_samples x n_features) floats and is written
-    uncapped even when the plots show only the top N.
+    Used for the full SHAP contributions, one number per point per input.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, filename)
@@ -237,7 +249,7 @@ def log_parquet(frame: pd.DataFrame, filename: str, artifact_path: str) -> None:
 
 
 def log_json(payload: dict, filename: str, artifact_path: str) -> None:
-    """Write a dict as indented JSON and upload it. ``default=str`` so numpy scalars survive."""
+    """Write a summary as JSON and upload it to the current run."""
     with tempfile.TemporaryDirectory() as tmpdir:
         path = os.path.join(tmpdir, filename)
         with open(path, "w", encoding="utf-8") as handle:
@@ -246,15 +258,19 @@ def log_json(payload: dict, filename: str, artifact_path: str) -> None:
 
 
 def log_figure(figure, filename: str, artifact_path: str) -> None:
-    """Save a matplotlib Figure, upload it, and close it.
+    """Save a figure, upload it to the current run, and close it.
 
-    Closing here rather than at the call site is the point: every previous copy of this logic
-    repeated ``savefig`` / ``log_artifact`` / ``plt.close`` and at least one forgot the close, which
-    leaks figures across a multi-model run until matplotlib starts warning about open figures.
+    Closing it here is the point: a run that draws dozens of figures and forgets to close them
+    fills memory with them.
 
-    ``dpi`` is passed explicitly rather than inherited from ``savefig.dpi``. The figures are built
-    inside ``plot_style.style_context``, which has closed by the time they reach here, so the rcParam
-    that carries this number in the notebook cannot reach this call.
+    Parameters
+    ----------
+    figure : matplotlib.figure.Figure or None
+        The figure; None does nothing.
+    filename : str
+        The file name, such as ``pred_obs.png``.
+    artifact_path : str
+        The folder inside the run.
     """
     if figure is None:
         return
@@ -268,6 +284,6 @@ def log_figure(figure, filename: str, artifact_path: str) -> None:
 
 
 def log_figures(figures: Iterable[tuple], artifact_path: str) -> None:
-    """``(figure, filename)`` pairs through :func:`log_figure`, skipping ``None`` figures."""
+    """Upload several figures: ``(figure, filename)`` pairs, skipping any that is None."""
     for figure, filename in figures:
         log_figure(figure, filename, artifact_path)
