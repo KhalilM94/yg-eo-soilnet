@@ -29,6 +29,8 @@ from yg_eo_soilnet.serving.lightning_pyfunc import (
     values_column,
 )
 
+from tests.support.builders import sequence_bundle, tiny_cnn
+
 STATIC = ["clay_pct", "ph"]
 BANDS = ["S2_B02", "S2_B08"]
 N_POINTS = 16
@@ -38,67 +40,14 @@ LAB_ROSTER = ["organic_matter_pct", "ph_lab", "clay_lab", "sand_lab"]
 
 
 @pytest.fixture
-def trained():
-    torch.manual_seed(0)
-    generator = np.random.default_rng(0)
-
-    bundle = SoilSequenceBundle(
-        point_ids=[f"p{index}" for index in range(N_POINTS)],
-        static_features=generator.normal(20, 5, (N_POINTS, len(STATIC))).astype(np.float32),
-        static_feature_names=list(STATIC),
-        static_categoricals=np.asarray(
-            [[generator.choice(["sandy", "loam"])] for _ in range(N_POINTS)], dtype=object
-        ),
-        categorical_feature_names=["texture"],
-        targets=generator.normal(3, 1, (N_POINTS, 1)).astype(np.float32),
-        target_names=["organic_matter_pct"],
-        sequences={
-            "s2": [
-                generator.normal(0.2, 0.05, (int(generator.integers(3, 7)), len(BANDS))).astype(np.float32)
-                for _ in range(N_POINTS)
-            ]
-        },
-        sequence_times={},
-        modality_columns={"s2": list(BANDS)},
-        temporal_enabled=True,
-    )
-    bundle.sequence_times = {
-        "s2": [
-            2020.0 + np.sort(generator.random(values.shape[0])) * 2.0
-            for values in bundle.sequences["s2"]
-        ]
-    }
-
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
-    )
-    datamodule.setup("fit")
-
-    model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        target_names=datamodule.target_names,
-        categorical_cardinalities=datamodule.categorical_cardinalities,
-        categorical_vocabularies=datamodule.categorical_vocabularies,
-        categorical_feature_names=datamodule.categorical_feature_names,
-        modality_dims=datamodule.modality_dims,
-        temporal_enabled=True,
-        grid_years=datamodule.grid_years,
-        static_hidden_dims=[6],
-        head_hidden_dims=[6],
-        cnn_hidden_dims=[4],
-        modality_embed_dim=4,
-        dropout=0.0,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-    )
-    model.attach_preprocessing_state(datamodule.preprocessing_state())
-    model.eval()
+def cnn():
+    bundle = sequence_bundle(n_points=N_POINTS, static=STATIC, modalities={"s2": BANDS})
+    model, _datamodule = tiny_cnn(bundle)
     return model, bundle
 
 
-def test_input_example_carries_the_documented_columns(trained) -> None:
-    model, bundle = trained
+def test_input_example_carries_the_documented_columns(cnn) -> None:
+    model, bundle = cnn
     example = build_input_example(model, bundle, n_rows=3)
 
     assert len(example) == 3
@@ -112,9 +61,9 @@ def test_input_example_carries_the_documented_columns(trained) -> None:
     assert all(len(row) == len(BANDS) for row in values)
 
 
-def test_the_wrapper_matches_the_predictor_on_the_same_points(trained) -> None:
+def test_the_wrapper_matches_the_predictor_on_the_same_points(cnn) -> None:
     """The round trip that proves the contract reconstructs the model's real inputs."""
-    model, bundle = trained
+    model, bundle = cnn
 
     example = build_input_example(model, bundle, n_rows=N_POINTS)
     through_pyfunc = SoilSequencePyfunc(model).predict(None, example).to_numpy(dtype=float)
@@ -123,15 +72,15 @@ def test_the_wrapper_matches_the_predictor_on_the_same_points(trained) -> None:
     assert np.allclose(through_pyfunc, through_predictor, atol=1e-5)
 
 
-def test_predictions_are_labelled_with_the_target_names(trained) -> None:
-    model, bundle = trained
+def test_predictions_are_labelled_with_the_target_names(cnn) -> None:
+    model, bundle = cnn
     example = build_input_example(model, bundle, n_rows=2)
 
     assert list(SoilSequencePyfunc(model).predict(None, example).columns) == ["organic_matter_pct"]
 
 
-def test_a_frame_round_trips_through_the_bundle(trained) -> None:
-    model, bundle = trained
+def test_a_frame_round_trips_through_the_bundle(cnn) -> None:
+    model, bundle = cnn
     state = model.get_preprocessing_state()
 
     rebuilt = bundle_from_frame(frame_from_bundle(bundle, state), state)
@@ -145,8 +94,8 @@ def test_a_frame_round_trips_through_the_bundle(trained) -> None:
         assert np.allclose(restored, original, atol=1e-5)
 
 
-def test_a_missing_static_column_is_refused_by_name(trained) -> None:
-    model, bundle = trained
+def test_a_missing_static_column_is_refused_by_name(cnn) -> None:
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     example = frame_from_bundle(bundle, state).drop(columns=["ph"])
 
@@ -154,8 +103,8 @@ def test_a_missing_static_column_is_refused_by_name(trained) -> None:
         bundle_from_frame(example, state)
 
 
-def test_a_missing_modality_column_is_refused_with_the_band_order(trained) -> None:
-    model, bundle = trained
+def test_a_missing_modality_column_is_refused_with_the_band_order(cnn) -> None:
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     example = frame_from_bundle(bundle, state).drop(columns=[values_column("s2")])
 
@@ -163,8 +112,8 @@ def test_a_missing_modality_column_is_refused_with_the_band_order(trained) -> No
         bundle_from_frame(example, state)
 
 
-def test_misaligned_times_and_values_are_refused(trained) -> None:
-    model, bundle = trained
+def test_misaligned_times_and_values_are_refused(cnn) -> None:
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     example = frame_from_bundle(bundle, state)
     example.at[0, time_column("s2")] = list(example[time_column("s2")].iloc[0])[:-1]
@@ -173,9 +122,9 @@ def test_misaligned_times_and_values_are_refused(trained) -> None:
         bundle_from_frame(example, state)
 
 
-def test_a_point_with_no_observations_is_accepted(trained) -> None:
+def test_a_point_with_no_observations_is_accepted(cnn) -> None:
     """A real request can carry a point that has never been imaged; it must not crash the batch."""
-    model, bundle = trained
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     example = frame_from_bundle(bundle, state, n_rows=4)
     example.at[0, time_column("s2")] = []
@@ -187,11 +136,11 @@ def test_a_point_with_no_observations_is_accepted(trained) -> None:
     assert np.isfinite(predictions.to_numpy(dtype=float)).all()
 
 
-def test_signature_inference_produces_array_types(trained) -> None:
+def test_signature_inference_produces_array_types(cnn) -> None:
     """MLflow has to describe the nested columns, or a served request cannot be validated."""
     from mlflow.models import infer_signature
 
-    model, bundle = trained
+    model, bundle = cnn
     example = build_input_example(model, bundle, n_rows=3)
     predictions = SoilSequencePyfunc(model).predict(None, example)
 
@@ -208,16 +157,16 @@ def test_a_model_without_preprocessing_state_cannot_build_an_example() -> None:
         build_input_example(model, SoilSequenceBundle(), n_rows=1)
 
 
-def test_frame_from_bundle_honours_the_row_cap(trained) -> None:
-    model, bundle = trained
+def test_frame_from_bundle_honours_the_row_cap(cnn) -> None:
+    model, bundle = cnn
     assert len(frame_from_bundle(bundle, model.get_preprocessing_state(), n_rows=2)) == 2
     # Asking for more rows than exist yields what there is, rather than raising.
     assert len(frame_from_bundle(bundle, model.get_preprocessing_state(), n_rows=999)) == N_POINTS
 
 
-def test_extra_columns_in_a_request_are_ignored(trained) -> None:
+def test_extra_columns_in_a_request_are_ignored(cnn) -> None:
     """A caller sending a wider frame must not reshape the model's inputs."""
-    model, bundle = trained
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     example = frame_from_bundle(bundle, state, n_rows=3)
     example["an_unrelated_column"] = 1.0
@@ -228,9 +177,9 @@ def test_extra_columns_in_a_request_are_ignored(trained) -> None:
     assert rebuilt.static_features.shape[1] == len(STATIC)
 
 
-def test_predict_accepts_a_plain_dict_of_columns(trained) -> None:
+def test_predict_accepts_a_plain_dict_of_columns(cnn) -> None:
     """MLflow hands scoring payloads over as records; a DataFrame constructor must cover it."""
-    model, bundle = trained
+    model, bundle = cnn
     example = build_input_example(model, bundle, n_rows=2)
 
     from_records = SoilSequencePyfunc(model).predict(None, pd.DataFrame(example.to_dict("list")))
@@ -249,61 +198,22 @@ AUXILIARY = ["ph_lab", "clay_lab"]          # a strict subset of LAB_ROSTER, lik
 
 
 @pytest.fixture
-def trained_with_auxiliary():
+def cnn_with_auxiliary():
     """A model that reads a subset of the lab roster, as the tuned config does."""
-    torch.manual_seed(0)
-    generator = np.random.default_rng(0)
-
-    bundle = SoilSequenceBundle(
-        point_ids=[f"p{index}" for index in range(N_POINTS)],
-        static_features=generator.normal(20, 5, (N_POINTS, len(STATIC))).astype(np.float32),
-        static_feature_names=list(STATIC),
-        static_categoricals=np.empty((N_POINTS, 0), dtype=object),
-        categorical_feature_names=[],
-        targets=generator.normal(3, 1, (N_POINTS, 1)).astype(np.float32),
-        target_names=["organic_matter_pct"],
-        label_features=generator.normal(5, 1, (N_POINTS, len(LAB_ROSTER))).astype(np.float32),
-        label_feature_names=list(LAB_ROSTER),
-        sequences={
-            "s2": [
-                generator.normal(0.2, 0.05, (5, len(BANDS))).astype(np.float32)
-                for _ in range(N_POINTS)
-            ]
-        },
-        sequence_times={"s2": [2020.0 + np.sort(generator.random(5)) * 2.0 for _ in range(N_POINTS)]},
-        modality_columns={"s2": list(BANDS)},
-        temporal_enabled=True,
+    bundle = sequence_bundle(
+        n_points=N_POINTS,
+        static=STATIC,
+        modalities={"s2": BANDS},
+        categorical=False,
+        lab_roster=LAB_ROSTER,
+        observations=5,
     )
-
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
-    )
-    datamodule.setup("fit")
-
-    model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        target_names=datamodule.target_names,
-        modality_dims=datamodule.modality_dims,
-        temporal_enabled=True,
-        grid_years=datamodule.grid_years,
-        auxiliary_label_columns=AUXILIARY,
-        auxiliary_available_names=list(LAB_ROSTER),
-        static_hidden_dims=[6],
-        head_hidden_dims=[6],
-        cnn_hidden_dims=[4],
-        modality_embed_dim=4,
-        dropout=0.0,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-    )
-    model.attach_preprocessing_state(datamodule.preprocessing_state())
-    model.eval()
+    model, _datamodule = tiny_cnn(bundle, auxiliary=AUXILIARY)
     return model, bundle
 
 
-def test_the_example_asks_only_for_the_columns_the_model_reads(trained_with_auxiliary) -> None:
-    model, bundle = trained_with_auxiliary
+def test_the_example_asks_only_for_the_columns_the_model_reads(cnn_with_auxiliary) -> None:
+    model, bundle = cnn_with_auxiliary
     columns = set(build_input_example(model, bundle, n_rows=3).columns)
 
     assert set(AUXILIARY) <= columns
@@ -312,14 +222,14 @@ def test_the_example_asks_only_for_the_columns_the_model_reads(trained_with_auxi
     assert "organic_matter_pct" not in columns
 
 
-def test_the_rebuilt_bundle_keeps_the_full_roster_width(trained_with_auxiliary) -> None:
+def test_the_rebuilt_bundle_keeps_the_full_roster_width(cnn_with_auxiliary) -> None:
     """THE regression. The model index_selects roster POSITIONS, so a narrower block is unusable.
 
     Before the fix this came back (3, 0), and the model rejected the batch with
     'Batch carries 0 lab column(s) ... against 6' - which is what stopped every model being logged
     and therefore registered.
     """
-    model, bundle = trained_with_auxiliary
+    model, bundle = cnn_with_auxiliary
     state = model.get_preprocessing_state()
 
     rebuilt = bundle_from_frame(build_input_example(model, bundle, n_rows=3), state)
@@ -327,10 +237,10 @@ def test_the_rebuilt_bundle_keeps_the_full_roster_width(trained_with_auxiliary) 
     assert np.asarray(rebuilt.label_features).shape == (3, len(LAB_ROSTER))
 
 
-def test_supplied_values_land_at_their_roster_positions(trained_with_auxiliary) -> None:
+def test_supplied_values_land_at_their_roster_positions(cnn_with_auxiliary) -> None:
     """Position, not order of appearance - a shifted column would feed the model the wrong
     measurement without raising anything."""
-    model, bundle = trained_with_auxiliary
+    model, bundle = cnn_with_auxiliary
     state = model.get_preprocessing_state()
     example = build_input_example(model, bundle, n_rows=3)
     example["clay_lab"] = [111.0, 222.0, 333.0]
@@ -344,8 +254,8 @@ def test_supplied_values_land_at_their_roster_positions(trained_with_auxiliary) 
     assert np.isnan(np.asarray(rebuilt.label_features)[:, LAB_ROSTER.index("sand_lab")]).all()
 
 
-def test_a_model_with_auxiliary_columns_still_predicts(trained_with_auxiliary) -> None:
-    model, bundle = trained_with_auxiliary
+def test_a_model_with_auxiliary_columns_still_predicts(cnn_with_auxiliary) -> None:
+    model, bundle = cnn_with_auxiliary
     example = build_input_example(model, bundle, n_rows=N_POINTS)
 
     through_pyfunc = SoilSequencePyfunc(model).predict(None, example).to_numpy(dtype=float)
@@ -365,77 +275,16 @@ COORD_NAMES = ["lat", "lon"]
 
 
 @pytest.fixture
-def trained_with_coords():
+def cnn_with_coords():
     """A model with the harmonic coordinate branch, as USE_HARMONIC_COORDS produces."""
-    torch.manual_seed(0)
-    generator = np.random.default_rng(0)
-
-    bundle = SoilSequenceBundle(
-        point_ids=[f"p{index}" for index in range(N_POINTS)],
-        static_features=generator.normal(20, 5, (N_POINTS, len(STATIC))).astype(np.float32),
-        static_feature_names=list(STATIC),
-        static_categoricals=np.asarray(
-            [[generator.choice(["sandy", "loam"])] for _ in range(N_POINTS)], dtype=object
-        ),
-        categorical_feature_names=["texture"],
-        # Realistic Morocco degrees, and deliberately NOT round numbers: a float32 round trip
-        # would round these off, and the assertion below would catch it.
-        coords=np.column_stack(
-            [
-                generator.uniform(28.60413, 35.65917, N_POINTS),
-                generator.uniform(-10.00382, -1.93641, N_POINTS),
-            ]
-        ),
-        coord_names=list(COORD_NAMES),
-        targets=generator.normal(3, 1, (N_POINTS, 1)).astype(np.float32),
-        target_names=["organic_matter_pct"],
-        sequences={
-            "s2": [
-                generator.normal(0.2, 0.05, (int(generator.integers(3, 7)), len(BANDS))).astype(np.float32)
-                for _ in range(N_POINTS)
-            ]
-        },
-        sequence_times={},
-        modality_columns={"s2": list(BANDS)},
-        temporal_enabled=True,
+    bundle = sequence_bundle(
+        n_points=N_POINTS, static=STATIC, modalities={"s2": BANDS}, coord_names=COORD_NAMES
     )
-    bundle.sequence_times = {
-        "s2": [
-            2020.0 + np.sort(generator.random(values.shape[0])) * 2.0
-            for values in bundle.sequences["s2"]
-        ]
-    }
-
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
-    )
-    datamodule.setup("fit")
-
-    model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        target_names=datamodule.target_names,
-        categorical_cardinalities=datamodule.categorical_cardinalities,
-        categorical_vocabularies=datamodule.categorical_vocabularies,
-        categorical_feature_names=datamodule.categorical_feature_names,
-        modality_dims=datamodule.modality_dims,
-        temporal_enabled=True,
-        grid_years=datamodule.grid_years,
-        coord_dim=datamodule.coord_dim,
-        static_hidden_dims=[6],
-        head_hidden_dims=[6],
-        cnn_hidden_dims=[4],
-        modality_embed_dim=4,
-        dropout=0.0,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-    )
-    model.attach_preprocessing_state(datamodule.preprocessing_state())
-    model.eval()
+    model, datamodule = tiny_cnn(bundle)
     return model, bundle, datamodule
 
 
-def test_a_coordinate_model_can_be_logged_at_all(trained_with_coords) -> None:
+def test_a_coordinate_model_can_be_logged_at_all(cnn_with_coords) -> None:
     """The regression test proper.
 
     This is mlflow_loggers._log_lightning_serialized_model's own sequence - build the example, then
@@ -443,7 +292,7 @@ def test_a_coordinate_model_can_be_logged_at_all(trained_with_coords) -> None:
     column(s) but this model was built for 2", model logging was skipped, and because registration
     is downstream of logging no version was ever created.
     """
-    model, bundle, _datamodule = trained_with_coords
+    model, bundle, _datamodule = cnn_with_coords
     example = build_input_example(model, bundle, n_rows=3)
 
     predictions = SoilSequencePyfunc(model).predict(None, example)
@@ -452,8 +301,8 @@ def test_a_coordinate_model_can_be_logged_at_all(trained_with_coords) -> None:
     assert np.isfinite(predictions.to_numpy(dtype=float)).all()
 
 
-def test_the_example_carries_the_coordinate_columns(trained_with_coords) -> None:
-    model, bundle, _datamodule = trained_with_coords
+def test_the_example_carries_the_coordinate_columns(cnn_with_coords) -> None:
+    model, bundle, _datamodule = cnn_with_coords
     example = build_input_example(model, bundle, n_rows=3)
 
     for name in COORD_NAMES:
@@ -461,10 +310,10 @@ def test_the_example_carries_the_coordinate_columns(trained_with_coords) -> None
     np.testing.assert_allclose(example["lat"].to_numpy(), bundle.coords[:3, 0])
 
 
-def test_coordinates_survive_the_round_trip_without_losing_precision(trained_with_coords) -> None:
+def test_coordinates_survive_the_round_trip_without_losing_precision(cnn_with_coords) -> None:
     """float64 end to end. float32 resolves about a metre here, and the train-bbox normalization
     downstream subtracts two nearby numbers, so it would spend most of that."""
-    model, bundle, _datamodule = trained_with_coords
+    model, bundle, _datamodule = cnn_with_coords
     state = model.get_preprocessing_state()
 
     rebuilt = bundle_from_frame(frame_from_bundle(bundle, state), state)
@@ -475,11 +324,11 @@ def test_coordinates_survive_the_round_trip_without_losing_precision(trained_wit
 
 
 def test_a_round_tripped_point_normalizes_exactly_as_it_did_in_training(
-    trained_with_coords,
+    cnn_with_coords,
 ) -> None:
     """The property that actually matters: the served point must land on the same spot of the
     train bounding box it occupied during training, not merely carry the same degrees."""
-    model, bundle, datamodule = trained_with_coords
+    model, bundle, datamodule = cnn_with_coords
     state = model.get_preprocessing_state()
 
     served = SoilSequenceDataModule(
@@ -492,10 +341,10 @@ def test_a_round_tripped_point_normalizes_exactly_as_it_did_in_training(
     )
 
 
-def test_a_missing_coordinate_column_is_refused_by_name(trained_with_coords) -> None:
+def test_a_missing_coordinate_column_is_refused_by_name(cnn_with_coords) -> None:
     """Required, not optional: there is no honest fill for a position, so it must fail loudly
     rather than reach the model as a zero-width block - which is what it used to do."""
-    model, bundle, _datamodule = trained_with_coords
+    model, bundle, _datamodule = cnn_with_coords
     state = model.get_preprocessing_state()
     without_latitude = frame_from_bundle(bundle, state).drop(columns=["lat"])
 
@@ -503,10 +352,10 @@ def test_a_missing_coordinate_column_is_refused_by_name(trained_with_coords) -> 
         bundle_from_frame(without_latitude, state)
 
 
-def test_the_wrapper_matches_the_predictor_for_a_coordinate_model(trained_with_coords) -> None:
+def test_the_wrapper_matches_the_predictor_for_a_coordinate_model(cnn_with_coords) -> None:
     """The frame path and the bundle path must agree. Only the frame path lost the coordinates,
     so a disagreement here is exactly the bug returning."""
-    model, bundle, _datamodule = trained_with_coords
+    model, bundle, _datamodule = cnn_with_coords
     example = build_input_example(model, bundle, n_rows=N_POINTS)
 
     through_pyfunc = SoilSequencePyfunc(model).predict(None, example).to_numpy(dtype=float)
@@ -515,10 +364,10 @@ def test_the_wrapper_matches_the_predictor_for_a_coordinate_model(trained_with_c
     assert np.allclose(through_pyfunc, through_predictor, atol=1e-5)
 
 
-def test_a_model_without_coordinates_asks_for_none(trained) -> None:
+def test_a_model_without_coordinates_asks_for_none(cnn) -> None:
     """The backward-compatibility guarantee: a checkpoint trained before the branch, or with the
     flag off, has no coord_names in its state, so the contract is unchanged."""
-    model, bundle = trained
+    model, bundle = cnn
     state = model.get_preprocessing_state()
     frame = frame_from_bundle(bundle, state)
 

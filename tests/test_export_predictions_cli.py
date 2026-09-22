@@ -29,15 +29,6 @@ def _args(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**base)
 
 
-def _logger():
-    import logging
-
-    logger = logging.getLogger("backfill-test")
-    logger.handlers.clear()
-    logger.addHandler(logging.NullHandler())
-    return logger
-
-
 # --- arguments -------------------------------------------------------------
 
 
@@ -117,7 +108,7 @@ def _patch_downloads(monkeypatch, test_path, split_path):
     monkeypatch.setattr(ep, "_download", fake)
 
 
-def test_matching_data_passes_the_check(monkeypatch, tmp_path):
+def test_matching_data_passes_the_check(logger, monkeypatch, tmp_path):
     ids = ["a", "b", "c"]
     _patch_downloads(monkeypatch, *_recorded(tmp_path, ["f1", "f2"], ids))
 
@@ -126,13 +117,13 @@ def test_matching_data_passes_the_check(monkeypatch, tmp_path):
         pd.DataFrame({"f1": [0.0] * 3, "f2": [0.0] * 3}),
         pd.Series(ids),
         allow_population_drift=False,
-        logger=_logger(),
+        logger=logger,
     )
     assert report["checked"] is True
     assert report["n_points_added"] == 0 and report["n_points_removed"] == 0
 
 
-def test_a_changed_feature_column_aborts_and_names_it(monkeypatch, tmp_path):
+def test_a_changed_feature_column_aborts_and_names_it(logger, monkeypatch, tmp_path):
     """The models cannot legitimately predict on a different column set, so this never relaxes."""
     ids = ["a", "b"]
     _patch_downloads(monkeypatch, *_recorded(tmp_path, ["f1", "f2"], ids))
@@ -143,11 +134,11 @@ def test_a_changed_feature_column_aborts_and_names_it(monkeypatch, tmp_path):
             pd.DataFrame({"f1": [0.0] * 2, "f3": [0.0] * 2}),
             pd.Series(ids),
             allow_population_drift=False,
-            logger=_logger(),
+            logger=logger,
         )
 
 
-def test_the_feature_check_is_not_relaxed_by_the_drift_flag(monkeypatch, tmp_path):
+def test_the_feature_check_is_not_relaxed_by_the_drift_flag(logger, monkeypatch, tmp_path):
     ids = ["a", "b"]
     _patch_downloads(monkeypatch, *_recorded(tmp_path, ["f1", "f2"], ids))
 
@@ -157,11 +148,11 @@ def test_the_feature_check_is_not_relaxed_by_the_drift_flag(monkeypatch, tmp_pat
             pd.DataFrame({"f1": [0.0] * 2}),
             pd.Series(ids),
             allow_population_drift=True,
-            logger=_logger(),
+            logger=logger,
         )
 
 
-def test_an_added_point_aborts_under_strict(monkeypatch, tmp_path):
+def test_an_added_point_aborts_under_strict(logger, monkeypatch, tmp_path):
     _patch_downloads(monkeypatch, *_recorded(tmp_path, ["f1"], ["a", "b"]))
 
     with pytest.raises(SystemExit, match="1 point\\(s\\) added"):
@@ -170,11 +161,11 @@ def test_an_added_point_aborts_under_strict(monkeypatch, tmp_path):
             pd.DataFrame({"f1": [0.0] * 3}),
             pd.Series(["a", "b", "c"]),
             allow_population_drift=False,
-            logger=_logger(),
+            logger=logger,
         )
 
 
-def test_an_added_point_is_only_a_warning_once_drift_is_allowed(monkeypatch, tmp_path):
+def test_an_added_point_is_only_a_warning_once_drift_is_allowed(logger, monkeypatch, tmp_path):
     _patch_downloads(monkeypatch, *_recorded(tmp_path, ["f1"], ["a", "b"]))
 
     report = ep.check_for_drift(
@@ -182,12 +173,12 @@ def test_an_added_point_is_only_a_warning_once_drift_is_allowed(monkeypatch, tmp
         pd.DataFrame({"f1": [0.0] * 3}),
         pd.Series(["a", "b", "c"]),
         allow_population_drift=True,
-        logger=_logger(),
+        logger=logger,
     )
     assert report["n_points_added"] == 1
 
 
-def test_a_run_that_cannot_be_verified_stops_under_strict(monkeypatch):
+def test_a_run_that_cannot_be_verified_stops_under_strict(logger, monkeypatch):
     """Strict means "prove it matches". A legacy run with no split_assignments cannot."""
     monkeypatch.setattr(ep, "_download", lambda run_id, artifact_path: None)
 
@@ -197,11 +188,11 @@ def test_a_run_that_cannot_be_verified_stops_under_strict(monkeypatch):
             pd.DataFrame({"f1": [0.0]}),
             pd.Series(["a"]),
             allow_population_drift=False,
-            logger=_logger(),
+            logger=logger,
         )
 
 
-def test_an_unverifiable_run_can_be_forced(monkeypatch):
+def test_an_unverifiable_run_can_be_forced(logger, monkeypatch):
     monkeypatch.setattr(ep, "_download", lambda run_id, artifact_path: None)
 
     report = ep.check_for_drift(
@@ -209,7 +200,7 @@ def test_an_unverifiable_run_can_be_forced(monkeypatch):
         pd.DataFrame({"f1": [0.0]}),
         pd.Series(["a"]),
         allow_population_drift=True,
-        logger=_logger(),
+        logger=logger,
     )
     assert report["checked"] is False
 
@@ -225,7 +216,7 @@ def _run(**tags):
     )
 
 
-def test_a_single_lightning_model_is_not_skipped_as_an_ensemble(monkeypatch):
+def test_a_single_lightning_model_is_not_skipped_as_an_ensemble(logger, monkeypatch):
     # No uncertainty_n_members means one model, which IS recoverable from its checkpoint.
     monkeypatch.setattr(
         ep, "lightning_predictor", lambda run, config, logger: ((lambda: np.zeros((2, 1))), ["a", "b"], ["clay_pct"])
@@ -245,14 +236,14 @@ def test_a_single_lightning_model_is_not_skipped_as_an_ensemble(monkeypatch):
         export_config=SimpleNamespace(),
         features=pd.DataFrame(),
         point_ids=pd.Series(dtype=object),
-        logger=_logger(),
+        logger=logger,
         checkpoint_dir="lightning_logs",
     )
     assert "skipped" not in outcome
     assert recorded["point_ids"] == ["a", "b"]
 
 
-def test_a_sklearn_child_predicts_on_the_rebuilt_features(monkeypatch):
+def test_a_sklearn_child_predicts_on_the_rebuilt_features(logger, monkeypatch):
     features = pd.DataFrame({"f1": [1.0, 2.0, 3.0]})
     point_ids = pd.Series(["a", "b", "c"])
     monkeypatch.setattr(
@@ -273,7 +264,7 @@ def test_a_sklearn_child_predicts_on_the_rebuilt_features(monkeypatch):
         export_config=SimpleNamespace(),
         features=features,
         point_ids=point_ids,
-        logger=_logger(),
+        logger=logger,
         checkpoint_dir="lightning_logs",
     )
     assert outcome["n_points"] == 3
@@ -281,7 +272,7 @@ def test_a_sklearn_child_predicts_on_the_rebuilt_features(monkeypatch):
     assert list(recorded["point_ids"]) == ["a", "b", "c"]
 
 
-def test_a_joint_child_reports_every_target_in_its_group(monkeypatch):
+def test_a_joint_child_reports_every_target_in_its_group(logger, monkeypatch):
     monkeypatch.setattr(ep, "sklearn_predictor", lambda run, feats: ((lambda: np.zeros((1, 2))), 1))
     recorded = {}
     monkeypatch.setattr(
@@ -298,7 +289,7 @@ def test_a_joint_child_reports_every_target_in_its_group(monkeypatch):
         export_config=SimpleNamespace(),
         features=pd.DataFrame({"f1": [0.0]}),
         point_ids=pd.Series(["a"]),
-        logger=_logger(),
+        logger=logger,
         checkpoint_dir="lightning_logs",
     )
     assert recorded["target_names"] == ["clay_pct", "sand_pct"]
@@ -427,7 +418,7 @@ def test_a_member_that_logged_its_own_checkpoint_needs_no_scavenging(monkeypatch
     assert matched[0]["checkpoint"] == "/from/mlflow.ckpt"
 
 
-def test_an_incomplete_ensemble_is_skipped_with_the_counts(monkeypatch):
+def test_an_incomplete_ensemble_is_skipped_with_the_counts(logger, monkeypatch):
     monkeypatch.setattr(
         ep,
         "match_member_checkpoints",
@@ -448,14 +439,14 @@ def test_an_incomplete_ensemble_is_skipped_with_the_counts(monkeypatch):
         export_config=SimpleNamespace(),
         features=pd.DataFrame(),
         point_ids=pd.Series(dtype=object),
-        logger=_logger(),
+        logger=logger,
         checkpoint_dir="lightning_logs",
     )
     assert "only 1 checkpoint(s) could be recovered" in outcome["skipped"]
     assert "would not be the ensemble" in outcome["skipped"]
 
 
-def test_member_recovery_can_be_turned_off():
+def test_member_recovery_can_be_turned_off(logger):
     outcome = ep.backfill_child(
         _run(
             model_name="soil_cnn",
@@ -468,13 +459,13 @@ def test_member_recovery_can_be_turned_off():
         export_config=SimpleNamespace(),
         features=pd.DataFrame(),
         point_ids=pd.Series(dtype=object),
-        logger=_logger(),
+        logger=logger,
         checkpoint_dir=None,
     )
     assert "member recovery is disabled" in outcome["skipped"]
 
 
-def test_the_recovered_value_is_the_mean_of_the_members(monkeypatch):
+def test_the_recovered_value_is_the_mean_of_the_members(logger, monkeypatch):
     """Three members predicting 1, 2 and 3 must export 2 - not one member, not a sum."""
     constants = iter([1.0, 2.0, 3.0])
 
@@ -497,14 +488,14 @@ def test_the_recovered_value_is_the_mean_of_the_members(monkeypatch):
     predict, ids, targets = ep.lightning_ensemble_predictor(
         _run(model_name="soil_cnn", framework="lightning", target="clay_pct"),
         SimpleNamespace(),
-        _logger(),
+        logger,
         [{"checkpoint": f"{i}.ckpt"} for i in range(3)],
     )
     assert targets == ["clay_pct"] and ids == list("abcd")
     assert np.allclose(predict(), 2.0)
 
 
-def test_the_sequence_bundle_is_built_once_and_reused(monkeypatch):
+def test_the_sequence_bundle_is_built_once_and_reused(logger, monkeypatch):
     builds = []
 
     class _Builder:
@@ -522,5 +513,5 @@ def test_the_sequence_bundle_is_built_once_and_reused(monkeypatch):
     config = SimpleNamespace(LIGHTNING_MODEL_REGISTRY={"soil_cnn": {}})
 
     for _ in range(5):
-        ep.sequence_bundle_for("soil_cnn", config, _logger())
+        ep.sequence_bundle_for("soil_cnn", config, logger)
     assert len(builds) == 1

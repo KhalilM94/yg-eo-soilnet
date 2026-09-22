@@ -12,7 +12,6 @@ to 2.8% of the mean |SHAP| because GradientExplainer is stochastic.
 These tests pin the two halves of the fix: built once, logged one slice per run.
 """
 
-from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -23,16 +22,7 @@ import pytest
 import yg_eo_soilnet.logger.mlflow_loggers as loggers_module
 from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
 
-
-class _RecordingRuns:
-    """Stands in for mlflow.start_run, remembering the run names it was asked to open."""
-
-    def __init__(self):
-        self.names: list[str] = []
-
-    def __call__(self, run_name=None, nested=False, **kwargs):
-        self.names.append(run_name)
-        return nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run")))
+from tests.support.fakes import RecordingRuns
 
 
 def _quiet_logger(monkeypatch):
@@ -42,13 +32,13 @@ def _quiet_logger(monkeypatch):
     """
     logger = ChildRunLogger()
     for name in ("set_tags", "log_params", "log_metric", "log_artifact", "log_metrics"):
-        monkeypatch.setattr(loggers_module.mlflow, name, MagicMock(), raising=False)
+        monkeypatch.setattr(loggers_module.mlflow, name, MagicMock())
     monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", MagicMock())
     for name in ("_log_plots", "_write_json_artifact", "_log_table_artifact", "_write_split_summary",
                  "_log_split_summary", "_promote_champion", "_log_cv_results", "_log_checkpoint",
                  "_tag_model_logging", "_log_pred_obs_artifact", "_evaluate_sklearn_target",
                  "_log_uncertainty_artifacts", "_log_train_fit_metric"):
-        monkeypatch.setattr(logger, name, MagicMock(), raising=False)
+        monkeypatch.setattr(logger, name, MagicMock())
     return logger
 
 
@@ -85,7 +75,7 @@ def test_a_joint_lightning_fit_is_explained_once_and_each_child_logs_only_its_ow
     monkeypatch,
 ) -> None:
     logger = _quiet_logger(monkeypatch)
-    monkeypatch.setattr(loggers_module.mlflow, "start_run", _RecordingRuns())
+    monkeypatch.setattr(loggers_module.mlflow, "start_run", RecordingRuns())
     monkeypatch.setattr(logger, "_log_lightning_serialized_model", MagicMock(return_value=True))
     build, log = _spy_on_explain(monkeypatch, TARGETS)
 
@@ -114,7 +104,7 @@ def test_a_joint_lightning_fit_is_explained_once_and_each_child_logs_only_its_ow
 def test_a_single_target_lightning_fit_still_explains_once_into_its_own_run(monkeypatch) -> None:
     """The group of one has no fan-out, so nothing about it should change."""
     logger = _quiet_logger(monkeypatch)
-    monkeypatch.setattr(loggers_module.mlflow, "start_run", _RecordingRuns())
+    monkeypatch.setattr(loggers_module.mlflow, "start_run", RecordingRuns())
     monkeypatch.setattr(logger, "_log_lightning_serialized_model", MagicMock(return_value=True))
     build, log = _spy_on_explain(monkeypatch, ["clay_pct"])
 
@@ -158,7 +148,7 @@ def test_a_joint_sklearn_fit_is_explained_once_and_each_child_logs_only_its_own_
     monkeypatch.setattr(loggers_module, "infer_signature", lambda *args, **kwargs: None)
 
     logger = _quiet_logger(monkeypatch)
-    monkeypatch.setattr(loggers_module.mlflow, "start_run", _RecordingRuns())
+    monkeypatch.setattr(loggers_module.mlflow, "start_run", RecordingRuns())
     monkeypatch.setattr(logger, "_log_metric_dict", MagicMock())
     monkeypatch.setattr(logger, "_register_sklearn_model", MagicMock(return_value=None))
     build, log = _spy_on_explain(monkeypatch, TARGETS)

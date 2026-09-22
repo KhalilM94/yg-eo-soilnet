@@ -8,17 +8,16 @@ downstream would complain. Those cases are pinned first and hardest.
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 import torch
 
-from yg_eo_soilnet.data_manager import DataManager
-from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder, to_decimal_year
+from yg_eo_soilnet.datamodules.sequence.sequence_builder import to_decimal_year
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
+
 from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import (
     AnnualGrid2DEncoder,
     CalendarGridRasterizer,
@@ -28,37 +27,15 @@ from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import (
     masked_global_pool,
 )
 
+
+from tests.support.cnn import LABEL_NAMES, built_sequence_bundle, cnn_batch
+
 ENCODERS = ["dilated_tempcnn", "annual_grid2d"]
 ENCODER_CLASSES = [DilatedTempCNNEncoder, AnnualGrid2DEncoder]
 
 
 def _times(dates) -> torch.Tensor:
     return torch.as_tensor(to_decimal_year(pd.Series(pd.to_datetime(dates)))).unsqueeze(0)
-
-
-LABEL_NAMES = ["lab_a", "lab_b", "lab_c"]
-
-
-def _batch(
-    batch_size=4, length=24, channels=3, seed=0, start="2019-01-01", months_step=1, year_offset=0, labels=3
-):
-    generator = torch.Generator().manual_seed(seed)
-    dates = pd.date_range(start, periods=length, freq=f"{months_step}MS")
-    if year_offset:
-        dates = dates + pd.DateOffset(years=year_offset)
-    times = torch.as_tensor(to_decimal_year(pd.Series(dates))).unsqueeze(0).repeat(batch_size, 1)
-    return {
-        "x_static": torch.randn(batch_size, 5, generator=generator),
-        "y": torch.randn(batch_size, 1, generator=generator),
-        "sequences": {"m": torch.randn(batch_size, length, channels, generator=generator)},
-        "sequence_mask": {"m": torch.ones(batch_size, length, dtype=torch.bool)},
-        "sequence_time": {"m": times},
-        "sequence_validity": {"m": torch.ones(batch_size, length, channels, dtype=torch.bool)},
-        # Appended last so the generator draws above keep their values and every existing
-        # expectation in this file still holds.
-        "x_labels": torch.randn(batch_size, labels, generator=generator),
-        "x_label_validity": torch.ones(batch_size, labels, dtype=torch.bool),
-    }
 
 
 # --- month lookup ----------------------------------------------------------
@@ -301,7 +278,7 @@ def _module(encoder: str, **kwargs) -> SoilCNNLightningModule:
 @pytest.mark.parametrize("encoder", ENCODERS)
 def test_module_forward_produces_gradients(encoder: str) -> None:
     module = _module(encoder)
-    batch = _batch()
+    batch = cnn_batch()
 
     predictions = module(batch)
     assert predictions.shape == (4, 1)
@@ -321,8 +298,8 @@ def test_module_is_invariant_to_the_calendar_era(encoder: str, start: str) -> No
     month lookup that ignores leap days would drift.
     """
     module = _module(encoder)
-    batch = _batch(start=start)
-    shifted = _batch(start=start, year_offset=10)
+    batch = cnn_batch(start=start)
+    shifted = cnn_batch(start=start, year_offset=10)
     shifted = {**batch, "sequence_time": shifted["sequence_time"]}
 
     with torch.no_grad():
@@ -350,8 +327,8 @@ def test_module_runs_on_spans_it_was_not_built_for(encoder: str) -> None:
     module = _module(encoder, grid_years=None)
 
     with torch.no_grad():
-        short = module(_batch(length=6, seed=1))
-        long = module(_batch(length=90, seed=2))
+        short = module(cnn_batch(length=6, seed=1))
+        long = module(cnn_batch(length=90, seed=2))
 
     assert short.shape == long.shape == (4, 1)
     assert torch.isfinite(short).all() and torch.isfinite(long).all()
@@ -360,7 +337,7 @@ def test_module_runs_on_spans_it_was_not_built_for(encoder: str) -> None:
 @pytest.mark.parametrize("encoder", ENCODERS)
 def test_module_consumes_validity_channels(encoder: str) -> None:
     module = _module(encoder)
-    batch = _batch()
+    batch = cnn_batch()
     flipped_validity = batch["sequence_validity"]["m"].clone()
     flipped_validity[0, :6] = False
     flipped = {**batch, "sequence_validity": {"m": flipped_validity}}
@@ -376,7 +353,7 @@ def test_module_consumes_validity_channels(encoder: str) -> None:
 @pytest.mark.parametrize("encoder", ENCODERS)
 def test_module_ignores_masked_out_observations(encoder: str) -> None:
     module = _module(encoder)
-    batch = _batch(length=12)
+    batch = cnn_batch(length=12)
     mask = batch["sequence_mask"]["m"].clone()
     mask[:, 8:] = False
     batch = {**batch, "sequence_mask": {"m": mask}}
@@ -391,7 +368,7 @@ def test_module_ignores_masked_out_observations(encoder: str) -> None:
 @pytest.mark.parametrize("encoder", ENCODERS)
 def test_module_inverts_the_target_transform_for_prediction(encoder: str) -> None:
     module = _module(encoder, target_mean=[1.5], target_scale=[0.5], target_transform="log1p")
-    batch = _batch()
+    batch = cnn_batch()
 
     with torch.no_grad():
         expected = torch.expm1((module(batch) * 0.5 + 1.5) / 10.0)
@@ -439,13 +416,13 @@ def test_module_rejects_an_unknown_encoder_name() -> None:
 
 def test_module_runs_without_a_temporal_branch() -> None:
     module = _module("dilated_tempcnn", temporal_enabled=False)
-    assert module(_batch()).shape == (4, 1)
+    assert module(cnn_batch()).shape == (4, 1)
     assert len(module.temporal_encoders) == 0
 
 
 def test_module_runs_without_static_features() -> None:
     module = _module("dilated_tempcnn", static_dim=0)
-    batch = {**_batch(), "x_static": torch.zeros(4, 0)}
+    batch = {**cnn_batch(), "x_static": torch.zeros(4, 0)}
     predictions = module(batch)
 
     assert predictions.shape == (4, 1)
@@ -468,7 +445,7 @@ def _auxiliary_module(**kwargs) -> SoilCNNLightningModule:
 def test_a_selected_lab_column_reaches_the_head_and_an_unselected_one_does_not() -> None:
     """The whole point of the feature, and the guard that selection is by position not by luck."""
     module = _auxiliary_module()
-    batch = _batch()
+    batch = cnn_batch()
     baseline = module(batch)
 
     for column, expected_change in (("lab_a", True), ("lab_b", False), ("lab_c", True)):
@@ -480,7 +457,7 @@ def test_a_selected_lab_column_reaches_the_head_and_an_unselected_one_does_not()
 
 def test_validity_flags_reach_the_head_too() -> None:
     module = _auxiliary_module()
-    batch = _batch()
+    batch = cnn_batch()
 
     flipped = {**batch, "x_label_validity": batch["x_label_validity"].clone()}
     flipped["x_label_validity"][:, LABEL_NAMES.index("lab_a")] = False
@@ -490,7 +467,7 @@ def test_validity_flags_reach_the_head_too() -> None:
 
 def test_validity_channels_can_be_switched_off() -> None:
     module = _auxiliary_module(auxiliary_validity_channels=False)
-    batch = _batch()
+    batch = cnn_batch()
 
     flipped = {**batch, "x_label_validity": torch.zeros_like(batch["x_label_validity"])}
     assert torch.allclose(module(flipped), module(batch), atol=1e-6)
@@ -551,14 +528,14 @@ def test_no_auxiliary_columns_leaves_the_architecture_untouched() -> None:
     assert plain.auxiliary_output_dim == 0
     assert head_input.in_features == plain.fusion.output_dim
     # No target_names needed, and a batch without the lab keys still runs.
-    batch = {key: value for key, value in _batch().items() if not key.startswith("x_label")}
+    batch = {key: value for key, value in cnn_batch().items() if not key.startswith("x_label")}
     assert torch.isfinite(plain(batch)).all()
 
 
 def test_a_batch_that_no_longer_matches_the_label_roster_is_refused() -> None:
     """Positions were resolved at build time; a narrower batch would read a different measurement."""
     module = _auxiliary_module()
-    batch = _batch(labels=2)
+    batch = cnn_batch(labels=2)
 
     with pytest.raises(ValueError, match="no longer matches the checkpoint's label roster"):
         module(batch)
@@ -589,97 +566,6 @@ def test_module_checkpoint_reloads_under_weights_only(tmp_path: Path, encoder: s
 # --- data path -------------------------------------------------------------
 
 
-def _write_csvs(tmp_path: Path, dates_by_point, split: bool = False):
-    """Write the fixture as one joint file, or as separate static and targets files.
-
-    `split` is not decoration: the targets join used to carry only the ACTIVE targets, so the two
-    layouts disagreed about which lab columns a model could select from the very same declaration.
-    """
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    point_ids = sorted(dates_by_point)
-    static_df = pd.DataFrame(
-        {
-            "point_id": point_ids,
-            "lat": [0.1 * index for index in range(len(point_ids))],
-            "lon": [0.1 * index for index in range(len(point_ids))],
-            "target_a": [1.0 + index for index in range(len(point_ids))],
-            "static_1": [10.0 + index for index in range(len(point_ids))],
-            # Measured lab values: named in LABEL_COLUMNS so they are never features, but carried
-            # on the bundle so a model may opt into them. lab_sparse is deliberately incomplete.
-            "lab_dense": [100.0 + 10.0 * index for index in range(len(point_ids))],
-            "lab_sparse": [
-                np.nan if index % 2 else 5.0 + index for index in range(len(point_ids))
-            ],
-        }
-    )
-    targets_df = static_df
-    if split:
-        # The lab values live with the targets, which is where a real targets file keeps them.
-        lab_columns = ["point_id", "target_a", "lab_dense", "lab_sparse"]
-        targets_df = static_df[lab_columns]
-        static_df = static_df.drop(columns=[column for column in lab_columns if column != "point_id"])
-
-    rows = []
-    for point_id, dates in dates_by_point.items():
-        for index, date in enumerate(dates):
-            rows.append(
-                {
-                    "point_id": point_id,
-                    "obs_date": date,
-                    "S2_b2": 1.0 + index,
-                    "S2_b3": np.nan if (point_id == 2 and index == 0) else 2.0 + index,
-                }
-            )
-    static_path, timeseries_path = tmp_path / "static.csv", tmp_path / "ts.csv"
-    targets_path = tmp_path / "targets.csv" if split else static_path
-    static_df.to_csv(static_path, index=False)
-    if split:
-        targets_df.to_csv(targets_path, index=False)
-    pd.DataFrame(rows).to_csv(timeseries_path, index=False)
-    return static_path, timeseries_path, targets_path
-
-
-def _bundle(tmp_path: Path, logger, dates_by_point, carry_labels: bool = True, split: bool = False):
-    static_path, timeseries_path, targets_path = _write_csvs(tmp_path, dates_by_point, split=split)
-    config = SimpleNamespace(
-        DATA_FOLDER=str(tmp_path),
-        DATA_FILE="static.csv",
-        STATIC_CSV_PATH=str(static_path),
-        TIMESERIES_CSV_PATH=str(timeseries_path),
-        POINT_ID_COLUMN="point_id",
-        LAT_COLUMN="lat",
-        LON_COLUMN="lon",
-        TIME_COLUMN="obs_date",
-        TEMPORAL_FEATURES_ENABLED=True,
-        TEMPORAL_FEATURES={"enabled": True, "time_column": "obs_date"},
-        MODALITY_PREFIX_MAP={"s2": "S2_"},
-        S1_COLUMNS=[],
-        S2_COLUMNS=[],
-        MODIS_COLUMNS=[],
-        TARGET_COLUMNS=["target_a"],
-        LABEL_COLUMNS=["target_a", "lab_dense", "lab_sparse"],
-        CARRY_LABEL_COLUMNS=carry_labels,
-        PREDICTOR_COLUMNS=[],
-        IGNORED_COLUMNS=["point_id", "lat", "lon"],
-        ELIMINATED_FEATURES=["point_id", "lat", "lon"],
-        CATEGORICAL_FEATURES=[],
-        EXCLUDE_CATEGORICAL=False,
-        EXISTING_HS_FEATURES={"enabled": False},
-        RANDOM_SEED=42,
-        TEST_SIZE=0.25,
-        DATA_INDEX_MANIFEST_PATH=None,
-        STATIC_SOURCE=None,
-        TARGETS_SOURCE=None,
-        TIMESERIES_SOURCE=None,
-        STATIC_FEATURES_FOLDER=None,
-        TARGETS_FOLDER=None,
-        TIMESERIES_FOLDER=None,
-        TARGETS_FILE=targets_path.name,
-        TARGETS_CSV_PATH=str(targets_path),
-    )
-    return SoilSequenceBuilder(config, logger, DataManager(config, logger)).build()
-
-
 @pytest.mark.parametrize(
     "dates_by_point, expected_years",
     [
@@ -691,12 +577,12 @@ def _bundle(tmp_path: Path, logger, dates_by_point, carry_labels: bool = True, s
     ],
 )
 def test_grid_years_is_inferred_from_the_data(tmp_path: Path, logger, dates_by_point, expected_years) -> None:
-    datamodule = SoilSequenceDataModule(_bundle(tmp_path, logger, dates_by_point), batch_size=3)
+    datamodule = SoilSequenceDataModule(built_sequence_bundle(tmp_path, logger, dates_by_point), batch_size=3)
     assert datamodule.grid_years == expected_years
 
 
 def test_validity_reaches_the_batch_and_survives_padding(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01", "2022-03-01"], 2: ["2022-01-01"], 3: ["2022-05-01"]},
@@ -717,7 +603,7 @@ def test_validity_reaches_the_batch_and_survives_padding(tmp_path: Path, logger)
 
 
 def test_standardization_ignores_median_filled_cells(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01", "2022-02-01"], 3: ["2022-01-01"]},
@@ -736,7 +622,7 @@ def test_standardization_ignores_median_filled_cells(tmp_path: Path, logger) -> 
 
 
 def test_label_columns_travel_on_the_bundle_without_becoming_features(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -758,8 +644,8 @@ def test_a_split_targets_file_offers_the_same_lab_columns_as_a_joint_one(tmp_pat
     """The regression: the join used to carry only the ACTIVE targets, so the same LABEL_COLUMNS
     declaration meant 3 selectable columns on a joint file and 1 on split files."""
     dates = {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]}
-    joint = _bundle(tmp_path / "joint", logger, dates)
-    split = _bundle(tmp_path / "split", logger, dates, split=True)
+    joint = built_sequence_bundle(tmp_path / "joint", logger, dates)
+    split = built_sequence_bundle(tmp_path / "split", logger, dates, split=True)
 
     assert split.label_feature_names == joint.label_feature_names == ["target_a", "lab_dense", "lab_sparse"]
     np.testing.assert_array_equal(
@@ -771,7 +657,7 @@ def test_a_split_targets_file_offers_the_same_lab_columns_as_a_joint_one(tmp_pat
 
 @pytest.mark.parametrize("split", [False, True])
 def test_the_carry_flag_off_leaves_no_lab_columns_on_the_bundle(tmp_path: Path, logger, split: bool) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -787,7 +673,7 @@ def test_the_carry_flag_off_leaves_no_lab_columns_on_the_bundle(tmp_path: Path, 
 
 
 def test_the_carry_flag_off_produces_batches_without_lab_values(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -804,7 +690,7 @@ def test_the_carry_flag_off_produces_batches_without_lab_values(tmp_path: Path, 
 
 def test_selecting_a_column_with_nothing_carried_names_the_flag(tmp_path: Path, logger) -> None:
     """The message the failing run should have shown: the config was right, the flag was off."""
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -825,7 +711,7 @@ def test_selecting_a_column_with_nothing_carried_names_the_flag(tmp_path: Path, 
 
 
 def test_lab_values_reach_the_batch_standardized_with_validity(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -846,7 +732,7 @@ def test_lab_values_reach_the_batch_standardized_with_validity(tmp_path: Path, l
 
 def test_lab_fill_and_scaling_come_from_the_train_split_only(tmp_path: Path, logger) -> None:
     """A median fitted over val/test would leak their distribution into every filled cell."""
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {point: ["2022-01-01", "2022-02-01"] for point in range(1, 9)},
@@ -863,7 +749,7 @@ def test_lab_fill_and_scaling_come_from_the_train_split_only(tmp_path: Path, log
 
 
 def test_a_lab_column_with_no_measured_train_value_stays_inert(tmp_path: Path, logger) -> None:
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {1: ["2022-01-01", "2022-02-01"], 2: ["2022-01-01"], 3: ["2022-03-01"]},
@@ -886,7 +772,7 @@ def test_builder_to_cnn_module_with_auxiliary_labels_end_to_end(tmp_path: Path, 
     from lightning.pytorch import Trainer
 
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -928,7 +814,7 @@ def test_builder_to_cnn_module_end_to_end(tmp_path: Path, logger) -> None:
 
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
     # Enough points that val and test are both non-empty; a 3-point fixture leaves val with none.
-    bundle = _bundle(
+    bundle = built_sequence_bundle(
         tmp_path,
         logger,
         {point: dates[: 20 + 4 * point] for point in range(1, 9)},

@@ -23,6 +23,8 @@ from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuil
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
+from tests.support.builders import sequence_builder_config
+
 
 # --- fixtures --------------------------------------------------------------
 
@@ -82,40 +84,12 @@ def _write_csvs(tmp_path: Path, *, year_offset: int = 0, dates_by_point=None, wi
 def _config(
     tmp_path: Path, static_path: Path, timeseries_path: Path, categorical_features=()
 ) -> SimpleNamespace:
-    return SimpleNamespace(
-        DATA_FOLDER=str(tmp_path),
-        DATA_FILE="static.csv",
-        STATIC_CSV_PATH=str(static_path),
-        TIMESERIES_CSV_PATH=str(timeseries_path),
-        POINT_ID_COLUMN="point_id",
-        LAT_COLUMN="lat",
-        LON_COLUMN="lon",
-        TIME_COLUMN="obs_date",
-        TEMPORAL_FEATURES_ENABLED=True,
-        TEMPORAL_FEATURES={"enabled": True, "time_column": "obs_date"},
+    return sequence_builder_config(
+        tmp_path,
+        static_path,
+        timeseries_path,
         MODALITY_PREFIX_MAP={"s1": "S1_", "s2": "S2_"},
-        S1_COLUMNS=[],
-        S2_COLUMNS=[],
-        MODIS_COLUMNS=[],
-        TARGET_COLUMNS=["target_a"],
-        LABEL_COLUMNS=["target_a"],
-        PREDICTOR_COLUMNS=[],
-        IGNORED_COLUMNS=["point_id", "lat", "lon"],
-        ELIMINATED_FEATURES=["point_id", "lat", "lon"],
         CATEGORICAL_FEATURES=list(categorical_features),
-        EXCLUDE_CATEGORICAL=False,
-        EXISTING_HS_FEATURES={"enabled": False},
-        RANDOM_SEED=42,
-        TEST_SIZE=0.25,
-        DATA_INDEX_MANIFEST_PATH=None,
-        STATIC_SOURCE=None,
-        TARGETS_SOURCE=None,
-        TIMESERIES_SOURCE=None,
-        STATIC_FEATURES_FOLDER=None,
-        TARGETS_FOLDER=None,
-        TIMESERIES_FOLDER=None,
-        TARGETS_FILE="static.csv",
-        TARGETS_CSV_PATH=str(static_path),
     )
 
 

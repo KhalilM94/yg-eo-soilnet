@@ -13,7 +13,6 @@ import pytest
 import torch
 from torch import nn
 
-from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 from yg_eo_soilnet.models.lightningmodules.losses import (
@@ -23,6 +22,10 @@ from yg_eo_soilnet.models.lightningmodules.losses import (
     build_loss_fn,
 )
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
+
+from tests.support.cnn import detach_logging
+
+from tests.support.builders import correlated_bundle
 
 # Two targets that move together and a third that is nearly independent - the shape the soil
 # targets actually have, and enough structure for a "defiant" error direction to exist.
@@ -53,16 +56,6 @@ def _module(**overrides) -> SoilCNNLightningModule:
     )
     kwargs.update(overrides)
     return SoilCNNLightningModule(**kwargs)
-
-
-def _detach_logging(module):
-    """Silence LightningModule.log, which warns when there is no Trainer attached.
-
-    These tests exercise the step logic directly rather than through a Trainer, and the suite runs
-    with filterwarnings = ["error"], so the warning would fail the test for the wrong reason.
-    """
-    module.log = lambda *args, **kwargs: None
-    return module
 
 
 # --- mahalanobis -----------------------------------------------------------
@@ -295,7 +288,7 @@ def test_cosine_needs_no_covariance() -> None:
 
 @pytest.mark.parametrize("loss_name", ["mahalanobis", "correlation_penalty", "cosine"])
 def test_the_module_builds_and_steps_with_a_structural_loss(loss_name) -> None:
-    module = _detach_logging(_module(loss_name=loss_name))
+    module = detach_logging(_module(loss_name=loss_name))
     generator = torch.Generator().manual_seed(1)
     batch = {
         "x_static": torch.randn(32, 3, generator=generator),
@@ -343,19 +336,6 @@ def test_a_point_loss_reports_no_components() -> None:
 # --- the whole chain -------------------------------------------------------
 
 
-def _correlated_bundle(n_points: int = 64) -> SoilSequenceBundle:
-    generator = np.random.default_rng(7)
-    first = generator.standard_normal(n_points)
-    second = 0.85 * first + 0.53 * generator.standard_normal(n_points)
-    return SoilSequenceBundle(
-        point_ids=list(range(n_points)),
-        static_features=generator.standard_normal((n_points, 2)).astype(np.float32),
-        static_feature_names=["f1", "f2"],
-        targets=np.column_stack([first, second]).astype(np.float32),
-        target_names=["target_a", "target_b"],
-    )
-
-
 @pytest.mark.parametrize("loss_name", ["mahalanobis", "correlation_penalty", "cosine"])
 def test_datamodule_to_factory_to_trainer_end_to_end(loss_name) -> None:
     """The covariance is fitted in the datamodule, offered by the factory and consumed by the
@@ -364,7 +344,7 @@ def test_datamodule_to_factory_to_trainer_end_to_end(loss_name) -> None:
     from lightning.pytorch import Trainer
 
     datamodule = SoilSequenceDataModule(
-        _correlated_bundle(), batch_size=16, val_size=0.25, test_size=0.25, seed=0
+        correlated_bundle(0.85, n_points=64, seed=7), batch_size=16, val_size=0.25, test_size=0.25, seed=0
     )
     datamodule.setup("fit")
     assert datamodule.target_covariance_ is not None

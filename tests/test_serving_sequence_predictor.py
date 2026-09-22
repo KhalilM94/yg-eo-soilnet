@@ -19,82 +19,25 @@ from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceD
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 from yg_eo_soilnet.serving import SoilSequencePredictor
 
+from tests.support.builders import sequence_bundle, tiny_cnn
+
 STATIC_NAMES = ["clay_pct", "ph"]
 S2_BANDS = ["S2_B02", "S2_B08"]
 N_POINTS = 24
 
 
-def _bundle(seed: int = 0) -> SoilSequenceBundle:
-    generator = np.random.default_rng(seed)
-    return SoilSequenceBundle(
-        point_ids=[f"p{index}" for index in range(N_POINTS)],
-        static_features=generator.normal(20, 5, (N_POINTS, len(STATIC_NAMES))).astype(np.float32),
-        static_feature_names=list(STATIC_NAMES),
-        static_categoricals=np.asarray(
-            [[generator.choice(["sandy", "loam"])] for _ in range(N_POINTS)], dtype=object
-        ),
-        categorical_feature_names=["texture"],
-        targets=generator.normal(3, 1, (N_POINTS, 1)).astype(np.float32),
-        target_names=["organic_matter_pct"],
-        sequences={
-            "s2": [
-                generator.normal(0.2, 0.05, (generator.integers(3, 8), len(S2_BANDS))).astype(np.float32)
-                for _ in range(N_POINTS)
-            ]
-        },
-        sequence_times={},
-        modality_columns={"s2": list(S2_BANDS)},
-        temporal_enabled=True,
-    )
-
-
-def _with_times(bundle: SoilSequenceBundle, seed: int = 0) -> SoilSequenceBundle:
-    generator = np.random.default_rng(seed + 100)
-    bundle.sequence_times = {
-        "s2": [
-            2020.0 + np.sort(generator.random(values.shape[0])) * 2.0
-            for values in bundle.sequences["s2"]
-        ]
-    }
-    return bundle
-
-
 @pytest.fixture
-def trained() -> tuple[SoilCNNLightningModule, SoilSequenceDataModule, SoilSequenceBundle]:
-    torch.manual_seed(0)
-    bundle = _with_times(_bundle())
-
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
+def cnn() -> tuple[SoilCNNLightningModule, SoilSequenceDataModule, SoilSequenceBundle]:
+    bundle = sequence_bundle(
+        n_points=N_POINTS, static=STATIC_NAMES, modalities={"s2": S2_BANDS}, observations=(3, 8)
     )
-    datamodule.setup("fit")
-
-    model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        target_names=datamodule.target_names,
-        categorical_cardinalities=datamodule.categorical_cardinalities,
-        categorical_vocabularies=datamodule.categorical_vocabularies,
-        categorical_feature_names=datamodule.categorical_feature_names,
-        modality_dims=datamodule.modality_dims,
-        temporal_enabled=True,
-        grid_years=datamodule.grid_years,
-        static_hidden_dims=[6],
-        head_hidden_dims=[6],
-        cnn_hidden_dims=[4],
-        modality_embed_dim=4,
-        dropout=0.0,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-    )
-    model.attach_preprocessing_state(datamodule.preprocessing_state())
-    model.eval()
+    model, datamodule = tiny_cnn(bundle)
     return model, datamodule, bundle
 
 
-def test_preprocessing_state_is_plain_builtins(trained) -> None:
+def test_preprocessing_state_is_plain_builtins(cnn) -> None:
     """A numpy array in hyper_parameters makes the checkpoint unloadable under weights_only=True."""
-    _model, datamodule, _bundle_ = trained
+    _model, datamodule, _bundle_ = cnn
     state = datamodule.preprocessing_state()
 
     def assert_plain(value, path="state"):
@@ -111,8 +54,8 @@ def test_preprocessing_state_is_plain_builtins(trained) -> None:
     assert_plain(state)
 
 
-def test_preprocessing_state_carries_the_input_scalers(trained) -> None:
-    _model, datamodule, _bundle_ = trained
+def test_preprocessing_state_carries_the_input_scalers(cnn) -> None:
+    _model, datamodule, _bundle_ = cnn
     state = datamodule.preprocessing_state()
 
     assert len(state["static_mean"]) == len(STATIC_NAMES)
@@ -123,9 +66,9 @@ def test_preprocessing_state_carries_the_input_scalers(trained) -> None:
     assert state["categorical_vocabularies"] and state["categorical_feature_names"] == ["texture"]
 
 
-def test_a_reloaded_checkpoint_predicts_the_same_values(trained, tmp_path) -> None:
+def test_a_reloaded_checkpoint_predicts_the_same_values(cnn, tmp_path) -> None:
     """The round trip: save, reload with weights_only semantics, predict from a RAW bundle."""
-    model, _datamodule, bundle = trained
+    model, _datamodule, bundle = cnn
 
     before = SoilSequencePredictor(model).predict(bundle)
 
@@ -150,9 +93,9 @@ def test_a_reloaded_checkpoint_predicts_the_same_values(trained, tmp_path) -> No
     assert np.allclose(before, after)
 
 
-def test_predictions_come_back_in_original_target_units(trained) -> None:
+def test_predictions_come_back_in_original_target_units(cnn) -> None:
     """predict_step inverts the standardization; forward alone would return standardized values."""
-    model, _datamodule, bundle = trained
+    model, _datamodule, bundle = cnn
 
     predictions = SoilSequencePredictor(model).predict(bundle)
 
@@ -165,14 +108,14 @@ def test_predictions_come_back_in_original_target_units(trained) -> None:
     assert not np.allclose(predictions, standardized)
 
 
-def test_scalers_are_not_refitted_on_the_incoming_points(trained) -> None:
+def test_scalers_are_not_refitted_on_the_incoming_points(cnn) -> None:
     """A serving batch is not a training split.
 
     Predicting for a subset must give each point the same answer it gets in the full batch. If the
     scaler were refitted per request, a point's prediction would depend on which other points
     happened to arrive with it.
     """
-    model, _datamodule, bundle = trained
+    model, _datamodule, bundle = cnn
     predictor = SoilSequencePredictor(model)
 
     full = predictor.predict(bundle)
@@ -192,8 +135,8 @@ def test_scalers_are_not_refitted_on_the_incoming_points(trained) -> None:
     assert np.allclose(predictor.predict(subset), full[:4], atol=1e-5)
 
 
-def test_a_single_point_is_scored_consistently(trained) -> None:
-    model, _datamodule, bundle = trained
+def test_a_single_point_is_scored_consistently(cnn) -> None:
+    model, _datamodule, bundle = cnn
     predictor = SoilSequencePredictor(model)
     full = predictor.predict(bundle)
 
@@ -213,9 +156,9 @@ def test_a_single_point_is_scored_consistently(trained) -> None:
 
 
 def test_an_unseen_category_lands_on_the_reserved_index_rather_than_shifting_the_others(
-    trained,
+    cnn,
 ) -> None:
-    model, _datamodule, bundle = trained
+    model, _datamodule, bundle = cnn
     predictor = SoilSequencePredictor(model)
 
     unseen = SoilSequenceBundle.from_mapping(
@@ -229,8 +172,8 @@ def test_an_unseen_category_lands_on_the_reserved_index_rather_than_shifting_the
     assert np.isfinite(predictions).all()
 
 
-def test_predict_frame_labels_columns_with_the_target_names(trained) -> None:
-    model, _datamodule, bundle = trained
+def test_predict_frame_labels_columns_with_the_target_names(cnn) -> None:
+    model, _datamodule, bundle = cnn
 
     frame = SoilSequencePredictor(model).predict_frame(bundle)
 
@@ -245,8 +188,8 @@ def test_a_checkpoint_without_the_state_is_refused_with_an_actionable_message() 
         SoilSequencePredictor(model)
 
 
-def test_an_empty_bundle_predicts_nothing_rather_than_raising(trained) -> None:
-    model, _datamodule, _bundle_ = trained
+def test_an_empty_bundle_predicts_nothing_rather_than_raising(cnn) -> None:
+    model, _datamodule, _bundle_ = cnn
 
     predictions = SoilSequencePredictor(model).predict(SoilSequenceBundle())
 

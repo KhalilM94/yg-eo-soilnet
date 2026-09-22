@@ -22,14 +22,13 @@ import pytest
 import torch
 import yaml
 
-from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
-from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
-from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 from yg_eo_soilnet.serving.lightning_pyfunc import (
     build_input_example,
     serving_requirements,
     stage_serving_package,
 )
+
+from tests.support.builders import sequence_bundle, tiny_cnn
 
 STATIC = ["clay_pct", "ph"]
 BANDS = ["S2_B02", "S2_B08"]
@@ -41,68 +40,14 @@ N_POINTS = 12
 TRAINING_ONLY_PACKAGES = ("geopandas", "pyproj", "shapely", "seaborn", "statsmodels", "scikit-learn")
 
 
-def _bundle() -> SoilSequenceBundle:
-    generator = np.random.default_rng(0)
-    bundle = SoilSequenceBundle(
-        point_ids=[f"p{index}" for index in range(N_POINTS)],
-        static_features=generator.normal(20, 5, (N_POINTS, len(STATIC))).astype(np.float32),
-        static_feature_names=list(STATIC),
-        static_categoricals=np.asarray(
-            [[generator.choice(["sandy", "loam"])] for _ in range(N_POINTS)], dtype=object
-        ),
-        categorical_feature_names=["texture"],
-        targets=generator.normal(3, 1, (N_POINTS, 1)).astype(np.float32),
-        target_names=["organic_matter_g_kg"],
-        label_features=generator.normal(5, 1, (N_POINTS, len(LAB_ROSTER))).astype(np.float32),
-        label_feature_names=list(LAB_ROSTER),
-        sequences={
-            "s2": [
-                generator.normal(0.2, 0.05, (int(generator.integers(3, 7)), len(BANDS))).astype(np.float32)
-                for _ in range(N_POINTS)
-            ]
-        },
-        sequence_times={},
-        modality_columns={"s2": list(BANDS)},
-        temporal_enabled=True,
+def _bundle():
+    return sequence_bundle(
+        n_points=N_POINTS,
+        static=STATIC,
+        modalities={"s2": BANDS},
+        target="organic_matter_g_kg",
+        lab_roster=LAB_ROSTER,
     )
-    bundle.sequence_times = {
-        "s2": [
-            2020.0 + np.sort(generator.random(values.shape[0])) * 2.0
-            for values in bundle.sequences["s2"]
-        ]
-    }
-    return bundle
-
-
-def _model(bundle, *, auxiliary=None):
-    torch.manual_seed(0)
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
-    )
-    datamodule.setup("fit")
-    model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim,
-        target_dim=datamodule.target_dim,
-        target_names=datamodule.target_names,
-        categorical_cardinalities=datamodule.categorical_cardinalities,
-        categorical_vocabularies=datamodule.categorical_vocabularies,
-        categorical_feature_names=datamodule.categorical_feature_names,
-        modality_dims=datamodule.modality_dims,
-        temporal_enabled=True,
-        grid_years=datamodule.grid_years,
-        auxiliary_label_columns=auxiliary,
-        auxiliary_available_names=LAB_ROSTER if auxiliary else None,
-        static_hidden_dims=[6],
-        head_hidden_dims=[6],
-        cnn_hidden_dims=[4],
-        modality_embed_dim=4,
-        dropout=0.0,
-        target_mean=datamodule.target_mean_,
-        target_scale=datamodule.target_scale_,
-    )
-    model.attach_preprocessing_state(datamodule.preprocessing_state())
-    model.eval()
-    return model, datamodule
 
 
 @pytest.fixture(scope="module")
@@ -115,7 +60,7 @@ def logged(tmp_path_factory) -> dict:
 
     root = tmp_path_factory.mktemp("packaging")
     bundle = _bundle()
-    model, datamodule = _model(bundle)
+    model, datamodule = tiny_cnn(bundle)
 
     configure_tracking(
         SimpleNamespace(
@@ -220,7 +165,7 @@ def test_the_signature_carries_no_unused_lab_column(logged) -> None:
 
 def test_a_model_that_uses_lab_values_gets_exactly_those() -> None:
     bundle = _bundle()
-    model, _datamodule = _model(bundle, auxiliary=["ph_water", "clay_lab"])
+    model, _datamodule = tiny_cnn(bundle, auxiliary=["ph_water", "clay_lab"])
 
     columns = set(build_input_example(model, bundle, n_rows=2).columns)
 

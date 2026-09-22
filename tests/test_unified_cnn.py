@@ -30,8 +30,8 @@ from yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module im
 )
 from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import AttentionFusion, ConcatGatedFusion
 
-from tests.test_cnn_pipeline import LABEL_NAMES, _batch
-from tests.test_residual_cnn import LABEL_MEAN, LABEL_SCALE
+from tests.support.cnn import LABEL_MEAN, LABEL_NAMES, LABEL_SCALE, built_sequence_bundle, cnn_batch
+
 
 # (fusion, auxiliary_enabled, residual_enabled) - every combination.
 SWITCHES = list(itertools.product(["gated", "attention"], [False, True], [False, True]))
@@ -140,7 +140,7 @@ def test_every_combination_builds_what_it_names_and_nothing_else(fusion, auxilia
 def test_every_combination_explains_itself_exactly(fusion, auxiliary, residual) -> None:
     """forward_from_parts(explanation_parts(batch)) == forward(batch), whatever is switched on."""
     module = _switched(fusion, auxiliary, residual)
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         prediction = module(batch)
@@ -165,7 +165,7 @@ def test_every_combination_survives_a_weights_only_checkpoint_round_trip(
         auxiliary,
         residual,
     )
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         assert torch.allclose(restored(batch), module(batch), atol=1e-6)
 
@@ -173,7 +173,7 @@ def test_every_combination_survives_a_weights_only_checkpoint_round_trip(
 def test_attention_without_a_residual_base_trains() -> None:
     """The combination no class could build before the switches."""
     module = _build(fusion="attention", residual_enabled=False).train()
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     nn.functional.mse_loss(module(batch), batch["y"]).backward()
 
@@ -253,7 +253,7 @@ def test_a_legacy_name_is_the_same_network_as_its_switches(legacy_cls, switches)
     # Same construction order under the same seed, so the same weights, not just the same shapes.
     for key, value in legacy_state.items():
         assert torch.equal(value, unified_state[key]), key
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         assert torch.equal(legacy(batch), unified(batch))
 
@@ -268,7 +268,7 @@ def test_a_checkpoint_written_before_the_switches_loads_into_its_own_class(tmp_p
     restored = _round_trip(module, cls, tmp_path, hparams=hparams)
 
     assert (restored.fusion_type, restored.residual_enabled) == (module.fusion_type, module.residual_enabled)
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         assert torch.allclose(restored(batch), module(batch), atol=1e-6)
 
@@ -281,7 +281,7 @@ def test_a_model_pickled_before_the_switches_still_predicts(cls) -> None:
     falls through to the class attribute - which each legacy name sets to what it was built with.
     """
     module = _build(cls)
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         expected = module(batch)
 
@@ -319,11 +319,10 @@ def test_the_shipped_soil_cnn_entry_builds_when_no_lab_columns_are_carried(tmp_p
     from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
     from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 
-    from tests.test_cnn_pipeline import _bundle
 
     registry = load_lightning_registry("configs/lightning/models/defaults.yml")
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)}, carry_labels=False)
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)}, carry_labels=False)
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 

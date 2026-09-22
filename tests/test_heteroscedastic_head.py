@@ -6,6 +6,8 @@ import torch
 
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 
+from tests.support.cnn import detach_logging
+
 
 def _module(**overrides) -> SoilCNNLightningModule:
     # No modalities: the CNN's static branch alone, so a batch needs only x_static and y.
@@ -27,16 +29,6 @@ def _batch(n_rows=8, static_dim=3, target_dim=1, seed=0):
         "x_static": torch.randn(n_rows, static_dim, generator=generator),
         "y": torch.randn(n_rows, target_dim, generator=generator),
     }
-
-
-def _detach_logging(module):
-    """Silence LightningModule.log, which warns when there is no Trainer attached.
-
-    These tests exercise the step logic directly rather than through a Trainer, and the suite runs
-    with filterwarnings = ["error"], so the warning would fail the test for the wrong reason.
-    """
-    module.log = lambda *args, **kwargs: None
-    return module
 
 
 # --- the head --------------------------------------------------------------
@@ -122,7 +114,7 @@ def test_the_variance_weight_carries_no_gradient():
 
 
 def test_the_variance_head_trains_without_a_non_finite_loss():
-    module = _detach_logging(_module())
+    module = detach_logging(_module())
     optimizer = torch.optim.Adam(module.parameters(), lr=1e-2)
     batch = _batch(32)
     for _ in range(20):
@@ -137,7 +129,7 @@ def test_epoch_metrics_score_the_mean_and_not_the_variance_channels():
     # _accumulate_metrics reshapes to (-1, target_dim). Handed the full 2*target_dim output it
     # would fold log variances in among the predictions and report an r2 for a quantity that is
     # not a prediction of anything - or, with an odd product, raise on the reshape.
-    module = _detach_logging(_module(target_dim=2, target_names=["a", "b"]))
+    module = detach_logging(_module(target_dim=2, target_names=["a", "b"]))
     module._shared_step(_batch(16, target_dim=2), "val")
     state = module._metric_state["val"]
     assert state["sum_p"].shape == (2,)

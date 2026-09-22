@@ -23,8 +23,8 @@ from yg_eo_soilnet.models.lightningmodules.soil_residual_attention_cnn_lightning
 )
 from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import AttentionFusion, ConcatGatedFusion
 
-from tests.test_cnn_pipeline import LABEL_NAMES, _batch, _bundle
-from tests.test_residual_cnn import LABEL_MEAN, LABEL_SCALE, _expected_base, _zero_head
+from tests.support.cnn import LABEL_MEAN, LABEL_NAMES, LABEL_SCALE, built_sequence_bundle, cnn_batch, expected_base, zero_head
+
 
 STATIC_MODES = ["summary", "per_feature"]
 READOUTS = ["cls", "mean", "flatten"]
@@ -223,16 +223,16 @@ def test_per_feature_mode_gives_each_categorical_embedding_its_own_token() -> No
 def test_a_zeroed_head_still_reproduces_the_base(static_tokens) -> None:
     """The residual contract survives the swap: prediction = base + head, whatever the fusion."""
     module = _module(attention_static_tokens=static_tokens)
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
-        assert torch.allclose(module(batch).reshape(-1).double(), _expected_base(batch), atol=1e-5)
+        assert torch.allclose(module(batch).reshape(-1).double(), expected_base(batch), atol=1e-5)
 
 
 def test_per_feature_mode_lets_a_single_covariate_move_the_prediction() -> None:
     module = _module(attention_static_tokens="per_feature")
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         before = module(batch)
@@ -257,7 +257,7 @@ def _full_module(**kwargs) -> SoilResidualAttentionCNNLightningModule:
 
 
 def _full_batch() -> dict:
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     generator = torch.Generator().manual_seed(1)
     batch["x_categorical"] = torch.randint(0, 4, (4, 1), generator=generator)
     batch["x_coords"] = torch.rand(4, 2, generator=generator) * 2 - 1
@@ -299,14 +299,14 @@ def test_the_attention_settings_survive_a_weights_only_checkpoint_round_trip(tmp
     torch.load(path, weights_only=True)  # the constraint that forbids numpy in hyper_parameters
 
     restored = SoilResidualAttentionCNNLightningModule.load_from_checkpoint(path, map_location="cpu").eval()
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         assert torch.allclose(restored(batch), module(batch), atol=1e-6)
 
 
 def test_the_offset_lands_on_the_mean_half_only_on_a_variance_head() -> None:
     module = _module(predict_variance=True)
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         fused = module._fuse(batch, device=CPU, dtype=torch.float32)
@@ -316,7 +316,7 @@ def test_the_offset_lands_on_the_mean_half_only_on_a_variance_head() -> None:
 
     assert out.shape[-1] == 2
     assert torch.allclose(out[:, 1:], head[:, 1:].clamp(-10.0, 10.0), atol=1e-6)
-    assert torch.allclose(out[:, 0] - head[:, 0], _expected_base(batch).float(), atol=1e-5)
+    assert torch.allclose(out[:, 0] - head[:, 0], expected_base(batch).float(), atol=1e-5)
 
 
 @pytest.mark.parametrize("encoder", ["dilated_tempcnn", "annual_grid2d"])
@@ -324,7 +324,7 @@ def test_the_offset_lands_on_the_mean_half_only_on_a_variance_head() -> None:
 def test_every_fusion_parameter_receives_a_gradient(encoder, static_tokens) -> None:
     module = _module(temporal_encoder=encoder, attention_static_tokens=static_tokens, attention_num_layers=2)
     module.train()
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     (module(batch) - batch["y"]).pow(2).mean().backward()
 
@@ -338,12 +338,12 @@ def test_without_temporal_data_the_fusion_reads_static_tokens_only() -> None:
 
     assert module.fusion.temporal_dims == []
     with torch.no_grad():
-        assert torch.isfinite(module(_batch(labels=3))).all()
+        assert torch.isfinite(module(cnn_batch(labels=3))).all()
 
 
 def test_modalities_of_different_widths_each_get_their_own_projection() -> None:
     module = _module(modality_dims={"m": 3, "n": 2}, modality_embed_dim={"m": 8, "n": 4})
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     for key in ("sequences", "sequence_validity"):
         batch[key]["n"] = batch[key]["m"][..., :2]
     for key in ("sequence_mask", "sequence_time"):
@@ -365,7 +365,7 @@ def test_the_serving_signature_still_asks_for_the_base_column() -> None:
 
 def _datamodule(tmp_path: Path, logger) -> SoilSequenceDataModule:
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
     return datamodule

@@ -15,19 +15,13 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from torch import nn
 
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module import (
     SoilResidualCNNLightningModule,
 )
 
-from tests.test_cnn_pipeline import LABEL_NAMES, _batch, _bundle
-
-# Roster stats for LABEL_NAMES. Deliberately not 0/1: an identity standardizer would hide a missing
-# de-standardization hop, which is exactly the bug this file exists to catch.
-LABEL_MEAN = [2.0, 30.0, 7.0]
-LABEL_SCALE = [0.5, 4.0, 2.0]
+from tests.support.cnn import LABEL_MEAN, LABEL_NAMES, LABEL_SCALE, built_sequence_bundle, cnn_batch, expected_base, zero_head
 
 
 def _module(**kwargs) -> SoilResidualCNNLightningModule:
@@ -48,37 +42,17 @@ def _module(**kwargs) -> SoilResidualCNNLightningModule:
     return SoilResidualCNNLightningModule(**defaults).eval()
 
 
-def _zero_head(module: SoilResidualCNNLightningModule) -> None:
-    """Silence the head so forward() returns the offset alone.
-
-    Zeroing the weights is not enough - every Linear has a bias, and the last one is what the head
-    would otherwise contribute.
-    """
-    for parameter in module.output_head.parameters():
-        nn.init.zeros_(parameter)
-
-
-def _expected_base(batch, *, index=1, target_mean=None, target_scale=None, log1p=False):
-    """The base column mapped by hand, the long way round, as the module should compute it."""
-    base = batch["x_labels"][:, index].double() * LABEL_SCALE[index] + LABEL_MEAN[index]
-    if log1p:
-        base = 10.0 * torch.log1p(base.clamp_min(0.0))
-    if target_mean is not None:
-        base = (base - target_mean) / target_scale
-    return base
-
-
 # --- the offset itself -------------------------------------------------------
 
 
 def test_a_zeroed_head_reproduces_the_base_in_the_targets_own_space() -> None:
     """The core contract: prediction = base + head, so with no head it is the base exactly."""
     module = _module()
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
     assert torch.allclose(
-        module(batch).reshape(-1).double(), _expected_base(batch), atol=1e-5
+        module(batch).reshape(-1).double(), expected_base(batch), atol=1e-5
     )
 
 
@@ -90,18 +64,18 @@ def test_the_base_passes_through_log1p_and_the_target_standardizer_in_that_order
     nothing else uses.
     """
     module = _module(target_mean=[4.0], target_scale=[2.0], target_transform="log1p")
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
-    expected = _expected_base(batch, target_mean=4.0, target_scale=2.0, log1p=True)
+    expected = expected_base(batch, target_mean=4.0, target_scale=2.0, log1p=True)
     assert torch.allclose(module(batch).reshape(-1).double(), expected, atol=1e-5)
 
 
 def test_predict_step_inverts_back_to_the_bases_original_units() -> None:
     """End to end: a zeroed head served through predict_step returns the base as it was written."""
     module = _module(target_mean=[4.0], target_scale=[2.0], target_transform="log1p")
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
     raw = batch["x_labels"][:, 1].double() * LABEL_SCALE[1] + LABEL_MEAN[1]
     assert torch.allclose(
@@ -112,8 +86,8 @@ def test_predict_step_inverts_back_to_the_bases_original_units() -> None:
 def test_a_negative_base_is_clipped_the_way_a_measured_target_would_be() -> None:
     """log1p is undefined below -1, and the datamodule clips a negative target to 0 rather than fail."""
     module = _module(target_transform="log1p")
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
     # -100 in lab-standardized space is far below the column's mean of 30.
     batch["x_labels"][:, 1] = -100.0
 
@@ -123,7 +97,7 @@ def test_a_negative_base_is_clipped_the_way_a_measured_target_would_be() -> None
 def test_the_offset_lands_on_the_mean_half_only_on_a_variance_head() -> None:
     """A 2*target_dim readout: shifting the log variances too would make exp(40) a variance."""
     module = _module(predict_variance=True, target_dim=1)
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         fused = module._fuse(batch, device=torch.device("cpu"), dtype=torch.float32)
@@ -134,13 +108,13 @@ def test_the_offset_lands_on_the_mean_half_only_on_a_variance_head() -> None:
     assert out.shape[-1] == 2
     # The log-variance half is untouched, the mean half is shifted by exactly the base.
     assert torch.allclose(out[:, 1:], head[:, 1:].clamp(-10.0, 10.0), atol=1e-6)
-    assert torch.allclose(out[:, 0] - head[:, 0], _expected_base(batch).float(), atol=1e-5)
+    assert torch.allclose(out[:, 0] - head[:, 0], expected_base(batch).float(), atol=1e-5)
 
 
 def test_the_base_also_reaches_the_network_as_an_input() -> None:
     """Not just an offset: changing the base must move the head's own contribution too."""
     module = _module(residual_base_hidden_dims=[8])
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         fused = module._fuse(batch, device=torch.device("cpu"), dtype=torch.float32)
@@ -157,7 +131,7 @@ def test_the_base_also_reaches_the_network_as_an_input() -> None:
 def test_the_validity_flag_is_carried_into_the_block() -> None:
     """A median-filled base has to be distinguishable from a measured one."""
     module = _module()
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     block = module._residual_base(batch, device=torch.device("cpu"), dtype=torch.float32)
     assert block.shape[-1] == 2
 
@@ -172,13 +146,13 @@ def test_a_multi_target_offset_is_ordered_by_target_names() -> None:
         target_names=["target_a", "target_b"],
         residual_base_columns={"target_a": "lab_c", "target_b": "lab_a"},
     )
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
     assert module.residual_base_index.tolist() == [2, 0]
     predicted = module(batch).double()
-    assert torch.allclose(predicted[:, 0], _expected_base(batch, index=2), atol=1e-5)
-    assert torch.allclose(predicted[:, 1], _expected_base(batch, index=0), atol=1e-5)
+    assert torch.allclose(predicted[:, 0], expected_base(batch, index=2), atol=1e-5)
+    assert torch.allclose(predicted[:, 1], expected_base(batch, index=0), atol=1e-5)
 
 
 # --- construction-time refusals ----------------------------------------------
@@ -265,7 +239,7 @@ def test_the_mapping_survives_a_weights_only_checkpoint_round_trip(tmp_path: Pat
     restored = SoilResidualCNNLightningModule.load_from_checkpoint(path, map_location="cpu").eval()
     assert restored.residual_base_index.tolist() == module.residual_base_index.tolist()
 
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         assert torch.allclose(restored(batch), module(batch), atol=1e-6)
 
@@ -276,7 +250,7 @@ def test_the_mapping_survives_a_weights_only_checkpoint_round_trip(tmp_path: Pat
 def test_forward_from_parts_reproduces_forward_exactly() -> None:
     """The equality every explainer depends on; drift here misattributes to a model nobody trained."""
     module = _module(residual_base_hidden_dims=[8])
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         parts, groups = module.explanation_parts(batch)
@@ -292,8 +266,8 @@ def test_the_base_part_carries_the_offset_so_perturbing_it_moves_the_prediction(
     module = _module()
     # Zeroed so the shift is the offset alone. With the head live the delta is 1 PLUS whatever the
     # head made of the same perturbation, since the base is an input as well as an anchor.
-    _zero_head(module)
-    batch = _batch(labels=3)
+    zero_head(module)
+    batch = cnn_batch(labels=3)
 
     with torch.no_grad():
         parts, _groups = module.explanation_parts(batch)
@@ -314,7 +288,7 @@ def test_the_beeswarm_colours_the_base_in_original_units() -> None:
     from yg_eo_soilnet.explain.lightning_explainer import _colour_values
 
     module = _module(target_mean=[4.0], target_scale=[2.0], target_transform="log1p")
-    batch = _batch(labels=3)
+    batch = cnn_batch(labels=3)
     with torch.no_grad():
         parts, groups = module.explanation_parts(batch)
 
@@ -358,7 +332,7 @@ def test_builder_to_residual_module_end_to_end(tmp_path: Path, logger) -> None:
     from lightning.pytorch import Trainer
 
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -416,7 +390,7 @@ def test_the_shipped_registry_entry_builds_through_the_factory(tmp_path: Path, l
     spec["init_args"]["residual_base_columns"] = {"target_a": "lab_dense"}
 
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -435,7 +409,7 @@ def test_a_sparse_base_column_is_refused_at_fit_start(tmp_path: Path, logger) ->
     from lightning.pytorch import Trainer
 
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -471,7 +445,7 @@ def test_a_zeroed_head_on_real_data_returns_the_base_in_original_units(tmp_path:
     numbers back for the points in the batch.
     """
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = _bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
+    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)})
     datamodule = SoilSequenceDataModule(bundle, batch_size=8, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -490,7 +464,7 @@ def test_a_zeroed_head_on_real_data_returns_the_base_in_original_units(tmp_path:
         target_scale=datamodule.target_scale_,
         target_transform=datamodule.target_transform,
     ).eval()
-    _zero_head(module)
+    zero_head(module)
 
     indices = list(range(bundle.num_points))
     batch = datamodule.collate(indices)
