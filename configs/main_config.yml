@@ -139,7 +139,7 @@ common:
   # model types yourself (e.g. on the leaderboard). Set to false for throwaway/experimental runs
   # so they don't clutter the registry with versions you don't actually want to keep.
   MLFLOW_REGISTER_MODELS: true
-  MLFLOW_EXPERIMENT_EXPORT_ENABLED: false   # export MLflow experiment data to a portable format
+  MLFLOW_EXPERIMENT_EXPORT_ENABLED: false   # also copy the run's MLflow folder to the path below
   MLFLOW_EXPERIMENT_EXPORT_PATH: "mlflow_exports"
   MAIN_FILE_LOGGING_ENABLED: true   # also write a log file for the run, not just console output
 
@@ -175,7 +175,7 @@ common:
   # like XGBoost on the same data.
   EXPLAIN_SKIP_MODELS: ["TabICL"]
   # If explaining a model fails, false (default) just records the failure in
-  # meta/run_summary_*.json and keeps the training run's other results.
+  # meta/run_summary.json and keeps the training run's other results.
   EXPLAIN_FAIL_ON_ERROR: false
 
   # --- Predictive uncertainty ----------------------------------------------------------------

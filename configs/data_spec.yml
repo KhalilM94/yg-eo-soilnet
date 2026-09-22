@@ -113,17 +113,17 @@ MULTI_TARGET_MODE: joint
 #     read on its actual skill.
 USE_HARMONIC_COORDS: true
 
+# true (the default in code) includes the CONTEXT_FEATURES columns below as ordinary features;
+# false removes them from the feature set entirely, so you can see how the models do without them.
+USE_CONTEXT_FEATURES: false
 # Columns that describe a point's surroundings rather than the point itself - e.g. neighbourhood
 # statistics or patch variance, already computed and sitting in your static features file. Naming
 # a column here doesn't change how it's used day to day (it's treated as an ordinary numeric
 # feature either way) - it just groups these columns together so you can:
-#   * switch the whole group on/off at once with USE_CONTEXT_FEATURES below, to test whether they
+#   * switch the whole group on/off at once with USE_CONTEXT_FEATURES above, to test whether they
 #     actually help (an empty list here means there's nothing for that switch to affect)
 #   * see them called out as their own group in the SHAP explainability output
 # Naming a column that doesn't actually exist in your data will raise an error.
-USE_CONTEXT_FEATURES: false
-# false (default) removes the columns listed above from the feature set entirely, so you can see
-# how the model performs without them. Set to true to include them as ordinary features.
 CONTEXT_FEATURES: []
 
 
