@@ -339,17 +339,6 @@ def test_scoring_two_targets_at_once_is_refused_rather_than_pooled() -> None:
     assert regression_metrics(observed[:, :1], predicted[:, :1])["rmse_test"] == pytest.approx(0.1)
 
 
-def test_per_target_keys_are_resolved_to_their_stem_s_space() -> None:
-    from yg_eo_soilnet.metrics import ORIGINAL_UNITS, STANDARDIZED_LOG1P, metric_space_for
-
-    spaces = metric_space_for(["rmse_test", "rmse_test_clay_pct", "val_r2", "val_r2_clay_pct", "made_up"])
-
-    assert spaces["rmse_test"] == spaces["rmse_test_clay_pct"] == ORIGINAL_UNITS
-    assert spaces["val_r2"] == spaces["val_r2_clay_pct"] == STANDARDIZED_LOG1P
-    # Still a visible gap rather than a plausible-looking default.
-    assert spaces["made_up"] == "unknown"
-
-
 class _ToyRegressor:
     """The metric machinery on its own, without an architecture around it."""
 

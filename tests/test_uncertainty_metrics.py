@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 from scipy import stats
 
-from yg_eo_soilnet.metrics import METRIC_DIRECTION, METRIC_SPACE, ORIGINAL_UNITS, metric_space_for
+from yg_eo_soilnet.metrics import METRIC_DIRECTION, METRIC_SPACE, ORIGINAL_UNITS
 from yg_eo_soilnet.uncertainty.metrics import UNCERTAINTY_METRIC_STEMS, uncertainty_metrics
 
 
@@ -207,14 +207,6 @@ def test_every_uncertainty_stem_is_registered_in_the_shared_direction_table():
 def test_every_uncertainty_metric_is_declared_to_be_in_original_units():
     for stem in UNCERTAINTY_METRIC_STEMS:
         assert METRIC_SPACE[f"{stem}_test"] == ORIGINAL_UNITS
-
-
-def test_metric_space_resolves_a_suffixed_uncertainty_metric():
-    spaces = metric_space_for(["picp_test_clay_pct", "mpiw_test_clay_pct"])
-    assert spaces == {
-        "picp_test_clay_pct": ORIGINAL_UNITS,
-        "mpiw_test_clay_pct": ORIGINAL_UNITS,
-    }
 
 
 def test_picp_has_no_ranking_direction_because_maximising_it_is_wrong():

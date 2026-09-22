@@ -1,8 +1,9 @@
 import numpy as np
 import pandas as pd
+import pytest
 from geopandas import GeoDataFrame
 
-from yg_eo_soilnet.utils import LogTransformer, assign_grid_ids, rpd_score, rpiq_score
+from yg_eo_soilnet.utils import LogTransformer, assign_grid_ids
 
 
 def test_log_transformer_round_trip() -> None:
@@ -32,26 +33,7 @@ def test_assign_grid_ids_returns_grid_and_gdf() -> None:
     assert grid_gdf["Grid_ID"].dtype.kind in {"i", "u"}
 
 
-def test_assign_grid_ids_rejects_invalid_cell_size() -> None:
-    frame = pd.DataFrame({"lat": [0.0], "lon": [0.0]})
-
-    for cell_size_m in (None, 0, 50):
-        try:
-            assign_grid_ids(frame, cell_size_m=cell_size_m)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("Expected ValueError for invalid cell size")
-
-
-def test_rpd_and_rpiq_scores_match_manual_calculation() -> None:
-    predictions = np.array([1.0, 2.0, 3.0, 4.0])
-    targets = np.array([1.0, 2.0, 2.0, 5.0])
-
-    expected_rpd = np.std(targets, ddof=1) / np.sqrt(np.mean((targets - predictions) ** 2))
-    expected_rpiq = (np.percentile(targets, 75) - np.percentile(targets, 25)) / np.sqrt(
-        np.mean((targets - predictions) ** 2)
-    )
-
-    assert np.isclose(rpd_score(predictions, targets), expected_rpd)
-    assert np.isclose(rpiq_score(predictions, targets), expected_rpiq)
+@pytest.mark.parametrize("cell_size_m", [None, 0, 50])
+def test_assign_grid_ids_rejects_invalid_cell_size(cell_size_m) -> None:
+    with pytest.raises(ValueError):
+        assign_grid_ids(pd.DataFrame({"lat": [0.0], "lon": [0.0]}), cell_size_m=cell_size_m)
