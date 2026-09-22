@@ -16,6 +16,10 @@ for path in (str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+# Headless for every test, set before anything imports matplotlib, so no module has to call
+# matplotlib.use() above its own imports.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 
 @contextmanager
 def _mlflow_store(root: Path):

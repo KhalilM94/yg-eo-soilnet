@@ -1,22 +1,18 @@
 """Regenerating a finished run's figures from the artifacts it already holds.
 
 The unit under test is the SELECTION logic - which run gets which figure, and which are skipped -
-rather than the drawing, which tests/test_uncertainty_plots.py covers. That is where the bugs are:
+rather than the drawing, which tests/test_plots.py covers. That is where the bugs are:
 a run's eval CSV holds the whole joint frame, so the obvious reading of it replots six targets into
 a run that owns one.
 """
 
 from types import SimpleNamespace
 
-import matplotlib
+import pandas as pd
+import pytest
 
-matplotlib.use("Agg")
-
-import pandas as pd  # noqa: E402
-import pytest  # noqa: E402
-
-from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger  # noqa: E402
-from yg_eo_soilnet.replotting import (  # noqa: E402
+from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
+from yg_eo_soilnet.replotting import (
     _cv_plot_name,
     _interval_estimator,
     _own_target_frame,

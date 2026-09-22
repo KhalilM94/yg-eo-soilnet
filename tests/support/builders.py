@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Mapping, Sequence
 
 import numpy as np
+import pandas as pd
 import torch
 
 from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
@@ -192,3 +193,17 @@ def correlated_bundle(correlation: float = 0.8, n_points: int = 200, seed: int =
         targets=np.column_stack([first, second]).astype(np.float32),
         target_names=["target_a", "target_b"],
     )
+
+
+def eval_frame(n_rows: int = 60, with_uncertainty: bool = True) -> pd.DataFrame:
+    """A single-target eval frame, with the ensemble's sigma and a 2-sigma interval by default."""
+    rng = np.random.default_rng(0)
+    observed = rng.normal(loc=20.0, scale=5.0, size=n_rows)
+    predicted = observed + rng.normal(scale=2.0, size=n_rows)
+    frame = pd.DataFrame({"target": observed, "prediction": predicted})
+    if with_uncertainty:
+        sigma = np.abs(rng.normal(loc=2.0, scale=0.5, size=n_rows))
+        frame["prediction_std"] = sigma
+        frame["prediction_lower"] = predicted - 2.0 * sigma
+        frame["prediction_upper"] = predicted + 2.0 * sigma
+    return frame

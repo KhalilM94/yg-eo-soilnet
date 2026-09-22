@@ -1,214 +1,30 @@
-"""The uncertainty column contract, and the plots that read it."""
+"""The plots: the house style, pred-vs-obs panels, the parent overlay and the uncertainty figures."""
 
 import matplotlib
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
 
-matplotlib.use("Agg")
-
-from yg_eo_soilnet.plot_utils import (  # noqa: E402
-    _resolve_prediction_column,
+from tests.support.builders import eval_frame
+from yg_eo_soilnet.plot_style import (
+    BASELINE,
+    GRID,
+    INK,
+    RC_PARAMS,
+    message_figure,
+    metric_box,
+    panel_letter,
+    panel_subtitle,
+    square_panel,
+    style_context,
+    styled,
+)
+from yg_eo_soilnet.plot_utils import (
     create_parent_pred_obs,
     pred_obs_panel,
 )
-from yg_eo_soilnet.uncertainty import attach_uncertainty_columns  # noqa: E402
-from yg_eo_soilnet.uncertainty.columns import (  # noqa: E402
-    column_name,
-    interval_columns,
-    is_prediction_column,
-    sigma_column,
-)
-from yg_eo_soilnet.uncertainty.conformal import ConformalCalibrator  # noqa: E402
-from yg_eo_soilnet.uncertainty.ensemble import aggregate  # noqa: E402
-from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error  # noqa: E402
-
-
-def _eval_frame(n_rows: int = 60, with_uncertainty: bool = True) -> pd.DataFrame:
-    rng = np.random.default_rng(0)
-    observed = rng.normal(loc=20.0, scale=5.0, size=n_rows)
-    predicted = observed + rng.normal(scale=2.0, size=n_rows)
-    frame = pd.DataFrame({"target": observed, "prediction": predicted})
-    if with_uncertainty:
-        sigma = np.abs(rng.normal(loc=2.0, scale=0.5, size=n_rows))
-        frame["prediction_std"] = sigma
-        frame["prediction_lower"] = predicted - 2.0 * sigma
-        frame["prediction_upper"] = predicted + 2.0 * sigma
-    return frame
-
-
-# --- the column contract ---------------------------------------------------
-
-
-def test_a_single_target_run_writes_unsuffixed_columns():
-    assert column_name("prediction_std", "clay_pct", multi_target=False) == "prediction_std"
-
-
-def test_a_multi_target_run_suffixes_every_column_with_its_target():
-    assert column_name("prediction_std", "clay_pct", multi_target=True) == "prediction_std_clay_pct"
-
-
-def test_an_uncertainty_column_is_not_mistaken_for_a_prediction_column():
-    assert is_prediction_column("prediction") is True
-    assert is_prediction_column("prediction_clay_pct") is True
-    assert is_prediction_column("prediction_std") is False
-    assert is_prediction_column("prediction_std_clay_pct") is False
-    assert is_prediction_column("prediction_lower_clay_pct") is False
-    assert is_prediction_column("prediction_epistemic_std_clay_pct") is False
-    assert is_prediction_column("clay_pct") is False
-
-
-def test_the_prediction_column_fallback_never_selects_a_standard_deviation():
-    # The specific trap: the positional fallback in _resolve_prediction_column takes the first
-    # column starting with "prediction_", and on a joint uncertainty frame that can be a sigma.
-    # Plotting it would put standard deviations on the predicted axis and look entirely plausible.
-    frame = pd.DataFrame(
-        {
-            "prediction_epistemic_std_clay_pct": [9.0],
-            "prediction_std_clay_pct": [9.0],
-            "prediction_clay_pct": [1.0],
-        }
-    )
-    assert _resolve_prediction_column(frame, target_name=None, target_index=0) == "prediction_clay_pct"
-
-
-def test_interval_columns_prefers_the_suffixed_pair_on_a_joint_frame():
-    frame = pd.DataFrame(
-        {
-            "prediction_lower_clay_pct": [1.0],
-            "prediction_upper_clay_pct": [2.0],
-            "prediction_lower_sand_pct": [3.0],
-            "prediction_upper_sand_pct": [4.0],
-        }
-    )
-    lower, upper = interval_columns(frame, "sand_pct")
-    assert lower.iloc[0] == 3.0 and upper.iloc[0] == 4.0
-
-
-def test_interval_columns_returns_none_for_a_frame_from_a_run_without_uncertainty():
-    assert interval_columns(_eval_frame(with_uncertainty=False)) is None
-    assert sigma_column(_eval_frame(with_uncertainty=False)) is None
-
-
-def test_a_half_written_interval_is_treated_as_absent_rather_than_half_used():
-    frame = _eval_frame()
-    frame = frame.drop(columns=["prediction_upper"])
-    assert interval_columns(frame) is None
-
-
-def test_attach_writes_unsuffixed_columns_for_one_target():
-    frame = pd.DataFrame({"target": np.zeros(5), "prediction": np.zeros(5)})
-    prediction = aggregate([np.zeros(5), np.ones(5)])
-    calibrator = ConformalCalibrator(q=2.0, alpha=0.05, n_calib=100)
-
-    attach_uncertainty_columns(frame, prediction, ["clay_pct"], {"clay_pct": calibrator})
-
-    assert "prediction_std" in frame.columns
-    assert "prediction_std_clay_pct" not in frame.columns
-    # Members 0 and 1: ensemble mean 0.5, epistemic std 0.5, no aleatoric part, so the interval is
-    # 0.5 -+ q * 0.5 with q = 2.
-    assert frame["prediction_epistemic_std"].iloc[0] == pytest.approx(0.5)
-    assert frame["prediction_aleatoric_std"].iloc[0] == pytest.approx(0.0)
-    assert frame["prediction_lower"].iloc[0] == pytest.approx(-0.5)
-    assert frame["prediction_upper"].iloc[0] == pytest.approx(1.5)
-
-
-def test_attach_suffixes_every_column_for_a_joint_group():
-    frame = pd.DataFrame({"a": np.zeros(5), "b": np.zeros(5)})
-    prediction = aggregate([np.zeros((5, 2)), np.ones((5, 2))])
-
-    attach_uncertainty_columns(frame, prediction, ["a", "b"])
-
-    for stem in ("prediction_std", "prediction_epistemic_std", "prediction_aleatoric_std"):
-        assert f"{stem}_a" in frame.columns
-        assert f"{stem}_b" in frame.columns
-        assert stem not in frame.columns
-
-
-def test_attach_writes_no_interval_when_there_is_no_calibrator():
-    frame = pd.DataFrame({"target": np.zeros(5)})
-    attach_uncertainty_columns(frame, aggregate([np.zeros(5), np.ones(5)]), ["clay_pct"])
-    assert "prediction_std" in frame.columns
-    assert "prediction_lower" not in frame.columns
-
-
-def test_a_single_target_frame_with_uncertainty_still_reads_as_single_target():
-    """The uncertainty columns must not make a one-target frame look like a joint one.
-
-    _iter_target_eval_frames decided that by scanning for `prediction_*`, which the sigma and
-    interval columns now also match. A single-target uncertainty frame then found no
-    prediction_<target>, yielded nothing, and the run logged neither rmse_test nor picp_test - with
-    no error anywhere, because an empty metric dict is indistinguishable from a metric-free run.
-    """
-    from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
-
-    frame = _eval_frame()
-    frame["clay_pct"] = frame["target"]
-
-    frames = list(
-        ChildRunLogger()._iter_target_eval_frames(frame, target="clay_pct", model_name="Ridge")
-    )
-    assert len(frames) == 1
-    _yielded, target_name, prediction_column = frames[0]
-    assert target_name == "clay_pct"
-    assert prediction_column == "prediction"
-
-
-def test_the_parent_collector_never_plots_a_standard_deviation_as_a_prediction(tmp_path):
-    """`_collect_eval_dfs` had the same `prediction_*` bug as `_iter_target_eval_frames`.
-
-    A single-target uncertainty frame took the multi-target branch, and the fallback there picked
-    the first `prediction_*` column - which is `prediction_std`, since it sorts right after
-    `prediction`. That value was then assigned to `prediction`, so the parent's pred_error_plot.png
-    plotted standard deviations on the predicted axis and looked entirely plausible.
-    """
-    import mlflow
-
-    from yg_eo_soilnet.logger.mlflow_loggers import ParentRunLogger
-
-    frame = _eval_frame(40)
-    frame["clay_pct"] = frame["target"]
-    # Sigma is deliberately far from the prediction, so picking the wrong column is unmissable.
-    frame["prediction_std"] = 999.0
-    frame["target_names"] = "clay_pct"
-
-    with mlflow.start_run() as parent:
-        parent_id = parent.info.run_id
-        with mlflow.start_run(nested=True) as child:
-            mlflow.set_tags({"target": "clay_pct", "model_name": "Ridge"})
-            path = tmp_path / "eval_results.csv"
-            frame.to_csv(path, index=False)
-            mlflow.log_artifact(str(path), artifact_path="eval_results")
-            child.info.run_id
-
-    collected = ParentRunLogger()._collect_eval_dfs(parent_id)
-    assert len(collected) == 1
-    assert not (collected[0]["prediction"] == 999.0).any()
-    assert np.allclose(collected[0]["prediction"], frame["prediction"])
-
-
-def test_a_joint_frame_with_uncertainty_still_fans_out_per_target():
-    from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
-
-    frame = pd.DataFrame(
-        {
-            "clay_pct": [1.0, 2.0],
-            "sand_pct": [3.0, 4.0],
-            "prediction_clay_pct": [1.1, 2.1],
-            "prediction_sand_pct": [3.1, 4.1],
-            "prediction_std_clay_pct": [0.5, 0.5],
-            "prediction_std_sand_pct": [0.5, 0.5],
-            "target_names": ["clay_pct__sand_pct"] * 2,
-        }
-    )
-    frames = list(
-        ChildRunLogger()._iter_target_eval_frames(
-            frame, target="clay_pct__sand_pct", model_name="Ridge"
-        )
-    )
-    assert [name for _f, name, _c in frames] == ["clay_pct", "sand_pct"]
-    assert [col for _f, _n, col in frames] == ["prediction_clay_pct", "prediction_sand_pct"]
-
+from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error
 
 # --- the plots -------------------------------------------------------------
 
@@ -216,13 +32,13 @@ def test_a_joint_frame_with_uncertainty_still_fans_out_per_target():
 def test_the_pred_obs_plot_still_renders_without_any_uncertainty_columns():
     # The majority case: every frame from a run with uncertainty disabled.
 
-    figure = pred_obs_panel(_eval_frame(with_uncertainty=False))
+    figure = pred_obs_panel(eval_frame(with_uncertainty=False))
     assert figure is not None
     assert figure.axes[0].collections, "nothing was drawn on the panel"
 
 
 def test_the_pred_obs_plot_renders_with_uncertainty_columns():
-    figure = pred_obs_panel(_eval_frame())
+    figure = pred_obs_panel(eval_frame())
     # The colorbar is an INSET of the panel, not a second entry in figure.axes - that is what
     # keeps the panel's width and its 1:1 aspect intact.
     assert figure.axes[0].child_axes, "no sigma colorbar on a frame that carries sigma"
@@ -236,13 +52,13 @@ def test_the_pred_obs_plot_is_one_panel_with_no_residual_or_density_companion():
     is looking for - smoothed away.
     """
 
-    for frame in (_eval_frame(with_uncertainty=False), _eval_frame()):
+    for frame in (eval_frame(with_uncertainty=False), eval_frame()):
         figure = pred_obs_panel(frame)
         assert len(figure.axes) == 1
 
 
 def test_the_pred_obs_panel_is_captioned_with_the_target_it_was_given():
-    figure = pred_obs_panel(_eval_frame(with_uncertainty=False), target_name="clay_pct")
+    figure = pred_obs_panel(eval_frame(with_uncertainty=False), target_name="clay_pct")
     assert figure.axes[0].get_title(loc="right") == "clay_pct"
 
 
@@ -395,7 +211,7 @@ def test_the_plot_opens_exactly_one_figure_for_its_caller_to_close():
     import matplotlib.pyplot as plt
 
     before = set(plt.get_fignums())
-    for frame in (_eval_frame(with_uncertainty=False), _eval_frame()):
+    for frame in (eval_frame(with_uncertainty=False), eval_frame()):
         figure = pred_obs_panel(frame)
         assert set(plt.get_fignums()) - before == {figure.number}
         plt.close(figure)
@@ -412,7 +228,7 @@ def test_the_plot_survives_a_model_that_fits_its_test_split_exactly():
 
 
 def test_the_parent_overlay_renders_with_and_without_intervals():
-    frame = _eval_frame()
+    frame = eval_frame()
     frame["target_name"] = "clay_pct"
     frame["clay_pct"] = frame["target"]
     frame["prediction_clay_pct"] = frame["prediction"]
@@ -422,7 +238,7 @@ def test_the_parent_overlay_renders_with_and_without_intervals():
 
     assert create_parent_pred_obs([frame]) is not None
 
-    bare = _eval_frame(with_uncertainty=False)
+    bare = eval_frame(with_uncertainty=False)
     bare["target_name"] = "clay_pct"
     bare["clay_pct"] = bare["target"]
     bare["prediction_clay_pct"] = bare["prediction"]
@@ -431,7 +247,7 @@ def test_the_parent_overlay_renders_with_and_without_intervals():
 
 
 def test_the_reliability_curve_returns_a_figure_the_caller_saves():
-    frame = _eval_frame(200)
+    frame = eval_frame(200)
 
     figure = reliability_curve(
         frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
@@ -443,7 +259,7 @@ def test_the_reliability_curve_returns_a_figure_the_caller_saves():
 def test_the_reliability_curve_draws_into_a_supplied_axis_and_returns_none():
     import matplotlib.pyplot as plt
 
-    frame = _eval_frame(200)
+    frame = eval_frame(200)
     figure, axis = plt.subplots()
     assert reliability_curve(
         frame["target"], frame["prediction"], frame["prediction_std"], axis=axis
@@ -451,7 +267,7 @@ def test_the_reliability_curve_draws_into_a_supplied_axis_and_returns_none():
 
 
 def test_sigma_vs_error_bins_by_equal_count_and_returns_a_figure():
-    frame = _eval_frame(200)
+    frame = eval_frame(200)
 
     figure = sigma_vs_error(
         frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
@@ -568,3 +384,101 @@ def test_numbers_stored_as_strings_still_plot():
     frame = _target_frame("clay_pct", ["10.0", "12.0"], [10.5, 12.5])
     figure = create_parent_pred_obs([frame])
     assert len(_panel_x(figure, "clay_pct")) == 2
+
+
+# --- the house style --------------------------------------------------------------------------
+# The shared style, and the one promise it has to keep: it does not leak.
+
+
+
+
+
+
+def test_the_style_is_a_context_not_a_global_mutation():
+    """These modules get imported inside notebooks and inside a warnings-as-errors test suite.
+
+    A module-level rcParams.update would silently restyle whatever else the process is drawing, so
+    the style is applied through rc_context and every parameter must be back afterwards.
+    """
+    before = {key: plt.rcParams[key] for key in RC_PARAMS}
+
+    @styled
+    def draw():
+        # Every parameter is in force INSIDE.
+        assert plt.rcParams["axes.spines.left"] is False
+        assert plt.rcParams["font.size"] == 9
+        return plt.rcParams["grid.color"]
+
+    assert matplotlib.colors.to_hex(draw()) == GRID
+    assert {key: plt.rcParams[key] for key in RC_PARAMS} == before
+
+
+def test_the_style_survives_an_exception_in_the_plotting_function():
+    before = {key: plt.rcParams[key] for key in RC_PARAMS}
+
+    @styled
+    def explode():
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError):
+        explode()
+    assert {key: plt.rcParams[key] for key in RC_PARAMS} == before
+
+
+def test_styled_keeps_the_wrapped_function_name():
+    # _log_plots names the artifact after plot_func.__name__, so a decorator that replaced it would
+    # rename every CV figure to "wrapper.png".
+    @styled
+    def cv_val_curve():
+        return None
+
+    assert cv_val_curve.__name__ == "cv_val_curve"
+
+
+def test_a_square_panel_gets_its_left_edge_and_both_grids_back():
+    """The documented exception to the y-only house grid.
+
+    A pred-vs-obs panel is read against its 1:1 line, and reading a point against that line needs
+    gridlines running both ways plus a left edge to anchor them.
+    """
+    with style_context():
+        figure, axis = plt.subplots()
+        assert axis.spines["left"].get_visible() is False  # the house default
+        # The house grid is y-only, so no x gridline is drawn yet.
+        assert not any(line.get_visible() for line in axis.xaxis.get_gridlines())
+
+        square_panel(axis)
+
+        assert axis.spines["left"].get_visible() is True
+        assert matplotlib.colors.to_hex(axis.spines["left"].get_edgecolor()) == BASELINE
+        assert all(line.get_visible() for line in axis.xaxis.get_gridlines())
+        assert all(line.get_visible() for line in axis.yaxis.get_gridlines())
+
+
+def test_the_letter_and_the_caption_occupy_different_title_slots():
+    """Both have to fit on one line, which is why the letter is not glued into the caption string."""
+    figure, axis = plt.subplots()
+    panel_letter(axis, "a")
+    panel_subtitle(axis, "clay_pct")
+    assert axis.get_title(loc="left") == "a"
+    assert axis.get_title(loc="right") == "clay_pct"
+    # The letter is the loud one; the caption is secondary ink at a smaller size.
+    letter, caption = axis._left_title, axis._right_title
+    assert matplotlib.colors.to_hex(letter.get_color()) == INK
+    assert letter.get_fontweight() == "bold"
+    assert caption.get_fontsize() < letter.get_fontsize()
+
+
+def test_the_metric_box_is_framed_and_inside_the_axes():
+    figure, axis = plt.subplots()
+    text = metric_box(axis, "RMSE = 1.00")
+    assert text.get_transform() is axis.transAxes
+    assert text.get_bbox_patch() is not None
+
+
+def test_an_empty_figure_carries_a_message_rather_than_being_none():
+    """The repo's empty-data convention, so no caller has to branch on the return value."""
+    figure = message_figure("No leaderboard rows available")
+    assert figure is not None
+    assert figure.axes[0].texts[0].get_text() == "No leaderboard rows available"
+    assert figure.axes[0].axison is False
