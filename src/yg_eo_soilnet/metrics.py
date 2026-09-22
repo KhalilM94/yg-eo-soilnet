@@ -204,6 +204,7 @@ def regression_metrics(
         return {}
 
     def key(stem: str) -> str:
+        """One score name with its split appended, as it is recorded."""
         return f"{stem}_{split}{suffix}"
 
     rmse = float(root_mean_squared_error(true_values, predicted_values))
@@ -259,6 +260,7 @@ def cv_rmse_from_search(cv_results: Any, best_index: int) -> dict[str, float]:
         columns = cv_results
 
     def value_at(column_name: str) -> float | None:
+        """One column's value at the best combination, or None when the search has no such column."""
         column = columns.get(column_name)
         if column is None:
             return None

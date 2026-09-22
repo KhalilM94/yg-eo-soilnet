@@ -551,6 +551,7 @@ def lightning_ensemble_predictor(run, config, logger, matched: list[dict]):
     target_names = list(predictors[0].preprocessing_state.get("target_names") or [])
 
     def predict():
+        """The ensemble's average prediction for every point."""
         return aggregate([predictor.predict(bundle) for predictor in predictors]).mean
 
     return predict, list(bundle.point_ids), target_names

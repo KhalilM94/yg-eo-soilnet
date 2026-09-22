@@ -1864,6 +1864,7 @@ class ParentRunLogger:
         experiment_id = client.get_run(parent_run_id).info.experiment_id
 
         def children_of(run_id: str):
+            """The sub-runs of one run."""
             return client.search_runs(
                 experiment_ids=[experiment_id],
                 filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
@@ -1930,6 +1931,7 @@ class ParentRunLogger:
         exp_id = parent_run.info.experiment_id
 
         def children_of(run_id: str):
+            """The sub-runs of one run."""
             return client.search_runs(
                 experiment_ids=[exp_id],
                 filter_string=f"tags.mlflow.parentRunId = '{run_id}'",

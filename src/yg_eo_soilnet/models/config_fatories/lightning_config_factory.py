@@ -315,6 +315,7 @@ class LightningConfigFactory:
         accepted = self._accepted_init_args(model_cls)
 
         def offer(key: str, value: Any) -> None:
+            """Pass a setting to the model, but only if its constructor takes one by that name."""
             if accepted is None or key in accepted:
                 init_args[key] = value
 

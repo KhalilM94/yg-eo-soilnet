@@ -151,6 +151,7 @@ def attach_uncertainty_columns(
 
     for index, target_name in enumerate(target_names):
         def name(stem: str) -> str:
+            """This target's column name for one kind of uncertainty value."""
             return column_name(stem, target_name, multi_target=multi_target)
 
         total_std = prediction.total_std[:, index]

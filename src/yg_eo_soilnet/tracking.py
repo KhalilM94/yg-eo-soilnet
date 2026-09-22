@@ -522,6 +522,7 @@ def install_run_signal_handlers(logger: Any = None) -> None:
     import signal
 
     def handler(signum, frame):
+        """Mark the open runs as killed, then let the process exit as it normally would."""
         try:
             while mlflow.active_run() is not None:
                 mlflow.end_run("KILLED")

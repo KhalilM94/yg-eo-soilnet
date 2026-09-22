@@ -317,6 +317,7 @@ class SoilModelTraining:
             Target groups as keys (tuples of target names), for each model family.
         """
         def describe(groups) -> str:
+            """The target groups as one readable line, for the run's settings."""
             return " | ".join(join_target_names(list(group)) for group in groups) or "(none)"
 
         params = {

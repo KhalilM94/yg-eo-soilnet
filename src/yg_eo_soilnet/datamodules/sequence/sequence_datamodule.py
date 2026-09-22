@@ -204,6 +204,7 @@ class SoilSequenceDataModule(LightningDataModule):
         """
 
         def as_list(values) -> list[float]:
+            """A statistic as a flat list of plain numbers, so a checkpoint can hold it."""
             if values is None:
                 return []
             return [float(value) for value in np.asarray(values, dtype=np.float64).reshape(-1)]
@@ -263,6 +264,7 @@ class SoilSequenceDataModule(LightningDataModule):
             raise ValueError("apply_preprocessing_state needs the state produced by preprocessing_state()")
 
         def as_array(values, dtype=np.float32):
+            """A saved statistic back as an array, or None when it holds nothing."""
             array = np.asarray(list(values or []), dtype=dtype)
             return None if array.size == 0 else array
 
