@@ -1,5 +1,6 @@
 """The sklearn ensemble end to end: real estimators, the real trainer, the real logger."""
 
+from dataclasses import dataclass
 from types import SimpleNamespace
 
 import mlflow
@@ -114,6 +115,76 @@ def _run_and_collect(config, data, pipelines, target="target_a", targets=None):
     return parent_id, descendants(parent_id), client
 
 
+def _export_config(**overrides):
+    return _config(EXPORT_POINT_PREDICTIONS=True, **overrides)
+
+
+def _download(client, run, path, tmp_path):
+    return pd.read_csv(client.download_artifacts(run.info.run_id, path, str(tmp_path)))
+
+
+def _export_parent(parent_id, config):
+    """Run the parent-level combine step, which main.py does inside the parent run.
+
+    Reopening the run matters: log_table writes to whichever run is ACTIVE, so calling this outside
+    one would file the parent's summary against nothing.
+    """
+    from yg_eo_soilnet.logger.mlflow_loggers import ParentRunLogger
+
+    with mlflow.start_run(run_id=parent_id):
+        ParentRunLogger()._log_point_prediction_export(parent_id, config)
+
+
+@dataclass
+class Scenario:
+    """One training run inside a parent, shared read-only by every test that inspects it."""
+
+    parent_id: str
+    runs: list
+    client: mlflow.tracking.MlflowClient
+    uri: str
+
+    def model_run(self, target: str = "target_a"):
+        """The model's own run, not one of its ensemble members."""
+        return next(
+            run for run in self.runs
+            if run.data.tags.get("target") == target
+            and run.data.tags.get("model_name") == "Ridge"
+            and run.data.tags.get("run_kind") != "ensemble_member"
+        )
+
+
+def _scenario(mlflow_store, tmp_path_factory, config, data, **train_kwargs) -> Scenario:
+    """Train once in a store of its own, then run the parent-level export step as main.py does."""
+    with mlflow_store(tmp_path_factory.mktemp("mlruns")) as uri:
+        parent_id, runs, client = _run_and_collect(config, data, _pipelines(), **train_kwargs)
+        _export_parent(parent_id, config)
+    return Scenario(parent_id, runs, client, uri)
+
+
+@pytest.fixture(scope="module")
+def trained(mlflow_store, tmp_path_factory) -> Scenario:
+    """The default: four members, split-conformal on the val rows, no point export."""
+    return _scenario(mlflow_store, tmp_path_factory, _config(), _split(400))
+
+
+@pytest.fixture(scope="module")
+def exported(mlflow_store, tmp_path_factory) -> Scenario:
+    return _scenario(mlflow_store, tmp_path_factory, _export_config(), _split(200))
+
+
+@pytest.fixture(scope="module")
+def joint_exported(mlflow_store, tmp_path_factory) -> Scenario:
+    return _scenario(
+        mlflow_store,
+        tmp_path_factory,
+        _export_config(),
+        _split(targets=("target_a", "target_b")),
+        target="target_a__target_b",
+        targets=["target_a", "target_b"],
+    )
+
+
 # --- the switch ------------------------------------------------------------
 
 
@@ -173,28 +244,18 @@ def test_a_split_without_val_rows_falls_back_and_says_so():
 # --- training --------------------------------------------------------------
 
 
-def test_every_member_gets_its_own_tagged_child_run():
-    _parent, runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-
-    members = [run for run in runs if run.data.tags.get("run_kind") == "ensemble_member"]
+@pytest.mark.slow
+def test_every_member_gets_its_own_tagged_child_run(trained):
+    members = [run for run in trained.runs if run.data.tags.get("run_kind") == "ensemble_member"]
     assert len(members) == 4
     assert {run.data.tags["ensemble_member"] for run in members} == {"0", "1", "2", "3"}
     # Seeds are strided, not consecutive.
     assert {int(run.data.tags["ensemble_seed"]) for run in members} == {42, 1042, 2042, 3042}
 
 
-def test_the_eval_frame_carries_the_estimate_and_its_uncertainty(tmp_path):
-    _parent, runs, client = _run_and_collect(_config(), _split(), _pipelines())
-
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
-    local = client.download_artifacts(
-        model_run.info.run_id, "eval_results/eval_results.csv", str(tmp_path)
-    )
-    frame = pd.read_csv(local)
+@pytest.mark.slow
+def test_the_eval_frame_carries_the_estimate_and_its_uncertainty(trained, tmp_path):
+    frame = _download(trained.client, trained.model_run(), "eval_results/eval_results.csv", tmp_path)
 
     for column in (
         "prediction",
@@ -213,54 +274,37 @@ def test_the_eval_frame_carries_the_estimate_and_its_uncertainty(tmp_path):
     assert (frame["prediction_upper"] > frame["prediction"]).all()
 
 
-def test_a_deterministic_estimator_still_produces_a_non_degenerate_ensemble():
+@pytest.mark.slow
+def test_a_deterministic_estimator_still_produces_a_non_degenerate_ensemble(trained):
     # The bug the bootstrap exists to prevent: Ridge ignores its seed, so without resampling every
     # member is identical, sigma is exactly 0, and the run claims perfect confidence.
-    _parent, runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
-    assert model_run.data.metrics["mean_sigma_test"] > 0.0
+    assert trained.model_run().data.metrics["mean_sigma_test"] > 0.0
 
 
-def test_the_interval_covers_close_to_the_nominal_level():
-    _parent, runs, _client = _run_and_collect(_config(), _split(400), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
+@pytest.mark.slow
+def test_the_interval_covers_close_to_the_nominal_level(trained):
     # Conformal on 40 calibration rows is noisy, hence the wide band; the point is that the
     # interval is somewhere near its claim rather than covering 20% or 100%.
-    assert model_run.data.metrics["picp_test"] == pytest.approx(0.95, abs=0.12)
+    assert trained.model_run().data.metrics["picp_test"] == pytest.approx(0.95, abs=0.12)
 
 
-def test_the_uncertainty_metrics_are_logged_beside_the_point_metrics():
-    _parent, runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
+@pytest.mark.slow
+def test_the_uncertainty_metrics_are_logged_beside_the_point_metrics(trained):
+    model_run = trained.model_run()
     for metric in ("rmse_test", "r2_test", "picp_test", "mpiw_test", "interval_score_test"):
         assert metric in model_run.data.metrics
 
 
-def test_the_fit_pool_is_recorded_so_a_smaller_rmse_is_not_read_as_a_regression():
-    _parent, runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
+@pytest.mark.slow
+def test_the_fit_pool_is_recorded_so_a_smaller_rmse_is_not_read_as_a_regression(trained):
+    model_run = trained.model_run()
     assert model_run.data.params["uncertainty_fit_pool"] == "train_only"
     assert model_run.data.params["uncertainty_n_train_rows"] == "120"
     assert model_run.data.params["uncertainty_n_members"] == "4"
     assert "conformal_q" in model_run.data.params
 
 
+@pytest.mark.slow
 def test_uncertainty_disabled_writes_no_extra_columns(tmp_path):
     _parent, runs, client = _run_and_collect(
         _config(UNCERTAINTY_ENABLED=False), _split(), _pipelines()
@@ -276,22 +320,14 @@ def test_uncertainty_disabled_writes_no_extra_columns(tmp_path):
     assert not any(run.data.tags.get("run_kind") == "ensemble_member" for run in runs)
 
 
-def test_a_joint_group_suffixes_the_uncertainty_columns_per_target(tmp_path):
-    data = _split(targets=("target_a", "target_b"))
-    _parent, runs, client = _run_and_collect(
-        _config(), data, _pipelines(), target="target_a__target_b",
-        targets=["target_a", "target_b"],
+@pytest.mark.slow
+def test_a_joint_group_suffixes_the_uncertainty_columns_per_target(joint_exported, tmp_path):
+    frame = _download(
+        joint_exported.client,
+        joint_exported.model_run("target_a__target_b"),
+        "eval_results/eval_results.csv",
+        tmp_path,
     )
-
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("target") == "target_a__target_b"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
-    local = client.download_artifacts(
-        model_run.info.run_id, "eval_results/eval_results.csv", str(tmp_path)
-    )
-    frame = pd.read_csv(local)
 
     for target_name in ("target_a", "target_b"):
         assert f"prediction_{target_name}" in frame.columns
@@ -303,11 +339,12 @@ def test_a_joint_group_suffixes_the_uncertainty_columns_per_target(tmp_path):
 # --- the leaderboard -------------------------------------------------------
 
 
-def test_members_do_not_replace_their_model_on_the_leaderboard():
+@pytest.mark.slow
+def test_members_do_not_replace_their_model_on_the_leaderboard(trained):
     from yg_eo_soilnet.logger.mlflow_loggers import ParentRunLogger
 
-    parent_id, _runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-    leaderboard = ParentRunLogger()._collect_leaderboard(parent_id)
+    mlflow.set_tracking_uri(trained.uri)
+    leaderboard = ParentRunLogger()._collect_leaderboard(trained.parent_id)
 
     # Exactly one row: the model. Without the run_kind filter this is four member rows and the
     # model itself vanishes, because the collector prefers a run's grandchildren to the run.
@@ -317,11 +354,12 @@ def test_members_do_not_replace_their_model_on_the_leaderboard():
     assert "rmse_test" in leaderboard.columns
 
 
-def test_the_parent_eval_frames_exclude_the_members():
+@pytest.mark.slow
+def test_the_parent_eval_frames_exclude_the_members(trained):
     from yg_eo_soilnet.logger.mlflow_loggers import ParentRunLogger
 
-    parent_id, _runs, _client = _run_and_collect(_config(), _split(), _pipelines())
-    frames = ParentRunLogger()._collect_eval_dfs(parent_id)
+    mlflow.set_tracking_uri(trained.uri)
+    frames = ParentRunLogger()._collect_eval_dfs(trained.parent_id)
     assert len(frames) == 1
 
 
@@ -377,71 +415,42 @@ def test_an_ensemble_needs_at_least_one_member():
 # --- the per-point prediction export ---------------------------------------
 
 
-def _export_config(**overrides):
-    return _config(EXPORT_POINT_PREDICTIONS=True, **overrides)
-
-
-def _download(client, run, path, tmp_path):
-    return pd.read_csv(client.download_artifacts(run.info.run_id, path, str(tmp_path)))
-
-
-def _export_parent(parent_id, config):
-    """Run the parent-level combine step, which main.py does inside the parent run.
-
-    Reopening the run matters: log_table writes to whichever run is ACTIVE, so calling this outside
-    one would file the parent's summary against nothing.
-    """
-    from yg_eo_soilnet.logger.mlflow_loggers import ParentRunLogger
-
-    with mlflow.start_run(run_id=parent_id):
-        ParentRunLogger()._log_point_prediction_export(parent_id, config)
-
-
-def test_the_export_covers_every_point_not_just_the_test_split(tmp_path):
-    parent, runs, client = _run_and_collect(_export_config(), _split(200), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
+@pytest.mark.slow
+def test_the_export_covers_every_point_not_just_the_test_split(exported, tmp_path):
+    child = _download(
+        exported.client, exported.model_run(), "predictions/point_predictions.csv", tmp_path
     )
-
-    child = _download(client, model_run, "predictions/point_predictions.csv", tmp_path)
     # 200 points in the population; the test split is only 40 of them.
     assert len(child) == 200
     assert list(child.columns) == ["uuid", "target_a"]
     assert child["uuid"].iloc[0] == "p0"
 
 
-def test_the_exported_test_rows_match_the_eval_frame_value_for_value(tmp_path):
+@pytest.mark.slow
+def test_the_exported_test_rows_match_the_eval_frame_value_for_value(exported, tmp_path):
     """The check that the ids are RIGHT rather than merely present.
 
     The export predicts the whole population in one pass; eval_results.csv predicts the test split
     in another. Where they overlap they must agree exactly, or the two passes are not describing
     the same points.
     """
-    parent, runs, client = _run_and_collect(_export_config(), _split(200), _pipelines())
-    model_run = next(
-        run for run in runs
-        if run.data.tags.get("model_name") == "Ridge"
-        and run.data.tags.get("run_kind") != "ensemble_member"
-    )
-
-    child = _download(client, model_run, "predictions/point_predictions.csv", tmp_path / "a")
-    evaluation = _download(client, model_run, "eval_results/eval_results.csv", tmp_path / "b")
+    model_run = exported.model_run()
+    child = _download(exported.client, model_run, "predictions/point_predictions.csv", tmp_path / "a")
+    evaluation = _download(exported.client, model_run, "eval_results/eval_results.csv", tmp_path / "b")
 
     # Test rows are the last 40 points, ids p160..p199, in order.
-    exported = child.set_index("uuid").loc[[f"p{i}" for i in range(160, 200)], "target_a"]
-    assert np.allclose(exported.to_numpy(), evaluation["prediction"].to_numpy())
+    exported_rows = child.set_index("uuid").loc[[f"p{i}" for i in range(160, 200)], "target_a"]
+    assert np.allclose(exported_rows.to_numpy(), evaluation["prediction"].to_numpy())
 
 
-def test_the_parent_writes_both_the_wide_and_the_long_file(tmp_path):
-    config = _export_config()
-    parent_id, _runs, client = _run_and_collect(config, _split(), _pipelines())
-    _export_parent(parent_id, config)
-    parent_run = client.get_run(parent_id)
+@pytest.mark.slow
+def test_the_parent_writes_both_the_wide_and_the_long_file(exported, tmp_path):
+    parent_run = exported.client.get_run(exported.parent_id)
 
-    wide = _download(client, parent_run, "predictions/point_predictions_wide.csv", tmp_path / "w")
-    long_frame = _download(client, parent_run, "predictions/point_predictions_long.csv", tmp_path / "l")
+    wide = _download(exported.client, parent_run, "predictions/point_predictions_wide.csv", tmp_path / "w")
+    long_frame = _download(
+        exported.client, parent_run, "predictions/point_predictions_long.csv", tmp_path / "l"
+    )
 
     assert list(wide.columns) == ["uuid", "target_a__Ridge"]
     assert wide["uuid"].is_unique
@@ -449,27 +458,24 @@ def test_the_parent_writes_both_the_wide_and_the_long_file(tmp_path):
     assert set(long_frame["model"]) == {"Ridge"}
 
 
-def test_a_joint_group_gets_one_wide_column_per_target(tmp_path):
-    data = _split(targets=("target_a", "target_b"))
-    config = _export_config()
-    parent_id, _runs, client = _run_and_collect(
-        config, data, _pipelines(), target="target_a__target_b",
-        targets=["target_a", "target_b"],
-    )
-    _export_parent(parent_id, config)
+@pytest.mark.slow
+def test_a_joint_group_gets_one_wide_column_per_target(joint_exported, tmp_path):
     wide = _download(
-        client, client.get_run(parent_id), "predictions/point_predictions_wide.csv", tmp_path
+        joint_exported.client,
+        joint_exported.client.get_run(joint_exported.parent_id),
+        "predictions/point_predictions_wide.csv",
+        tmp_path,
     )
     assert set(wide.columns) == {"uuid", "target_a__Ridge", "target_b__Ridge"}
 
 
-def test_the_ensemble_exports_its_mean_and_no_uncertainty_columns(tmp_path):
-    config = _export_config(UNCERTAINTY_ENABLED=True, UNCERTAINTY_N_MEMBERS=3)
-    parent_id, _runs, client = _run_and_collect(config, _split(200), _pipelines())
-    _export_parent(parent_id, config)
-
+@pytest.mark.slow
+def test_the_ensemble_exports_its_mean_and_no_uncertainty_columns(exported, tmp_path):
     wide = _download(
-        client, client.get_run(parent_id), "predictions/point_predictions_wide.csv", tmp_path
+        exported.client,
+        exported.client.get_run(exported.parent_id),
+        "predictions/point_predictions_wide.csv",
+        tmp_path,
     )
     assert list(wide.columns) == ["uuid", "target_a__Ridge"]
     assert not [c for c in wide.columns if c.endswith(("_std", "_lower", "_upper"))]
@@ -477,16 +483,15 @@ def test_the_ensemble_exports_its_mean_and_no_uncertainty_columns(tmp_path):
     assert len(wide) == 200
 
 
-def test_the_export_is_absent_when_the_switch_is_off():
-    config = _config()
-    parent_id, runs, client = _run_and_collect(config, _split(), _pipelines())
-    _export_parent(parent_id, config)
-    model_run = next(run for run in runs if run.data.tags.get("model_name") == "Ridge")
+@pytest.mark.slow
+def test_the_export_is_absent_when_the_switch_is_off(trained):
+    client = trained.client
 
-    assert [a.path for a in client.list_artifacts(model_run.info.run_id, "predictions")] == []
-    assert [a.path for a in client.list_artifacts(parent_id, "predictions")] == []
+    assert [a.path for a in client.list_artifacts(trained.model_run().info.run_id, "predictions")] == []
+    assert [a.path for a in client.list_artifacts(trained.parent_id, "predictions")] == []
 
 
+@pytest.mark.slow
 def test_a_skipped_model_exports_nothing():
     config = _export_config(EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["Ridge"])
     parent_id, runs, client = _run_and_collect(config, _split(), _pipelines())

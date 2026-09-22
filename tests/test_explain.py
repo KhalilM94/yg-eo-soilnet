@@ -230,8 +230,22 @@ def _shap_result(model, *, coords: bool = False, **config_overrides) -> ShapResu
     return results[0]
 
 
-def test_lightning_shap_covers_static_temporal_and_auxiliary_in_one_feature_space() -> None:
-    result = _shap_result(_model())
+@pytest.fixture(scope="module")
+def explained() -> tuple[SoilCNNLightningModule, ShapResult]:
+    """The default model and its SHAP result, computed once; the tests only read them."""
+    torch.manual_seed(0)
+    model = _model()
+    return model, _shap_result(model)
+
+
+@pytest.fixture(scope="module")
+def spatial_context_result() -> ShapResult:
+    torch.manual_seed(0)
+    return _shap_result(_model(coords=True, context=True), coords=True)
+
+
+def test_lightning_shap_covers_static_temporal_and_auxiliary_in_one_feature_space(explained) -> None:
+    result = explained[1]
 
     for expected in STATIC_NAMES + ["texture"] + S2_BANDS + CLIM_BANDS + AUXILIARY:
         assert expected in result.feature_names
@@ -240,10 +254,9 @@ def test_lightning_shap_covers_static_temporal_and_auxiliary_in_one_feature_spac
     assert set(result.blocks) == {"static", "categorical", "s2", "clim", "auxiliary"}
 
 
-def test_lightning_shap_values_are_additive() -> None:
+def test_lightning_shap_values_are_additive(explained) -> None:
     """sum of SHAP over features ~= f(x) - E[f(background)], the defining SHAP property."""
-    model = _model()
-    result = _shap_result(model)
+    model, result = explained
 
     batches = [_batch(16, seed=1), _batch(16, seed=2)]
     with torch.no_grad():
@@ -271,37 +284,37 @@ def test_lightning_shap_values_are_additive() -> None:
     assert np.abs(attributed - expected).mean() < max(0.25 * expected.std(), 1e-3)
 
 
-def test_shap_values_are_in_standardized_space_not_target_units() -> None:
+def test_shap_values_are_in_standardized_space_not_target_units(explained) -> None:
     """Attribution is taken on forward(), which stops before inverse_transform_targets."""
-    assert _shap_result(_model()).output_space == "standardized_log1p"
+    assert explained[1].output_space == "standardized_log1p"
 
 
-def test_beeswarm_colours_are_de_standardized_into_real_units() -> None:
-    result = _shap_result(_model())
+def test_beeswarm_colours_are_de_standardized_into_real_units(explained) -> None:
+    result = explained[1]
     clay = result.data[:, result.feature_names.index("clay_pct")]
 
     # static_mean 10.0, static_scale 2.0 against standard-normal inputs.
     assert 2.0 < float(np.nanmean(clay)) < 18.0
 
 
-def test_positional_rows_have_no_colour_value() -> None:
-    result = _shap_result(_model())
+def test_positional_rows_have_no_colour_value(explained) -> None:
+    result = explained[1]
     positional = result.data[:, result.feature_names.index("s2_month_positional")]
 
     assert np.isnan(positional).all()
 
 
-def test_temporal_colours_use_the_bands_own_scale() -> None:
-    result = _shap_result(_model())
+def test_temporal_colours_use_the_bands_own_scale(explained) -> None:
+    result = explained[1]
     precip = result.data[:, result.feature_names.index("CLIM_precip")]
 
     # sequence_mean 50.0, sequence_scale 10.0.
     assert 10.0 < float(np.nanmean(precip)) < 90.0
 
 
-def test_spatial_rows_are_coloured_in_degrees_not_in_normalized_units() -> None:
+def test_spatial_rows_are_coloured_in_degrees_not_in_normalized_units(spatial_context_result) -> None:
     """The colour axis should read as "how far north", which -1..1 does not."""
-    result = _shap_result(_model(coords=True), coords=True)
+    result = spatial_context_result
     latitude = result.data[:, result.feature_names.index("lat")]
 
     # coord_min 31.0, coord_max 36.0 against coordinates normalized onto [-1, 1].
@@ -309,14 +322,14 @@ def test_spatial_rows_are_coloured_in_degrees_not_in_normalized_units() -> None:
     assert 31.0 <= float(np.nanmin(latitude)) and float(np.nanmax(latitude)) <= 36.0
 
 
-def test_a_context_column_is_coloured_like_the_static_column_it_is() -> None:
+def test_a_context_column_is_coloured_like_the_static_column_it_is(explained) -> None:
     """It shares the part and the statistics; only the block name differs.
 
     Compared against the very same column explained WITHOUT the declaration: naming a column as
     context must change how it is grouped and nothing about how it is valued.
     """
     context_name = STATIC_NAMES[1]
-    plain = _shap_result(_model())
+    plain = explained[1]
     grouped = _shap_result(_model(context=True))
 
     np.testing.assert_allclose(
@@ -325,8 +338,8 @@ def test_a_context_column_is_coloured_like_the_static_column_it_is() -> None:
     )
 
 
-def test_the_spatial_and_context_groups_are_their_own_blocks() -> None:
-    result = _shap_result(_model(coords=True, context=True), coords=True)
+def test_the_spatial_and_context_groups_are_their_own_blocks(spatial_context_result) -> None:
+    result = spatial_context_result
 
     assert {"spatial", "context"} <= set(result.blocks)
     # And the column that was NOT declared stays where it was.
@@ -433,8 +446,8 @@ def test_shape_mismatches_are_refused() -> None:
 # --- plots ------------------------------------------------------------------
 
 
-def test_plots_return_figures_rather_than_drawing_and_returning_none() -> None:
-    result = _shap_result(_model())
+def test_plots_return_figures_rather_than_drawing_and_returning_none(explained) -> None:
+    result = explained[1]
 
     for figure in (shap_beeswarm(result, 5), shap_bar(result, 5), shap_block_bar(result)):
         assert figure is not None

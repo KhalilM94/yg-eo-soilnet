@@ -266,6 +266,7 @@ def test_every_staged_init_is_blank(tmp_path) -> None:
 # --- the load test that makes the trimming safe -----------------------------
 
 
+@pytest.mark.slow
 def test_the_logged_model_loads_with_the_repo_off_sys_path(logged, tmp_path) -> None:
     """The only test that can prove the shipped subset is self-sufficient.
 

@@ -75,6 +75,7 @@ def _config(**overrides):
     return SimpleNamespace(**settings)
 
 
+@pytest.mark.slow
 def test_a_model_the_fast_explainer_cannot_parse_still_gets_explained(monkeypatch, frame) -> None:
     """The XGBoost case: TreeExplainer raises, and the result comes from the fallback instead."""
     import shap

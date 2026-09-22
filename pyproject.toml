@@ -70,6 +70,8 @@ explore = { features = ["prod-core", "cpu-backend", "explore"]}
 dev-env = "pixi shell -e dev"
 mlflow = { cmd = "mlflow ui", env = { MLFLOW_ALLOW_FILE_STORE = "true" } }
 test = "pytest ./tests"
+# Everything but the tests marked slow (a subprocess, a numba compile, end-to-end sklearn training).
+test-fast = "pytest -m 'not slow' ./tests"
 test-with-cov = "pytest --cov=yg_eo_soilnet tests/"
 lint = "ruff lint"
 
@@ -87,6 +89,10 @@ dev = [{include-group = "test"}, {include-group = "docs"}]
 
 
 [tool.pytest.ini_options]
+# Registered because warnings are errors: an unknown mark would fail collection.
+markers = [
+    "slow: seconds-long by nature (subprocess, numba compile, end-to-end training); deselect with -m 'not slow'",
+]
 # Warnings are errors so a new one from our own code fails the suite instead of scrolling past.
 # Each ignore below is a third-party warning we cannot act on; keep the reason with the pattern.
 filterwarnings = [

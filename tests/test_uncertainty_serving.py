@@ -28,6 +28,7 @@ def _fitted_ensemble(n_members: int = 3, target_names=("target_a",)):
 # --- the sklearn round-trip ------------------------------------------------
 
 
+@pytest.mark.slow
 def test_the_logged_ensemble_reloads_and_still_predicts_the_mean():
     ensemble, X = _fitted_ensemble()
     with mlflow.start_run():

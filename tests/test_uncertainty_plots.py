@@ -215,26 +215,17 @@ def test_a_joint_frame_with_uncertainty_still_fans_out_per_target():
 
 def test_the_pred_obs_plot_still_renders_without_any_uncertainty_columns():
     # The majority case: every frame from a run with uncertainty disabled.
-    import matplotlib.pyplot as plt
 
     figure = pred_obs_panel(_eval_frame(with_uncertainty=False))
-    try:
-        assert figure is not None
-        assert figure.axes[0].collections, "nothing was drawn on the panel"
-    finally:
-        plt.close(figure)
+    assert figure is not None
+    assert figure.axes[0].collections, "nothing was drawn on the panel"
 
 
 def test_the_pred_obs_plot_renders_with_uncertainty_columns():
-    import matplotlib.pyplot as plt
-
     figure = pred_obs_panel(_eval_frame())
-    try:
-        # The colorbar is an INSET of the panel, not a second entry in figure.axes - that is what
-        # keeps the panel's width and its 1:1 aspect intact.
-        assert figure.axes[0].child_axes, "no sigma colorbar on a frame that carries sigma"
-    finally:
-        plt.close(figure)
+    # The colorbar is an INSET of the panel, not a second entry in figure.axes - that is what
+    # keeps the panel's width and its 1:1 aspect intact.
+    assert figure.axes[0].child_axes, "no sigma colorbar on a frame that carries sigma"
 
 
 def test_the_pred_obs_plot_is_one_panel_with_no_residual_or_density_companion():
@@ -244,24 +235,15 @@ def test_the_pred_obs_plot_is_one_panel_with_no_residual_or_density_companion():
     line, and the KDE redrew the same two variables with the individual points - the thing a reader
     is looking for - smoothed away.
     """
-    import matplotlib.pyplot as plt
 
     for frame in (_eval_frame(with_uncertainty=False), _eval_frame()):
         figure = pred_obs_panel(frame)
-        try:
-            assert len(figure.axes) == 1
-        finally:
-            plt.close(figure)
+        assert len(figure.axes) == 1
 
 
 def test_the_pred_obs_panel_is_captioned_with_the_target_it_was_given():
-    import matplotlib.pyplot as plt
-
     figure = pred_obs_panel(_eval_frame(with_uncertainty=False), target_name="clay_pct")
-    try:
-        assert figure.axes[0].get_title(loc="right") == "clay_pct"
-    finally:
-        plt.close(figure)
+    assert figure.axes[0].get_title(loc="right") == "clay_pct"
 
 
 def test_the_pred_obs_panel_shares_one_range_across_both_axes():
@@ -333,12 +315,9 @@ def test_frame_square_leaves_the_panel_at_a_one_to_one_aspect():
     from yg_eo_soilnet.plot_utils import _frame_square
 
     figure, axis = plt.subplots()
-    try:
-        _frame_square(axis, -5.0, 105.0)
-        assert axis.get_aspect() == 1.0
-        assert axis.get_xlim() == axis.get_ylim() == (-5.0, 105.0)
-    finally:
-        plt.close(figure)
+    _frame_square(axis, -5.0, 105.0)
+    assert axis.get_aspect() == 1.0
+    assert axis.get_xlim() == axis.get_ylim() == (-5.0, 105.0)
 
 
 def test_the_error_bars_have_ends_you_can_actually_see():
@@ -353,22 +332,19 @@ def test_the_error_bars_have_ends_you_can_actually_see():
     )
 
     figure, axis = plt.subplots()
-    try:
-        y = np.array([1.0, 2.0, 3.0])
-        caplines, barlinecols = _draw_error_bars(
-            axis, np.arange(3.0), y, y - 1.0, y + 1.0, np.arange(3)
-        )
-        assert caplines, "no caps drawn, so the interval ends are invisible"
-        expected = mcolors.to_rgba(ERROR_BAR_CAP_COLOR)[:3]
-        for cap in caplines:
-            assert mcolors.to_rgba(cap.get_color())[:3] == expected
-            # Heavier than the vertical it terminates. The absolute width is a free parameter; the
-            # RATIO is what makes a cap read as an end rather than as more line.
-            assert cap.get_markeredgewidth() > ERROR_BAR_LINE_WIDTH
-        # The ends have to stand out from the verticals, not fade with them.
-        assert caplines[0].get_alpha() > barlinecols[0].get_alpha()
-    finally:
-        plt.close(figure)
+    y = np.array([1.0, 2.0, 3.0])
+    caplines, barlinecols = _draw_error_bars(
+        axis, np.arange(3.0), y, y - 1.0, y + 1.0, np.arange(3)
+    )
+    assert caplines, "no caps drawn, so the interval ends are invisible"
+    expected = mcolors.to_rgba(ERROR_BAR_CAP_COLOR)[:3]
+    for cap in caplines:
+        assert mcolors.to_rgba(cap.get_color())[:3] == expected
+        # Heavier than the vertical it terminates. The absolute width is a free parameter; the
+        # RATIO is what makes a cap read as an end rather than as more line.
+        assert cap.get_markeredgewidth() > ERROR_BAR_LINE_WIDTH
+    # The ends have to stand out from the verticals, not fade with them.
+    assert caplines[0].get_alpha() > barlinecols[0].get_alpha()
 
 
 def test_the_bars_are_not_drawn_in_a_colour_the_grid_also_uses():
@@ -429,14 +405,10 @@ def test_the_plot_opens_exactly_one_figure_for_its_caller_to_close():
 def test_the_plot_survives_a_model_that_fits_its_test_split_exactly():
     # RPIQ and RPD divide by rmse. A degenerate estimator makes that a divide-by-zero, which used to
     # take the plot - and the artifact logging around it - down with it.
-    import matplotlib.pyplot as plt
 
     exact = pd.DataFrame({"target": [1.0, 2.0, 3.0, 4.0], "prediction": [1.0, 2.0, 3.0, 4.0]})
     figure = pred_obs_panel(exact)
-    try:
-        assert figure is not None
-    finally:
-        plt.close(figure)
+    assert figure is not None
 
 
 def test_the_parent_overlay_renders_with_and_without_intervals():
@@ -460,16 +432,12 @@ def test_the_parent_overlay_renders_with_and_without_intervals():
 
 def test_the_reliability_curve_returns_a_figure_the_caller_saves():
     frame = _eval_frame(200)
-    import matplotlib.pyplot as plt
 
     figure = reliability_curve(
         frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
     )
-    try:
-        assert figure is not None
-        assert figure.axes[0].get_xlabel() == "Nominal coverage"
-    finally:
-        plt.close(figure)
+    assert figure is not None
+    assert figure.axes[0].get_xlabel() == "Nominal coverage"
 
 
 def test_the_reliability_curve_draws_into_a_supplied_axis_and_returns_none():
@@ -477,36 +445,24 @@ def test_the_reliability_curve_draws_into_a_supplied_axis_and_returns_none():
 
     frame = _eval_frame(200)
     figure, axis = plt.subplots()
-    try:
-        assert reliability_curve(
-            frame["target"], frame["prediction"], frame["prediction_std"], axis=axis
-        ) is None
-    finally:
-        plt.close(figure)
+    assert reliability_curve(
+        frame["target"], frame["prediction"], frame["prediction_std"], axis=axis
+    ) is None
 
 
 def test_sigma_vs_error_bins_by_equal_count_and_returns_a_figure():
     frame = _eval_frame(200)
-    import matplotlib.pyplot as plt
 
     figure = sigma_vs_error(
         frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
     )
-    try:
-        assert figure is not None
-        assert figure.axes[0].get_xlabel().startswith("Predicted")
-    finally:
-        plt.close(figure)
+    assert figure is not None
+    assert figure.axes[0].get_xlabel().startswith("Predicted")
 
 
 def test_sigma_vs_error_degrades_gracefully_on_a_split_too_small_to_bin():
-    import matplotlib.pyplot as plt
-
     figure = sigma_vs_error(np.zeros(5), np.zeros(5), np.ones(5))
-    try:
-        assert figure is not None
-    finally:
-        plt.close(figure)
+    assert figure is not None
 
 
 # --- the parent overlay: one frame per target, on its own panel ------------
@@ -539,12 +495,7 @@ def test_a_categorical_first_column_no_longer_crashes_the_parent_overlay():
         _target_frame("ph_water", [7.0, 8.0], [7.1, 8.1], ["upper_slope_flat", "lower_slope"]),
     ]
     figure = create_parent_pred_obs(frames)
-    try:
-        assert figure is not None
-    finally:
-        import matplotlib.pyplot as plt
-
-        plt.close(figure)
+    assert figure is not None
 
 
 def _panel_x(figure, title):
@@ -565,20 +516,16 @@ def test_a_frame_for_one_target_stays_off_another_targets_panel():
     The two targets are given disjoint ranges, so a panel that borrowed the other frame's rows
     would show it immediately.
     """
-    import matplotlib.pyplot as plt
 
     frames = [
         _target_frame("clay_pct", [10.0, 12.0], [10.5, 12.5]),
         _target_frame("ph_water", [900.0, 950.0], [905.0, 955.0]),
     ]
     figure = create_parent_pred_obs(frames)
-    try:
-        clay = _panel_x(figure, "clay_pct")
-        ph = _panel_x(figure, "ph_water")
-        assert len(clay) == 2 and clay.max() < 100
-        assert len(ph) == 2 and ph.min() > 100
-    finally:
-        plt.close(figure)
+    clay = _panel_x(figure, "clay_pct")
+    ph = _panel_x(figure, "ph_water")
+    assert len(clay) == 2 and clay.max() < 100
+    assert len(ph) == 2 and ph.min() > 100
 
 
 def test_the_silent_case_is_fixed_too_not_just_the_crash():
@@ -587,54 +534,37 @@ def test_the_silent_case_is_fixed_too_not_just_the_crash():
     Run 7d09124 did exactly this and produced a pred_error_plot nobody could tell was wrong, which
     is why the fix is a target check and not a try/except.
     """
-    import matplotlib.pyplot as plt
 
     frames = [
         _target_frame("clay_pct", [10.0, 12.0], [10.5, 12.5], [0.031, 0.032]),
         _target_frame("ph_water", [7.0, 8.0], [7.1, 8.1], [0.041, 0.042]),
     ]
     figure = create_parent_pred_obs(frames)
-    try:
-        clay = _panel_x(figure, "clay_pct")
-        # Two points, not four, and none of them a reflectance value near 0.03.
-        assert len(clay) == 2
-        assert clay.min() > 1.0
-    finally:
-        plt.close(figure)
+    clay = _panel_x(figure, "clay_pct")
+    # Two points, not four, and none of them a reflectance value near 0.03.
+    assert len(clay) == 2
+    assert clay.min() > 1.0
 
 
 def test_a_frame_without_a_target_name_still_plots():
     """The legacy single-target path, which the target check must not break."""
-    import matplotlib.pyplot as plt
 
     frame = pd.DataFrame({"target": [1.0, 2.0], "prediction": [1.1, 2.1], "model_name": "Ridge"})
     figure = create_parent_pred_obs([frame])
-    try:
-        assert figure is not None
-    finally:
-        plt.close(figure)
+    assert figure is not None
 
 
 def test_a_frame_with_no_numeric_column_is_skipped_rather_than_guessed_at():
-    import matplotlib.pyplot as plt
-
     frame = pd.DataFrame(
         {"landform_class": ["a", "b"], "prediction": [1.0, 2.0], "model_name": "Ridge"}
     )
     figure = create_parent_pred_obs([frame])
-    try:
-        assert figure is not None  # renders an empty panel rather than inventing an x axis
-    finally:
-        plt.close(figure)
+    assert figure is not None  # renders an empty panel rather than inventing an x axis
 
 
 def test_numbers_stored_as_strings_still_plot():
     """Coercion rather than trust: a numeric-looking object column is usable, not fatal."""
-    import matplotlib.pyplot as plt
 
     frame = _target_frame("clay_pct", ["10.0", "12.0"], [10.5, 12.5])
     figure = create_parent_pred_obs([frame])
-    try:
-        assert len(_panel_x(figure, "clay_pct")) == 2
-    finally:
-        plt.close(figure)
+    assert len(_panel_x(figure, "clay_pct")) == 2
