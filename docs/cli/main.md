@@ -45,11 +45,11 @@ to a results folder - see [Reading the results](../outputs.md) for how to get at
 ## What it prints
 
 ```text
-[sklearn group 1/1] organic_matter_g_kg__clay_pct__ph_water - Ridge
-[lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.5min
+2026-09-22 20:49:41 - AlMoutmir Soil Models Training - INFO - [sklearn group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.9min
+2026-09-22 20:50:03 - AlMoutmir Soil Models Training - INFO - [lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.4min
 ```
 
-One line per target group per family. `organic_matter_g_kg__clay_pct__ph_water` is a
+Two lines per target group per family - one when it starts, one when it finishes. `organic_matter_g_kg__clay_pct__ph_water` is a
 {term}`target group`: three targets predicted by one model, because `MULTI_TARGET_MODE` is `joint`.
 
 ## Common problems

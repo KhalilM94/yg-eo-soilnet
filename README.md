@@ -54,7 +54,7 @@ pixi run -e core demo
 ```
 
 It takes about two minutes. The last lines look like
-`[lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.5min`.
+`[lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.4min`.
 
 **5. Look at the results** in MLflow, the tool that recorded the run:
 

@@ -62,8 +62,8 @@ This trains two models on the same data and scores both on the same 45 held-back
 It takes about two minutes and ends with something like:
 
 ```text
-[sklearn group 1/1] organic_matter_g_kg__clay_pct__ph_water - Ridge
-[lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.5min
+2026-09-22 20:49:41 - AlMoutmir Soil Models Training - INFO - [sklearn group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.9min
+2026-09-22 20:50:03 - AlMoutmir Soil Models Training - INFO - [lightning group 1/1] organic_matter_g_kg__clay_pct__ph_water - done in 0.4min
 ```
 
 One model predicts all three targets at once, which is why the group's name has all three in it.
