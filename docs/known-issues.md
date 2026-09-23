@@ -8,12 +8,6 @@ how the code behaves changed underneath you. None of them affects a model's scor
 
 ## Configuration
 
-**Some settings default differently in code and in YAML.** The code's own default is used when a
-setting is absent from your configuration file, and two of them disagree with the shipped file:
-explanations default to on in code and are `false` in `main_config.yml`; early-stopping patience
-defaults to 5 in code and is `100` in `configs/lightning/models/defaults.yml`. Both shipped values
-win as long as you keep them in the file.
-
 **There is a `config.yml` and a `model_registry.yml` at the repository root.** Nothing reads them;
 the files in use are `configs/main_config.yml` and the two model lists it names.
 

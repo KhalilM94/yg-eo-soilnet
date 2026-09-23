@@ -42,6 +42,11 @@ First match wins:
 4. The top level of the main file.
 5. The default in the code.
 
+Step 5 is the one to watch: a setting deleted from a YAML file does not become "off" or "unset", it
+becomes whatever the code says. Those defaults are kept in step with the shipped files by
+`tests/test_config_defaults.py`, which fails naming any setting whose default has drifted away from
+what the project ships, so the two cannot disagree without someone writing down why.
+
 ## Required settings
 
 Four settings name *your* data, so there is nothing sensible to fall back on. A run that omits one

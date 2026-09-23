@@ -629,10 +629,11 @@ def test_the_same_entry_in_two_files_raises(base_config_paths: dict) -> None:
         Config(**paths)
 
 
-def test_explain_switch_defaults_to_on(base_config_paths: dict) -> None:
+def test_explain_switch_defaults_to_off(base_config_paths: dict) -> None:
+    """Off, like the other two expensive extras, and like every shipped configuration."""
     config = Config(**base_config_paths)
 
-    assert config.EXPLAIN_ENABLED is True
+    assert config.EXPLAIN_ENABLED is False
     assert isinstance(config.EXPLAIN_MAX_SAMPLES, int)
     assert isinstance(config.EXPLAIN_BACKGROUND_SAMPLES, int)
     assert isinstance(config.EXPLAIN_MAX_DISPLAY, int)

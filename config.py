@@ -25,7 +25,6 @@ have their own flat environment-variable names, listed in the configuration guid
 """
 
 import os
-import random
 import yaml
 import json
 from copy import deepcopy
@@ -302,22 +301,19 @@ class Config:
         self.S1_COLUMNS = self._get_temporal_config('s1_columns', 'S1_COLUMNS', [])
         self.S2_COLUMNS = self._get_temporal_config('s2_columns', 'S2_COLUMNS', [])
         self.MODIS_COLUMNS = self._get_temporal_config('modis_columns', 'MODIS_COLUMNS', [])
-        self.SPATIAL_RADIUS = self._get_config('SPATIAL_RADIUS', 50000)
-        self.BASELINE_METHOD = self._get_config('BASELINE_METHOD', 'knn')
-        self.BASELINE_K_NEIGHBORS = self._get_config('BASELINE_K_NEIGHBORS', 5)
         self.LIGHTNING_BATCH_SIZE = self._get_config('LIGHTNING_BATCH_SIZE', 32)
         self.LIGHTNING_VAL_SIZE = self._get_config('LIGHTNING_VAL_SIZE', 0.2)
         self.LIGHTNING_NUM_WORKERS = self._get_config('LIGHTNING_NUM_WORKERS', 0)
         self.LIGHTNING_PIN_MEMORY = self._get_config('LIGHTNING_PIN_MEMORY', False)
         self.LIGHTNING_PERSISTENT_WORKERS = self._get_config('LIGHTNING_PERSISTENT_WORKERS', False)
-        self.LIGHTNING_MAX_EPOCHS = self._get_config('LIGHTNING_MAX_EPOCHS', 50)
+        self.LIGHTNING_MAX_EPOCHS = self._get_config('LIGHTNING_MAX_EPOCHS', 500)
         self.LIGHTNING_ACCELERATOR = self._get_config('LIGHTNING_ACCELERATOR', 'auto')
         self.LIGHTNING_DEVICES = self._get_config('LIGHTNING_DEVICES', 'auto')
         self.LIGHTNING_PRECISION = self._get_config('LIGHTNING_PRECISION', '32-true')
         self.LIGHTNING_ENABLE_DEFAULT_LOGGER = self._get_config('LIGHTNING_ENABLE_DEFAULT_LOGGER', True)
         self.LIGHTNING_ACCUMULATE_GRAD_BATCHES = self._get_config('LIGHTNING_ACCUMULATE_GRAD_BATCHES', 1)
-        self.LIGHTNING_GRADIENT_CLIP_VAL = self._get_config('LIGHTNING_GRADIENT_CLIP_VAL', 0.0)
-        self.LIGHTNING_LOG_EVERY_N_STEPS = self._get_config('LIGHTNING_LOG_EVERY_N_STEPS', 1)
+        self.LIGHTNING_GRADIENT_CLIP_VAL = self._get_config('LIGHTNING_GRADIENT_CLIP_VAL', 1.0)
+        self.LIGHTNING_LOG_EVERY_N_STEPS = self._get_config('LIGHTNING_LOG_EVERY_N_STEPS', 5)
         self.MAIN_FILE_LOGGING_ENABLED = self._get_config('MAIN_FILE_LOGGING_ENABLED', True)
         # What happens when a scikit-learn model fails to train.
         self.FAIL_ON_MODEL_ERROR = self._get_config('FAIL_ON_MODEL_ERROR', False)
@@ -335,7 +331,7 @@ class Config:
         self.MLFLOW_REGISTER_MODELS = self._get_config('MLFLOW_REGISTER_MODELS', True)
         # --- SHAP explanations ------------------------------------------------------------------
         # When EXPLAIN_ENABLED is false, the shap library is not even imported.
-        self.EXPLAIN_ENABLED = self._get_config('EXPLAIN_ENABLED', True)
+        self.EXPLAIN_ENABLED = self._get_config('EXPLAIN_ENABLED', False)
         self.EXPLAIN_MAX_SAMPLES = self._get_config('EXPLAIN_MAX_SAMPLES', 500)
         self.EXPLAIN_BACKGROUND_SAMPLES = self._get_config('EXPLAIN_BACKGROUND_SAMPLES', 100)
         self.EXPLAIN_MAX_DISPLAY = self._get_config('EXPLAIN_MAX_DISPLAY', 25)
@@ -395,7 +391,7 @@ class Config:
                 'method',
                 'UNCERTAINTY_INTERVAL_METHOD',
                 self._get_calibration_config(
-                    'method', 'UNCERTAINTY_CALIBRATION_METHOD', 'split_conformal'
+                    'method', 'UNCERTAINTY_CALIBRATION_METHOD', 'conformal'
                 ),
             )
         ).lower()
@@ -452,11 +448,11 @@ class Config:
 
         self.LIGHTNING_EARLY_STOPPING_MONITOR = self._get_config('LIGHTNING_EARLY_STOPPING_MONITOR', 'val_loss')
         self.LIGHTNING_EARLY_STOPPING_MODE = self._get_config('LIGHTNING_EARLY_STOPPING_MODE', 'min')
-        self.LIGHTNING_EARLY_STOPPING_PATIENCE = self._get_config('LIGHTNING_EARLY_STOPPING_PATIENCE', 5)
+        self.LIGHTNING_EARLY_STOPPING_PATIENCE = self._get_config('LIGHTNING_EARLY_STOPPING_PATIENCE', 100)
         self.LIGHTNING_CHECKPOINT_MONITOR = self._get_config('LIGHTNING_CHECKPOINT_MONITOR', 'val_loss')
         self.LIGHTNING_CHECKPOINT_MODE = self._get_config('LIGHTNING_CHECKPOINT_MODE', 'min')
         self.LIGHTNING_SAVE_TOP_K = self._get_config('LIGHTNING_SAVE_TOP_K', 1)
-        self.RANDOM_SEED = self._get_config('RANDOM_SEED', random.randint(0, 1000000))
+        self.RANDOM_SEED = self._get_config('RANDOM_SEED', 42)
         self.TEST_SIZE = self._get_config('TEST_SIZE', 0.2)
         self.CLUSTERING_STRATEGY = self._get_config('CLUSTERING_STRATEGY', None)
         self.CLUSTERING_STRATEGY = self._normalize_mapping(self.CLUSTERING_STRATEGY)
@@ -548,7 +544,7 @@ class Config:
         self.LOG_TRAIN_FIT_METRIC = self._get_config('LOG_TRAIN_FIT_METRIC', True)
         # Models that skip that extra score.
         self.LOG_TRAIN_FIT_METRIC_SKIP_MODELS = self._get_config(
-            'LOG_TRAIN_FIT_METRIC_SKIP_MODELS', []
+            'LOG_TRAIN_FIT_METRIC_SKIP_MODELS', ['TabICL']
         )
         self.MAX_FEATURE_DROP_RATIO_WARNING = self._get_sklearn_categorical_config(
             'MAX_FEATURE_DROP_RATIO_WARNING', 0.9

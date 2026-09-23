@@ -177,6 +177,8 @@ class SoilModelTraining:
             enable_file_logging=self.config.SKLEARN_FILE_LOGGING_ENABLED,
         )
         self.sklearn_logger = self.sklearn_logger_wrapper.get_logger()
+        # Stated in the log because repeating a run means repeating this number.
+        self.logger.info("Random seed for this run: %s", self.config.RANDOM_SEED)
 
         self.data_manager = DataManager(self.config, self.logger)
         # One split for the whole run, shared by both model families, so a point in the test set
