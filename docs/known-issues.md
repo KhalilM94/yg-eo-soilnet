@@ -1,15 +1,11 @@
 # Known issues
 
-Things that do not work the way the configuration or the help text suggests. They were found while
-writing this documentation and are recorded here rather than quietly fixed, so that nothing about
-how the code behaves changed underneath you. None of them affects a model's scores.
+Two things behave differently from what reading the code would lead you to expect. Neither is a
+defect, and neither affects a model's scores - they are recorded here so that finding one does not
+cost you an afternoon.
 
-## Command-line tools
-
-## Configuration
-
-**There is a `config.yml` and a `model_registry.yml` at the repository root.** Nothing reads them;
-the files in use are `configs/main_config.yml` and the two model lists it names.
+Everything else on this page has been fixed; the fixes are on the branch that removed each entry, so
+`git log docs/known-issues.md` is a list of what changed and why.
 
 ## Runs and results
 
