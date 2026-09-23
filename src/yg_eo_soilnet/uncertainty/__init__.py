@@ -76,7 +76,7 @@ def uncertainty_enabled_for(config: Any, model_name: str) -> bool:
 
     ``uncertainty.models`` names the models to do it for; ``uncertainty.exclude_models`` names ones to
     leave out. Naming a model explicitly beats a blanket exclusion, since the cost is per model.
-        """
+    """
     if not bool(getattr(config, "UNCERTAINTY_ENABLED", False)):
         return False
 
@@ -117,13 +117,11 @@ def fit_calibrators(
     Returns
     -------
     dict of str to :class:`~yg_eo_soilnet.uncertainty.conformal.ConformalCalibrator`
-        """
+    """
     calibrators: dict[str, ConformalCalibrator] = {}
     for index, target_name in enumerate(target_names):
         observed = (
-            y_calib[target_name]
-            if isinstance(y_calib, pd.DataFrame) and target_name in y_calib.columns
-            else y_calib
+            y_calib[target_name] if isinstance(y_calib, pd.DataFrame) and target_name in y_calib.columns else y_calib
         )
         calibrators[target_name] = fit_conformal(
             observed,
@@ -145,11 +143,12 @@ def attach_uncertainty_columns(
 
     Writes ``prediction_std``, ``prediction_lower`` and ``prediction_upper`` - suffixed with the target
     name when there are several. The predictions already in the table are left alone.
-        """
+    """
     multi_target = len(target_names) > 1
     calibrators = calibrators or {}
 
     for index, target_name in enumerate(target_names):
+
         def name(stem: str) -> str:
             """This target's column name for one kind of uncertainty value."""
             return column_name(stem, target_name, multi_target=multi_target)
@@ -181,7 +180,7 @@ def log_uncertainty_artifacts(
     -------
     dict
         What went into the run summary; empty when the table carries no uncertainty.
-        """
+    """
     from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error
 
     sigma = sigma_column(frame, target_name)
@@ -195,9 +194,7 @@ def log_uncertainty_artifacts(
     written: dict = {"artifacts": []}
     figures = [
         (
-            reliability_curve(
-                observed, predicted, sigma, calibrator=calibrator, target_name=target_name
-            ),
+            reliability_curve(observed, predicted, sigma, calibrator=calibrator, target_name=target_name),
             ArtifactLayout.RELIABILITY_FILE,
         ),
         (

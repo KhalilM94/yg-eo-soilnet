@@ -78,9 +78,9 @@ def test_mahalanobis_charges_more_for_an_error_that_defies_the_correlation() -> 
 
     aligned = targets + torch.tensor([0.3, 0.3, 0.0])
     defiant = targets + torch.tensor([0.3, -0.3, 0.0])
-    assert torch.allclose(
-        (aligned - targets).norm(), (defiant - targets).norm()
-    ), "the two errors must have the same magnitude for the comparison to mean anything"
+    assert torch.allclose((aligned - targets).norm(), (defiant - targets).norm()), (
+        "the two errors must have the same magnitude for the comparison to mean anything"
+    )
 
     assert float(loss(defiant, targets)) > 5.0 * float(loss(aligned, targets))
 
@@ -213,9 +213,7 @@ def test_cosine_spaces_measure_different_angles() -> None:
     standardized = CosineStructureLoss(nn.MSELoss(), space="standardized", **shared)
     original(predictions, targets)
     standardized(predictions, targets)
-    assert original.last_components["penalty"] != pytest.approx(
-        standardized.last_components["penalty"]
-    )
+    assert original.last_components["penalty"] != pytest.approx(standardized.last_components["penalty"])
 
 
 def test_cosine_ignores_rows_sitting_at_the_target_mean() -> None:
@@ -351,10 +349,7 @@ def test_datamodule_to_factory_to_trainer_end_to_end(loss_name) -> None:
 
     factory = LightningConfigFactory(registry={}, config=SimpleNamespace(TARGET_COLUMNS=[]))
     spec = {
-        "import_path": (
-            "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module"
-            ".SoilCNNLightningModule"
-        ),
+        "import_path": ("yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule"),
         "init_args": {
             "static_hidden_dims": [4],
             "head_hidden_dims": [4],

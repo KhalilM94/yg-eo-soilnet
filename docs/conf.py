@@ -49,8 +49,19 @@ autodoc_default_options = {
 # thing. Where they are missing (for example on readthedocs.org) they are replaced by stand-ins, so
 # the reference pages still build.
 _HEAVY = [
-    "torch", "lightning", "mlflow", "sklearn", "xgboost", "shap", "optuna",
-    "geopandas", "pyproj", "tabicl", "seaborn", "tqdm", "psutil",
+    "torch",
+    "lightning",
+    "mlflow",
+    "sklearn",
+    "xgboost",
+    "shap",
+    "optuna",
+    "geopandas",
+    "pyproj",
+    "tabicl",
+    "seaborn",
+    "tqdm",
+    "psutil",
 ]
 autodoc_mock_imports = [name for name in _HEAVY if importlib.util.find_spec(name) is None]
 

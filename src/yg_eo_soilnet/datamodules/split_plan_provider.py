@@ -136,9 +136,7 @@ class SplitPlanProvider:
         """The points to split, under the configured population policy."""
         policy = str(getattr(self.config, "SPLIT_POPULATION_POLICY", INTERSECT)).lower()
         if policy not in (INTERSECT, ASSIGN_ALL):
-            raise ValueError(
-                f"split.population_policy must be one of {[INTERSECT, ASSIGN_ALL]}; got {policy!r}"
-            )
+            raise ValueError(f"split.population_policy must be one of {[INTERSECT, ASSIGN_ALL]}; got {policy!r}")
 
         if policy == ASSIGN_ALL or not eligibility:
             # Every point is assigned and each family takes what it can use, so their test sets
@@ -177,11 +175,7 @@ class SplitPlanProvider:
             return
 
         total = len(all_ids)
-        starved = {
-            family: ids
-            for family, ids in eligibility.items()
-            if len(ids) / total < minimum_ratio
-        }
+        starved = {family: ids for family, ids in eligibility.items() if len(ids) / total < minimum_ratio}
         if starved:
             listed = "\n".join(
                 f"  {family}: {len(ids)} of {total} usable ({len(ids) / total:.1%})"
@@ -203,8 +197,7 @@ class SplitPlanProvider:
             return
 
         breakdown = ", ".join(
-            f"{family}={len(ids)}"
-            for family, ids in sorted(eligibility.items(), key=lambda item: len(item[1]))
+            f"{family}={len(ids)}" for family, ids in sorted(eligibility.items(), key=lambda item: len(item[1]))
         )
         raise ValueError(
             f"split.population_policy={policy!r} left {len(population)} of {total} point(s) "
@@ -285,8 +278,7 @@ class SplitPlanProvider:
     ) -> None:
         """Report how many points each family can use, and how many the policy then excludes."""
         self.logger.info(
-            f"Split population ({policy}): {len(population)} of {len(all_ids)} point(s) from the "
-            f"source frame."
+            f"Split population ({policy}): {len(population)} of {len(all_ids)} point(s) from the source frame."
         )
         for family in sorted(eligibility):
             usable = eligibility[family]

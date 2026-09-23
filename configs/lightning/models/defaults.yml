@@ -19,8 +19,9 @@ defaults:
   trainer_args:
     max_epochs: 500          # maximum number of passes over the training data (an "epoch" = one
                               # full pass). Training usually stops earlier - see early_stopping below.
-    accelerator: cuda        # cuda = train on GPU. Use "cpu" if you don't have one.
-    devices: 1                # how many GPUs/CPUs to use
+    accelerator: auto        # auto = the GPU when the machine has one, the CPU when it does
+                              # not. Set "gpu" or "cpu" to insist on one of them.
+    devices: auto             # how many GPUs/CPUs to use; auto = whatever is there
     precision: 32-true        # numeric precision for training; 32-true is standard full precision
     accumulate_grad_batches: 1 # combine this many batches before each weight update - raise this
                                 # to simulate a bigger batch size without using more memory at once

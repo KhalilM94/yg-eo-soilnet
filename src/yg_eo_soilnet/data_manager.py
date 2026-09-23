@@ -64,6 +64,20 @@ class DataManager:
             getattr(self.config, "LON_COLUMN", "lon"),
         )
 
+    def point_id_column(self) -> str:
+        """Return the name of the point id column, from ``POINT_ID_COLUMN``.
+
+        Beside :meth:`coordinate_columns` and for the same reason: the split, the targets join and
+        the per-point export all read it, and a value invented at one of those call sites would
+        route that one somewhere the others do not.
+        """
+        return str(self.config.POINT_ID_COLUMN)
+
+    def time_column(self) -> str | None:
+        """Return the name of the date column, or None when no time series is configured."""
+        configured = self.temporal_config().get("time_column")
+        return str(configured) if configured else getattr(self.config, "TIME_COLUMN", None)
+
     def context_feature_columns(self) -> list[str]:
         """Return the spatial-context covariates, or nothing when the group is switched off.
 
@@ -100,7 +114,7 @@ class DataManager:
         """
         lat_column, lon_column = self.coordinate_columns()
         columns = {
-            getattr(self.config, "POINT_ID_COLUMN", "point_id"),
+            self.point_id_column(),
             lat_column,
             lon_column,
             "geometry",
@@ -174,8 +188,8 @@ class DataManager:
         """Return the spectral band columns to drop.
 
         With ``existing_hs_features`` both ``enabled`` and ``ignore``, that is its listed
-        ``band_names`` plus every column starting with its ``prefix`` (one string, not a list).
-        Columns named in the older ``IGNORE_BANDS`` setting are dropped too.
+        ``band_names`` plus every column starting with any of its ``prefix`` entries - one string
+        or a list of them. Columns named in the older ``IGNORE_BANDS`` setting are dropped too.
 
         Parameters
         ----------
@@ -193,9 +207,15 @@ class DataManager:
             if isinstance(band_names, (list, tuple, set)):
                 drop_columns.update({str(name) for name in band_names if name})
 
+            # One prefix or a list of them; the shipped file has a list, and str() on that used to
+            # make a prefix no column could start with. Config._get_ignore_bands reads the same
+            # setting and normalizes it the same way.
             prefix = existing_hs.get("prefix", "")
-            if prefix:
-                drop_columns.update({str(column) for column in columns if str(column).startswith(str(prefix))})
+            prefixes = tuple(
+                str(one) for one in (prefix if isinstance(prefix, (list, tuple, set)) else [prefix]) if one
+            )
+            if prefixes:
+                drop_columns.update({str(column) for column in columns if str(column).startswith(prefixes)})
 
         legacy_ignore_bands = getattr(self.config, "IGNORE_BANDS", [])
         if isinstance(legacy_ignore_bands, (list, tuple, set)):
@@ -308,7 +328,9 @@ class DataManager:
         frames = [self._read_tabular_file(path) for path in paths]
         return pd.concat(frames, ignore_index=True, sort=False)
 
-    def _load_folder_or_file(self, source_path: Optional[str], manifest_paths: Optional[list[str]] = None) -> pd.DataFrame:
+    def _load_folder_or_file(
+        self, source_path: Optional[str], manifest_paths: Optional[list[str]] = None
+    ) -> pd.DataFrame:
         """Read a source given as a list of files from the manifest, one file, or a folder."""
         if manifest_paths:
             absolute_paths = [self._resolve_data_path(path) for path in manifest_paths]
@@ -378,7 +400,7 @@ class DataManager:
         lat_column, lon_column = self.coordinate_columns()
         return SoilDataset(
             tabular=self.load_tabular_data(),
-            point_id_column=getattr(self.config, "POINT_ID_COLUMN", "point_id"),
+            point_id_column=self.point_id_column(),
             lat_column=lat_column,
             lon_column=lon_column,
             target_columns=list(getattr(self.config, "TARGET_COLUMNS", [])),
@@ -431,9 +453,7 @@ class DataManager:
         deep-learning model then sees the static covariates only.
         """
         temporal_config = self.temporal_config()
-        enabled = bool(
-            temporal_config.get("enabled", getattr(self.config, "TEMPORAL_FEATURES_ENABLED", False))
-        )
+        enabled = bool(temporal_config.get("enabled", getattr(self.config, "TEMPORAL_FEATURES_ENABLED", False)))
         return enabled and bool(self._timeseries_source())
 
     def _load_static(self) -> pd.DataFrame:
@@ -473,7 +493,7 @@ class DataManager:
             return static_df
 
         targets_df = self._load_targets()
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
+        point_col = self.point_id_column()
         if point_col not in static_df.columns:
             raise KeyError(f"Point id column '{point_col}' not found in static features file")
         if point_col not in targets_df.columns:
@@ -560,7 +580,9 @@ class DataManager:
         modality_frames: list[pd.DataFrame] = []
         if isinstance(manifest_timeseries, dict) and manifest_timeseries:
             for modality_name, modality_paths in manifest_timeseries.items():
-                resolved_paths = [self._resolve_data_path(path) for path in self._normalize_manifest_paths(modality_paths)]
+                resolved_paths = [
+                    self._resolve_data_path(path) for path in self._normalize_manifest_paths(modality_paths)
+                ]
                 frame_paths = [path for path in resolved_paths if path]
                 if not frame_paths:
                     continue
@@ -579,8 +601,8 @@ class DataManager:
             raise FileNotFoundError(f"No time-series files were discovered under {resolved_root}")
 
         combined_frame = modality_frames[0]
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
-        time_col = self.temporal_config().get("time_column", getattr(self.config, "TIME_COLUMN", "date"))
+        point_col = self.point_id_column()
+        time_col = self.time_column()
         for frame in modality_frames[1:]:
             combined_frame = combined_frame.merge(frame, on=[point_col, time_col], how="outer")
         self._cache[cache_key] = combined_frame

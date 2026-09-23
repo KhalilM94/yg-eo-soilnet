@@ -52,7 +52,7 @@ def _concatenate_parts(per_batch: list[list], torch) -> list:
 
     They can disagree only when the grid was left to size itself per batch, in which case the run is
     told to fix ``grid_years`` rather than being given a quietly wrong explanation.
-        """
+    """
     if len(per_batch) == 1:
         return per_batch[0]
 
@@ -69,7 +69,7 @@ def _group_values(part_values: list[np.ndarray], groups: list[dict]) -> np.ndarr
 
     Every cell of a band's grid has its own raw contribution; the band's contribution is their sum, and
     adding them is valid because SHAP contributions add.
-        """
+    """
     columns = []
     for group in groups:
         array = part_values[group["part"]]
@@ -91,7 +91,7 @@ def _colour_values(model, parts, groups: list[dict], categorical_codes, state: d
 
     An input spanning many columns has no single value of its own, so each kind gets whatever means
     something for it: a band gets its average reading, a category its code.
-        """
+    """
     n_samples = int(parts[0].shape[0])
     colours = np.full((n_samples, len(groups)), np.nan, dtype=np.float64)
 
@@ -115,10 +115,14 @@ def _colour_values(model, parts, groups: list[dict], categorical_codes, state: d
     auxiliary_index = getattr(model, "auxiliary_index", None)
     auxiliary_index = None if auxiliary_index is None else auxiliary_index.detach().cpu().numpy()
 
-    categorical_names = list(getattr(getattr(model, "static_encoder", None), "embeddings", None).feature_names) if (
-        getattr(model, "has_static_features", False)
-        and getattr(getattr(model, "static_encoder", None), "embeddings", None) is not None
-    ) else []
+    categorical_names = (
+        list(getattr(getattr(model, "static_encoder", None), "embeddings", None).feature_names)
+        if (
+            getattr(model, "has_static_features", False)
+            and getattr(getattr(model, "static_encoder", None), "embeddings", None) is not None
+        )
+        else []
+    )
 
     for column, group in enumerate(groups):
         kind = group["kind"]
@@ -206,7 +210,7 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
     -------
     list of ShapResult
         One per target.
-        """
+    """
     import shap
     import torch
     from torch import nn
@@ -240,9 +244,7 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
 
         parts = _concatenate_parts(per_batch_parts, torch)
         categorical_codes = (
-            np.concatenate(categorical_chunks, axis=0)[: int(parts[0].shape[0])]
-            if categorical_chunks
-            else None
+            np.concatenate(categorical_chunks, axis=0)[: int(parts[0].shape[0])] if categorical_chunks else None
         )
 
         total = int(parts[0].shape[0])
@@ -282,19 +284,14 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
         colours = _colour_values(model, explain, groups, categorical_codes, state, torch)
 
         feature_names = [str(group["name"]) for group in groups]
-        blocks = [
-            group["modality"] if group["kind"] == "temporal" else group["kind"] for group in groups
-        ]
+        blocks = [group["modality"] if group["kind"] == "temporal" else group["kind"] for group in groups]
 
         target_names = list(getattr(model, "target_names", None) or []) or [target]
         n_outputs = _output_count(raw_values, explain)
 
         results = []
         for output_index in range(n_outputs):
-            per_part = [
-                _slice_output(array, part, output_index)
-                for array, part in zip(raw_values, explain)
-            ]
+            per_part = [_slice_output(array, part, output_index) for array, part in zip(raw_values, explain)]
             values = _group_values(per_part, groups)
             results.append(
                 ShapResult(
@@ -302,9 +299,7 @@ def lightning_shap_results(*, config, model, bundle, target: str) -> list[ShapRe
                     data=colours,
                     feature_names=feature_names,
                     blocks=blocks,
-                    target_name=str(
-                        target_names[output_index] if output_index < len(target_names) else output_index
-                    ),
+                    target_name=str(target_names[output_index] if output_index < len(target_names) else output_index),
                     # Attribution is taken on forward(), which is what the loss sees, so these are
                     # contributions in STANDARDIZED LOG1P space - not in the target's own units.
                     # Only predict_step inverts the transform, and it is downstream of the seam.
@@ -322,7 +317,7 @@ def _output_count(raw_values: list, parts: list) -> int:
 
     Worked out by comparing against the inputs' shape rather than by counting dimensions: the library
     adds a trailing axis only for a model with several outputs.
-        """
+    """
     reference = np.asarray(raw_values[0])
     part_shape = tuple(parts[0].shape)
     if reference.shape == part_shape:

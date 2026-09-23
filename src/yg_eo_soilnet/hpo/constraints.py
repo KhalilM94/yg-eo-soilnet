@@ -20,6 +20,7 @@ CONSTRAINTS: dict[str, ConstraintHook] = {}
 
 def constraint(name: str) -> Callable[[ConstraintHook], ConstraintHook]:
     """Register a hook under a name a search space can ask for."""
+
     def register(hook: ConstraintHook) -> ConstraintHook:
         """Record the decorated function under that name."""
         if name in CONSTRAINTS:
@@ -34,7 +35,7 @@ def split_derive_entry(entry: Any) -> tuple[str, dict[str, Any]]:
     """Read a ``derive:`` entry: a bare name, or a name with options.
 
     The options form lets one hook serve several search spaces on their own terms.
-        """
+    """
     if isinstance(entry, str):
         return entry, {}
     if isinstance(entry, Mapping) and len(entry) == 1:
@@ -52,7 +53,7 @@ def split_when(options: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
 
     The condition belongs to the search space, not to the hook: the hook runs only in trials where the
     named settings took those values.
-        """
+    """
     options = dict(options)
     when = options.pop("when", None) or {}
     if not isinstance(when, Mapping):
@@ -62,6 +63,7 @@ def split_when(options: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, An
 
 def _guarded(hook: ConstraintHook, when: Mapping[str, Any]) -> ConstraintHook:
     """Wrap a hook so it runs only in trials matching its condition."""
+
     def run(trial: optuna.Trial, chosen: MutableMapping[str, Any]) -> None:
         """Run the hook if this trial matches, otherwise do nothing."""
         if all(key in chosen and chosen[key] == expected for key, expected in when.items()):
@@ -77,7 +79,7 @@ def resolve_constraints(entries: list[Any]) -> list[ConstraintHook]:
     -------
     list of callable
         Each takes the trial and what has been drawn so far, and writes its own settings in.
-        """
+    """
     parsed = [split_derive_entry(entry) for entry in entries]
     unknown = [name for name, _ in parsed if name not in CONSTRAINTS]
     if unknown:
@@ -103,7 +105,7 @@ def d_model_divisible_by_nhead(
 
     The model refuses a width that does not. Repairing the draw rather than rejecting the trial keeps
     every trial useful.
-        """
+    """
     d_model = chosen.get(d_model_key)
     nhead = chosen.get(nhead_key)
     if d_model is None or nhead is None:
@@ -134,7 +136,7 @@ def dims_pyramid(
 
     Every list-valued width in the models - the head, the covariate branch, the CNN - is searched this
     way, since the number of layers and their widths cannot be drawn independently.
-        """
+    """
     label = key.rsplit(".", 1)[-1]
     depth = trial.suggest_int(f"{label}_depth", int(min_depth), int(max_depth))
     if depth <= 0:
@@ -143,7 +145,5 @@ def dims_pyramid(
         chosen[key] = []
         return
 
-    base = trial.suggest_categorical(
-        f"{label}_width", [int(w) for w in (widths or DEFAULT_PYRAMID_WIDTHS)]
-    )
+    base = trial.suggest_categorical(f"{label}_width", [int(w) for w in (widths or DEFAULT_PYRAMID_WIDTHS)])
     chosen[key] = [max(int(floor), int(base * float(taper) ** step)) for step in range(depth)]

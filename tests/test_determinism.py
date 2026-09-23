@@ -97,8 +97,6 @@ def test_the_sequence_datamodule_builds_through_build_loader():
 # reproduce. These tests pin the ordering on both sides.
 
 
-
-
 class FakeDataModule:
     def __init__(self, **kwargs):
         self.kwargs = kwargs

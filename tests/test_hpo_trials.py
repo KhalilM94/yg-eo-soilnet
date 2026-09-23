@@ -23,10 +23,14 @@ class FakeBundle:
         self.model = SimpleNamespace()
         self.datamodule = SimpleNamespace()
         self.trainer_kwargs = trainer_kwargs or {"max_epochs": 5, "enable_checkpointing": True, "deterministic": True}
-        self.callback_specs = callback_specs if callback_specs is not None else {
-            "early_stopping": {"monitor": "val_loss", "mode": "min", "patience": 30},
-            "checkpoint": {"monitor": "val_loss", "mode": "min", "save_top_k": 1},
-        }
+        self.callback_specs = (
+            callback_specs
+            if callback_specs is not None
+            else {
+                "early_stopping": {"monitor": "val_loss", "mode": "min", "patience": 30},
+                "checkpoint": {"monitor": "val_loss", "mode": "min", "save_top_k": 1},
+            }
+        )
 
 
 class RecordingTrainer:
@@ -138,9 +142,7 @@ def test_the_objective_is_the_best_epoch_not_the_last(monkeypatch):
 
 def test_best_means_lowest_when_minimizing(monkeypatch):
     series = [{"val_loss": 1.0}, {"val_loss": 0.3}, {"val_loss": 0.8}]
-    runner, bundle = _runner(
-        monkeypatch, series, objective=Objective(metric="val_loss", direction="minimize")
-    )
+    runner, bundle = _runner(monkeypatch, series, objective=Objective(metric="val_loss", direction="minimize"))
     result = runner.run(bundle, _trial())
 
     assert result.value == 0.3
@@ -544,9 +546,7 @@ def test_seed_repeats_average_and_report_only_once():
 def test_workers_are_released_once_per_seed_repeat(monkeypatch):
     """Without this the Trainer cycle survives and the next trial's fork inherits its iterators."""
     releases = []
-    monkeypatch.setattr(
-        "yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: releases.append(1)
-    )
+    monkeypatch.setattr("yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: releases.append(1))
 
     _run_one_trial(_objective(seed_repeats=3), [0.1, 0.2, 0.3])
 
@@ -556,9 +556,7 @@ def test_workers_are_released_once_per_seed_repeat(monkeypatch):
 def test_workers_are_released_even_when_the_trial_is_pruned(monkeypatch):
     """A pruned trial raises out of run(); the traceback keeps the frame, so the finally matters."""
     releases = []
-    monkeypatch.setattr(
-        "yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: releases.append(1)
-    )
+    monkeypatch.setattr("yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: releases.append(1))
 
     objective = _objective()
 
@@ -651,9 +649,7 @@ def test_workers_are_still_released_when_seeding_fails(monkeypatch):
         "yg_eo_soilnet.hpo.objective.seed_everything", lambda seed: (_ for _ in ()).throw(ValueError("bad seed"))
     )
     monkeypatch.setattr("yg_eo_soilnet.hpo.trial_runner.cuda_context_is_dead", lambda: False)
-    monkeypatch.setattr(
-        "yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: released.append(True)
-    )
+    monkeypatch.setattr("yg_eo_soilnet.hpo.objective.release_dataloader_workers", lambda: released.append(True))
 
     with pytest.raises(ValueError):
         objective(optuna.create_study(direction="maximize").ask())
@@ -664,9 +660,7 @@ def test_a_pruned_trial_is_not_mistaken_for_a_device_failure(monkeypatch):
     """TrialPruned must reach Optuna untouched, whatever the probe would have said."""
     objective = _objective()
     probed = []
-    monkeypatch.setattr(
-        "yg_eo_soilnet.hpo.trial_runner.cuda_context_is_dead", lambda: probed.append(True) or True
-    )
+    monkeypatch.setattr("yg_eo_soilnet.hpo.trial_runner.cuda_context_is_dead", lambda: probed.append(True) or True)
     monkeypatch.setattr(
         objective.runner,
         "run",

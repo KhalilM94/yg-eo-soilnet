@@ -42,7 +42,7 @@ class ShapResult:
         Which method produced them.
     feature_values : numpy.ndarray, optional
         The inputs' own values, which colour the figures.
-        """
+    """
 
     values: np.ndarray  # (n_samples, n_features)
     data: np.ndarray  # (n_samples, n_features), the beeswarm colour values; NaN where meaningless
@@ -63,19 +63,13 @@ class ShapResult:
         self.values = np.asarray(self.values, dtype=np.float64)
         self.data = np.asarray(self.data, dtype=np.float64)
         if self.values.shape != self.data.shape:
-            raise ValueError(
-                f"values {self.values.shape} and data {self.data.shape} must have the same shape"
-            )
+            raise ValueError(f"values {self.values.shape} and data {self.data.shape} must have the same shape")
         if self.values.shape[1] != len(self.feature_names):
-            raise ValueError(
-                f"{self.values.shape[1]} value column(s) but {len(self.feature_names)} feature name(s)"
-            )
+            raise ValueError(f"{self.values.shape[1]} value column(s) but {len(self.feature_names)} feature name(s)")
         if not self.blocks:
             self.blocks = ["all"] * len(self.feature_names)
         if len(self.blocks) != len(self.feature_names):
-            raise ValueError(
-                f"{len(self.blocks)} block label(s) but {len(self.feature_names)} feature name(s)"
-            )
+            raise ValueError(f"{len(self.blocks)} block label(s) but {len(self.feature_names)} feature name(s)")
 
     @property
     def n_samples(self) -> int:
@@ -101,7 +95,7 @@ class ShapResult:
         The contributions are added up within a group for each point before their size is taken, so two
         inputs in one group that cancel each other out count as the small contribution they jointly make,
         not as two large ones.
-                """
+        """
         totals: dict[str, float] = {}
         for block in dict.fromkeys(self.blocks):
             columns = [index for index, name in enumerate(self.blocks) if name == block]
@@ -113,7 +107,7 @@ class ShapResult:
 
         Long rather than wide: with every band of every data source having its own row, there are hundreds
         of inputs.
-                """
+        """
         n_samples, n_features = self.values.shape
         return pd.DataFrame(
             {

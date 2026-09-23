@@ -89,7 +89,7 @@ def style_context():
     """Draw in this project's style, putting the previous settings back afterwards.
 
     Use it around another library's drawing calls, which build their own figures.
-        """
+    """
     with plt.rc_context(RC_PARAMS):
         yield
 
@@ -111,7 +111,7 @@ def restyle_axes(axis, *, grid_axis: str = "y"):
 
     Needed because a library that sets its own colours and sizes as it draws cannot be styled in
     advance.
-        """
+    """
     axis.set_facecolor("none")
     axis.figure.set_facecolor("white")
 
@@ -152,7 +152,7 @@ def square_panel(axis):
 
     The house style suits bar charts and time series; a predicted-against-measured panel needs both
     spines and a grid on both axes, or its diagonal cannot be read.
-        """
+    """
     axis.spines["left"].set_visible(True)
     axis.spines["left"].set_color(BASELINE)
     axis.grid(True, which="major", axis="both", color=GRID, linewidth=0.8)
@@ -200,7 +200,7 @@ def message_figure(message: str, *, figsize=(FIG_WIDTH_COLUMN, 1.6)):
     """A figure that says why there is nothing to draw.
 
     Every plotting function here returns one of these rather than nothing, so no caller has to check.
-        """
+    """
     figure, axis = plt.subplots(figsize=figsize, layout="constrained")
     axis.text(0.5, 0.5, message, ha="center", va="center", wrap=True, fontsize=8, color=MUTED)
     axis.set_axis_off()

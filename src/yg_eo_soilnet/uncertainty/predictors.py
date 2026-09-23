@@ -33,7 +33,7 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
         The seed each member was trained at.
     bootstrapped : bool, default False
         Whether the members were trained on resampled rows.
-        """
+    """
 
     def __init__(
         self,
@@ -78,14 +78,14 @@ class EnsembleRegressor(BaseEstimator, RegressorMixin):
         Returns
         -------
         EnsemblePrediction
-                """
+        """
         return aggregate(self.predict_members(X))
 
     def predict_frame(self, X) -> pd.DataFrame:  # noqa: N803
         """The wide form: prediction, spread and interval per target, as named columns.
 
         What serving returns when asked for uncertainty.
-                """
+        """
         prediction = self.predict_uncertainty(X)
         frame = pd.DataFrame(index=getattr(X, "index", None))
 

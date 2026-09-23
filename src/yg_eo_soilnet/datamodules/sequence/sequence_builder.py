@@ -121,9 +121,7 @@ class SoilSequenceBuilder:
             raise KeyError(f"Missing target columns in static CSV: {', '.join(missing_targets)}")
 
         feature_frame = self.data_manager.filter_schema(static_df, target_columns)
-        blocks = resolve_categorical_columns(
-            self.config, static_df, feature_frame.columns, logger=self.logger
-        )
+        blocks = resolve_categorical_columns(self.config, static_df, feature_frame.columns, logger=self.logger)
         self._assert_context_features_present(static_df, blocks.continuous_columns)
         feature_columns = list(blocks.continuous_columns)
         assert_columns_are_dense_enough(
@@ -137,15 +135,11 @@ class SoilSequenceBuilder:
         )
         # The coordinate rule lives here, with the other row rules, so usable_point_ids reports it
         # to the split: a point the split assigns but the builder then drops would shrink the run.
-        coordinate_columns = [
-            column for column in self._coordinate_columns() if column in static_df.columns
-        ]
+        coordinate_columns = [column for column in self._coordinate_columns() if column in static_df.columns]
         if coordinate_columns:
             # Counted separately from the drop below, which also removes points with no lab
             # measurement: those would go whatever the coordinate setting said.
-            missing_coords = int(
-                (~build_finite_row_mask(static_df, numeric_columns=coordinate_columns)).sum()
-            )
+            missing_coords = int((~build_finite_row_mask(static_df, numeric_columns=coordinate_columns)).sum())
             if missing_coords:
                 self.logger.info(
                     f"USE_HARMONIC_COORDS is on: {missing_coords} of {len(static_df)} point(s) have "
@@ -206,21 +200,15 @@ class SoilSequenceBuilder:
         static_df, blocks = self.clean_static_frame(dataset.tabular, dataset)
 
         static_features, static_categoricals = split_feature_blocks(static_df, blocks)
-        static_validity, static_validity_names = self._static_validity(
-            static_df, list(blocks.continuous_columns)
-        )
+        static_validity, static_validity_names = self._static_validity(static_df, list(blocks.continuous_columns))
         targets = static_df[target_columns].to_numpy(dtype=np.float32)
         label_features, label_feature_names = self._extract_label_features(static_df)
         coords, coord_names = self._extract_coordinates(static_df)
         # In the order the covariate columns actually sit in, not the order the configuration lists
         # them: these names say which column is which.
         context_columns = set(self.data_manager.context_feature_columns())
-        context_feature_names = [
-            column for column in blocks.continuous_columns if column in context_columns
-        ]
-        point_ids = (
-            static_df[point_col].tolist() if point_col in static_df.columns else list(range(len(static_df)))
-        )
+        context_feature_names = [column for column in blocks.continuous_columns if column in context_columns]
+        point_ids = static_df[point_col].tolist() if point_col in static_df.columns else list(range(len(static_df)))
 
         sequences: dict[str, list[np.ndarray]] = {}
         sequence_times: dict[str, list[np.ndarray]] = {}
@@ -260,9 +248,7 @@ class SoilSequenceBuilder:
 
     # --- spatial context group --------------------------------------------
 
-    def _assert_context_features_present(
-        self, static_df: pd.DataFrame, continuous_columns: list[str]
-    ) -> None:
+    def _assert_context_features_present(self, static_df: pd.DataFrame, continuous_columns: list[str]) -> None:
         """Refuse a ``CONTEXT_FEATURES`` column the data does not carry or that something removed.
 
         Only checked while the group is switched on: switched off, the columns are meant to be gone.
@@ -290,9 +276,7 @@ class SoilSequenceBuilder:
         # Present, spelled right, but removed by another setting - a different fix from the case
         # above, so a different message.
         withheld = [
-            column
-            for column in selected
-            if column in static_df.columns and column not in set(continuous_columns)
+            column for column in selected if column in static_df.columns and column not in set(continuous_columns)
         ]
         if withheld:
             raise ValueError(
@@ -303,9 +287,7 @@ class SoilSequenceBuilder:
 
     # --- covariate gaps ---------------------------------------------------
 
-    def _static_validity(
-        self, static_df: pd.DataFrame, feature_columns: list[str]
-    ) -> tuple[np.ndarray, list[str]]:
+    def _static_validity(self, static_df: pd.DataFrame, feature_columns: list[str]) -> tuple[np.ndarray, list[str]]:
         """Build the :term:`validity flags <validity flag>` for the covariates that have gaps.
 
         A column with no gaps gets no flag: it would be an always-true channel saying nothing. The
@@ -331,8 +313,7 @@ class SoilSequenceBuilder:
             [build_finite_row_mask(static_df, numeric_columns=[column]).to_numpy(dtype=bool) for column in gappy]
         )
         self.logger.info(
-            f"Carrying measured-vs-filled flags for {len(gappy)} continuous covariate(s) with gaps: "
-            + ", ".join(gappy)
+            f"Carrying measured-vs-filled flags for {len(gappy)} continuous covariate(s) with gaps: " + ", ".join(gappy)
         )
         return validity, gappy
 
@@ -493,8 +474,7 @@ class SoilSequenceBuilder:
         KeyError
             If the time series has no point id or date column.
         """
-        temporal_config = self.data_manager.temporal_config()
-        time_col = temporal_config.get("time_column", getattr(self.config, "TIME_COLUMN", "date"))
+        time_col = self.data_manager.time_column()
 
         if point_col not in timeseries_df.columns or time_col not in timeseries_df.columns:
             raise KeyError(f"Time-series source must contain '{point_col}' and '{time_col}' columns")

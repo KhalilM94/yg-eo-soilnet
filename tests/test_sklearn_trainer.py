@@ -313,19 +313,28 @@ def test_model_trainer_falls_back_to_sklearn_file_toggle(monkeypatch: pytest.Mon
 
     assert captured["kwargs"]["enable_file_logging"] is False
 
+
 # --- failure policy and dtype handling --------------------------------------
 
 
 def _minimal_trainer(**config_overrides) -> ModelTrainer:
     defaults = dict(
-        MIN_FEATURE_COUNT=1, CATEGORICAL_FEATURES=[], EXCLUDE_CATEGORICAL=[],
-        FAIL_ON_MODEL_ERROR=False, FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET=True,
-        TREE_CATEGORICAL_ENCODING="ordinal", TREE_ONEHOT_MAX_CATEGORIES=None,
+        MIN_FEATURE_COUNT=1,
+        CATEGORICAL_FEATURES=[],
+        EXCLUDE_CATEGORICAL=[],
+        FAIL_ON_MODEL_ERROR=False,
+        FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET=True,
+        TREE_CATEGORICAL_ENCODING="ordinal",
+        TREE_ONEHOT_MAX_CATEGORIES=None,
     )
     defaults.update(config_overrides)
     return ModelTrainer(
-        config=SimpleNamespace(**defaults), columns_to_transform=[], enable_clustering=False,
-        split_strategy="kfold", seed=42, logger=MagicMock(),
+        config=SimpleNamespace(**defaults),
+        columns_to_transform=[],
+        enable_clustering=False,
+        split_strategy="kfold",
+        seed=42,
+        logger=MagicMock(),
     )
 
 
@@ -355,7 +364,7 @@ def test_x_test_integer_columns_are_cast_to_float(monkeypatch: pytest.MonkeyPatc
     assert len(seen) == 2, "expected X_train and X_test to both reach the filter"
     x_train_dtypes, x_test_dtypes = seen
     assert str(x_train_dtypes["i"]) == "float64"
-    assert str(x_test_dtypes["i"]) == "float64"   # int64 before the fix
+    assert str(x_test_dtypes["i"]) == "float64"  # int64 before the fix
 
 
 def test_all_models_failing_raises_when_configured() -> None:
@@ -371,7 +380,7 @@ def test_all_models_failing_is_tolerated_when_flag_is_off() -> None:
     trainer = _minimal_trainer(FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET=False)
     pipelines = {"boom": {"model": object(), "params": {}, "modeltype": "ml"}}
 
-    trainer.train(target="t", data=_int_data(), model_pipelines=pipelines)   # must not raise
+    trainer.train(target="t", data=_int_data(), model_pipelines=pipelines)  # must not raise
 
 
 def test_fail_on_model_error_reraises_immediately() -> None:

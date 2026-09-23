@@ -188,9 +188,7 @@ class SplitPlan:
             described[f"split_fraction_{name}"] = round(counts[name] / total, 6)
         for family, ids in sorted(self.eligibility.items()):
             described[f"split_n_eligible_{family}"] = len(ids)
-            described[f"split_n_excluded_{family}"] = len(
-                set(self.assignments.index) - set(ids)
-            )
+            described[f"split_n_excluded_{family}"] = len(set(self.assignments.index) - set(ids))
         return described
 
     @classmethod
@@ -231,9 +229,7 @@ class SplitPlan:
         if "cluster" in frame.columns:
             clusters = pd.Series(frame["cluster"].to_numpy(), index=assignments.index)
         eligibility = {
-            column[len("eligible_") :]: frozenset(
-                frame.loc[frame[column].astype(bool), "point_id"].to_numpy()
-            )
+            column[len("eligible_") :]: frozenset(frame.loc[frame[column].astype(bool), "point_id"].to_numpy())
             for column in frame.columns
             if column.startswith("eligible_")
         }
@@ -286,9 +282,7 @@ class UnifiedSplitter:
         self.logger = logger
         self.strategy = str(getattr(config, "SPLIT_HOLDOUT_STRATEGY", RANDOM)).lower()
         if self.strategy not in STRATEGIES:
-            raise ValueError(
-                f"split.strategy must be one of {list(STRATEGIES)}; got {self.strategy!r}"
-            )
+            raise ValueError(f"split.strategy must be one of {list(STRATEGIES)}; got {self.strategy!r}")
         self.test_size = _validated_fraction(getattr(config, "SPLIT_TEST_SIZE", 0.2), "split.test_size")
         self.val_size = _validated_fraction(getattr(config, "SPLIT_VAL_SIZE", 0.16), "split.val_size")
         if self.test_size + self.val_size >= 1.0:
@@ -297,13 +291,10 @@ class UnifiedSplitter:
                 f"{self.test_size} + {self.val_size} = {self.test_size + self.val_size}"
             )
         self.seed = int(getattr(config, "SPLIT_SEED", getattr(config, "RANDOM_SEED", 42)))
-        self.population_policy = str(
-            getattr(config, "SPLIT_POPULATION_POLICY", INTERSECT)
-        ).lower()
+        self.population_policy = str(getattr(config, "SPLIT_POPULATION_POLICY", INTERSECT)).lower()
         if self.population_policy not in POPULATION_POLICIES:
             raise ValueError(
-                f"split.population_policy must be one of {list(POPULATION_POLICIES)}; "
-                f"got {self.population_policy!r}"
+                f"split.population_policy must be one of {list(POPULATION_POLICIES)}; got {self.population_policy!r}"
             )
         self.cluster_strategy_ = None
 
@@ -346,9 +337,7 @@ class UnifiedSplitter:
         if len(ids) == 0:
             raise ValueError("Cannot build a split plan over an empty population.")
 
-        eligibility = {
-            family: frozenset(pd.Index(values)) for family, values in (eligibility or {}).items()
-        }
+        eligibility = {family: frozenset(pd.Index(values)) for family, values in (eligibility or {}).items()}
 
         if self.strategy == SPATIAL_GROUP:
             assignments, clusters = self._spatial_group_assignments(ids, coordinates)
@@ -559,9 +548,7 @@ def _carve(values: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, 
         return values[:0], values
     from sklearn.model_selection import train_test_split
 
-    remainder, held_out = train_test_split(
-        values, test_size=fraction, random_state=seed, shuffle=True
-    )
+    remainder, held_out = train_test_split(values, test_size=fraction, random_state=seed, shuffle=True)
     return np.asarray(held_out), np.asarray(remainder)
 
 

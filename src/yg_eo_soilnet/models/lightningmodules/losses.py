@@ -117,9 +117,7 @@ def _prepare_covariance(covariance: Any, target_dim: int, shrinkage: float) -> n
     """Check the targets' covariance and pull it slightly towards the identity matrix."""
     matrix = np.asarray(covariance, dtype=np.float64)
     if matrix.ndim != 2 or matrix.shape != (target_dim, target_dim):
-        raise ValueError(
-            f"target_covariance must be a {target_dim}x{target_dim} matrix; got shape {matrix.shape}."
-        )
+        raise ValueError(f"target_covariance must be a {target_dim}x{target_dim} matrix; got shape {matrix.shape}.")
     if not np.isfinite(matrix).all():
         raise ValueError("target_covariance contains non-finite values.")
     shrinkage = float(shrinkage)
@@ -188,9 +186,7 @@ class MahalanobisLoss(nn.Module):
 
         # Not saved with the weights: it follows from the covariance, which is saved, and the loss
         # is only used while training.
-        self.register_buffer(
-            "whitening", torch.as_tensor(whitening, dtype=torch.float32), persistent=False
-        )
+        self.register_buffer("whitening", torch.as_tensor(whitening, dtype=torch.float32), persistent=False)
 
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """Score one batch."""
@@ -250,8 +246,7 @@ class CorrelationPenaltyLoss(nn.Module):
         matrix = np.asarray(reference_correlation, dtype=np.float64)
         if matrix.ndim != 2 or matrix.shape != (self.target_dim, self.target_dim):
             raise ValueError(
-                f"target_covariance must be a {self.target_dim}x{self.target_dim} matrix; "
-                f"got shape {matrix.shape}."
+                f"target_covariance must be a {self.target_dim}x{self.target_dim} matrix; got shape {matrix.shape}."
             )
         if not np.isfinite(matrix).all():
             raise ValueError("target_covariance contains non-finite values.")
@@ -259,15 +254,11 @@ class CorrelationPenaltyLoss(nn.Module):
         # and makes this correct if it is ever handed one in the target's own units.
         deviation = np.sqrt(np.clip(np.diag(matrix), 1e-12, None))
         correlation = matrix / np.outer(deviation, deviation)
-        self.register_buffer(
-            "reference", torch.as_tensor(correlation, dtype=torch.float32), persistent=False
-        )
+        self.register_buffer("reference", torch.as_tensor(correlation, dtype=torch.float32), persistent=False)
         # Each pair of targets once. A target against itself is always 1 on both sides.
         rows, columns = np.triu_indices(self.target_dim, k=1)
         self.register_buffer("pair_rows", torch.as_tensor(rows, dtype=torch.long), persistent=False)
-        self.register_buffer(
-            "pair_columns", torch.as_tensor(columns, dtype=torch.long), persistent=False
-        )
+        self.register_buffer("pair_columns", torch.as_tensor(columns, dtype=torch.long), persistent=False)
 
     @staticmethod
     def _batch_correlation(values: torch.Tensor) -> torch.Tensor:
@@ -290,10 +281,7 @@ class CorrelationPenaltyLoss(nn.Module):
 
         predicted = self._batch_correlation(predictions)
         reference = self.reference.to(predictions.dtype)
-        difference = (
-            predicted[self.pair_rows, self.pair_columns]
-            - reference[self.pair_rows, self.pair_columns]
-        )
+        difference = predicted[self.pair_rows, self.pair_columns] - reference[self.pair_rows, self.pair_columns]
         # Averaged over the pairs, so the weight means the same thing however many targets there
         # are.
         penalty = difference.pow(2).mean()
@@ -348,9 +336,7 @@ class CosineStructureLoss(nn.Module):
         super().__init__()
         space = str(space).lower()
         if space not in COSINE_SPACES:
-            raise ValueError(
-                f"Unknown cosine_space {space!r}; expected one of: {', '.join(sorted(COSINE_SPACES))}."
-            )
+            raise ValueError(f"Unknown cosine_space {space!r}; expected one of: {', '.join(sorted(COSINE_SPACES))}.")
         self.base_loss = base_loss
         self.space = space
         self.weight = float(weight)
@@ -361,9 +347,7 @@ class CosineStructureLoss(nn.Module):
         if self.space == "original" and not (self.standardized or self.log1p):
             # With no transform applied there is nothing to undo and the two settings agree.
             # Legal, but worth saying, since the configuration reads as though it chose something.
-            logger.info(
-                "cosine_space='original' with untransformed targets: identical to 'standardized'."
-            )
+            logger.info("cosine_space='original' with untransformed targets: identical to 'standardized'.")
         # The loss keeps its own copy of these rather than reaching back into the model.
         self.register_buffer(
             "target_mean",
@@ -394,9 +378,7 @@ class CosineStructureLoss(nn.Module):
         scored_predictions = self._to_scored_space(predictions)
         scored_targets = self._to_scored_space(targets)
 
-        similarity = torch.nn.functional.cosine_similarity(
-            scored_predictions, scored_targets, dim=-1, eps=1e-8
-        )
+        similarity = torch.nn.functional.cosine_similarity(scored_predictions, scored_targets, dim=-1, eps=1e-8)
         deviation = 1.0 - similarity
         # A point sitting at the average of every target has no proportions to reproduce, and
         # scoring it would add noise.
@@ -497,8 +479,7 @@ def build_loss_fn(
         return build_base_loss(loss_name, huber_delta)
     if loss_name not in STRUCTURAL_LOSSES:
         raise ValueError(
-            f"Unknown loss_name '{loss_name}'; expected one of "
-            f"{', '.join(sorted(BASE_LOSSES | STRUCTURAL_LOSSES))}"
+            f"Unknown loss_name '{loss_name}'; expected one of {', '.join(sorted(BASE_LOSSES | STRUCTURAL_LOSSES))}"
         )
 
     if int(target_dim) < 2:
@@ -510,9 +491,7 @@ def build_loss_fn(
 
     loss_base = str(loss_base).lower()
     if loss_base not in BASE_LOSSES:
-        raise ValueError(
-            f"Unknown loss_base '{loss_base}'; expected one of {', '.join(sorted(BASE_LOSSES))}"
-        )
+        raise ValueError(f"Unknown loss_base '{loss_base}'; expected one of {', '.join(sorted(BASE_LOSSES))}")
 
     if loss_name == "cosine":
         return CosineStructureLoss(
@@ -533,9 +512,7 @@ def build_loss_fn(
         )
 
     if loss_name == "mahalanobis":
-        return MahalanobisLoss(
-            target_covariance, target_dim=int(target_dim), shrinkage=loss_shrinkage
-        )
+        return MahalanobisLoss(target_covariance, target_dim=int(target_dim), shrinkage=loss_shrinkage)
     return CorrelationPenaltyLoss(
         build_base_loss(loss_base, huber_delta),
         target_covariance,

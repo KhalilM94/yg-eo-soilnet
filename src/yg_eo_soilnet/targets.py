@@ -138,9 +138,7 @@ def resolve_mode(config: Any, spec: Optional[Mapping[str, Any]] = None) -> str:
         if declared is not None and str(declared).lower() != NATIVE:
             mode = str(declared).lower()
             if mode not in VALID_MODES:
-                raise ValueError(
-                    f"multi_target must be one of {VALID_MODES} or {NATIVE!r}, got {declared!r}."
-                )
+                raise ValueError(f"multi_target must be one of {VALID_MODES} or {NATIVE!r}, got {declared!r}.")
             return mode
 
     mode = str(getattr(config, "MULTI_TARGET_MODE", JOINT) or JOINT).lower()
@@ -301,8 +299,7 @@ def select_target_columns(
     missing = [name for name in wanted if name not in names]
     if missing:
         raise ValueError(
-            f"active_targets names columns the bundle does not carry: {sorted(missing)}. "
-            f"Available: {names}."
+            f"active_targets names columns the bundle does not carry: {sorted(missing)}. Available: {names}."
         )
 
     indices = [names.index(name) for name in wanted]

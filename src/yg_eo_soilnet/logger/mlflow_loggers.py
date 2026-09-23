@@ -113,6 +113,7 @@ def _eval_results_artifact_paths(target: str, model_name: str) -> list[str]:
         ArtifactLayout.eval_results_filename(target, model_name),
     )
 
+
 class ChildRunLogger:
     """Record everything one trained model produced, inside its own :term:`sub-run`.
 
@@ -239,11 +240,19 @@ class ChildRunLogger:
     @staticmethod
     def _resolve_run_target_label(evaluation_df: pd.DataFrame | None, fallback_target: str) -> str:
         """The name of the :term:`target group` this run covers, read from its results table."""
-        if evaluation_df is not None and "target_names" in evaluation_df.columns and not evaluation_df["target_names"].empty:
+        if (
+            evaluation_df is not None
+            and "target_names" in evaluation_df.columns
+            and not evaluation_df["target_names"].empty
+        ):
             encoded = str(evaluation_df["target_names"].iloc[0]).strip()
             if encoded:
                 return encoded
-        if evaluation_df is not None and "target_name" in evaluation_df.columns and not evaluation_df["target_name"].empty:
+        if (
+            evaluation_df is not None
+            and "target_name" in evaluation_df.columns
+            and not evaluation_df["target_name"].empty
+        ):
             encoded = str(evaluation_df["target_name"].iloc[0]).strip()
             if encoded:
                 return encoded
@@ -284,9 +293,7 @@ class ChildRunLogger:
         # An uncertainty run's table also carries prediction_std, prediction_lower and
         # prediction_upper; counting those as targets would make a single-target run look like
         # several and leave it with no scores at all.
-        prediction_columns = [
-            column for column in evaluation_df.columns if is_prediction_column(column)
-        ]
+        prediction_columns = [column for column in evaluation_df.columns if is_prediction_column(column)]
         has_multi_prediction_columns = any(column != "prediction" for column in prediction_columns)
 
         if "prediction" in evaluation_df.columns and not has_multi_prediction_columns:
@@ -318,10 +325,12 @@ class ChildRunLogger:
     # target is one flat run. Several targets give a model run - holding the model, its settings
     # and its training curves - with one sub-run per target holding that target's results.
 
-    def _log_per_target_runs(self, evaluation_df, target: str, model_name: str, log_one):
+    def _log_per_target_runs(self, evaluation_df, target: str, model_name: str, log_one, framework: str | None = None):
         """Call ``log_one`` once per target, each inside the run that holds that target.
 
-        One target logs into the current run; several open a sub-run each.
+        One target logs into the current run; several open a sub-run each. ``framework`` is tagged
+        on those sub-runs: they are what the leaderboard reads, so without it every model a
+        sub-run belongs to would be reported as the same family.
 
         Returns
         -------
@@ -338,17 +347,18 @@ class ChildRunLogger:
             return [(name, log_one(frame, name))]
 
         results = []
+        tags = {"target": None, "model_name": model_name}
+        if framework:
+            tags["framework"] = framework
         for frame, target_name, _prediction_column in frames:
             with start_child_run(
                 f"{target_name}_{model_name}",
-                tags={"target": target_name, "model_name": model_name},
+                tags={**tags, "target": target_name},
             ):
                 results.append((target_name, log_one(frame, target_name)))
         return results
 
-    def _per_target_metrics(
-        self, evaluation_df, target: str, model_name: str, alpha: float | None = None
-    ) -> dict:
+    def _per_target_metrics(self, evaluation_df, target: str, model_name: str, alpha: float | None = None) -> dict:
         """Score every target in the table, and average the scores across them.
 
         Each target's scores are named after it (``rmse_test_clay_pct``); the averages keep the
@@ -375,9 +385,7 @@ class ChildRunLogger:
             # those names. Several targets get suffixed keys plus the means below.
             if len(frames) == 1:
                 metrics.update(regression_metrics(frame[target_name], frame["prediction"]))
-            per_target = regression_metrics(
-                frame[target_name], frame["prediction"], suffix=f"_{target_name}"
-            )
+            per_target = regression_metrics(frame[target_name], frame["prediction"], suffix=f"_{target_name}")
             metrics.update(per_target)
             # The interval metrics follow the same suffixing, so a joint run's model run carries
             # picp_test_<target> for every target it fitted rather than only the point metrics.
@@ -387,9 +395,7 @@ class ChildRunLogger:
                     if len(frames) == 1
                     else {
                         f"{key}_{target_name}": value
-                        for key, value in self._uncertainty_metrics(
-                            frame, target_name, alpha=alpha
-                        ).items()
+                        for key, value in self._uncertainty_metrics(frame, target_name, alpha=alpha).items()
                     }
                 )
             for stem in ("r2_test", "rmse_test"):
@@ -419,10 +425,7 @@ class ChildRunLogger:
 
         linears = []
         if hasattr(block, "__iter__"):
-            linears = [
-                layer for layer in block
-                if hasattr(layer, "in_features") and hasattr(layer, "out_features")
-            ]
+            linears = [layer for layer in block if hasattr(layer, "in_features") and hasattr(layer, "out_features")]
         if not linears:
             return None, None
         return getattr(linears[0], "in_features", None), getattr(linears[-1], "out_features", None)
@@ -819,8 +822,7 @@ class ChildRunLogger:
 
         if not logged:
             logging.getLogger(__name__).warning(
-                "Model logging FAILED for %s_%s: the run has NO servable model and nothing was "
-                "registered. %s",
+                "Model logging FAILED for %s_%s: the run has NO servable model and nothing was registered. %s",
                 target,
                 model_name,
                 error or "no error recorded",
@@ -1065,7 +1067,7 @@ class ChildRunLogger:
         """
         if not plot_functions:
             return
-    
+
         for func_path, call_args in plot_functions.items():
             # dynamically import function
             module_name, func_name = func_path.rsplit(".", 1)
@@ -1074,7 +1076,7 @@ class ChildRunLogger:
 
             args = call_args.get("args")
             kwargs = call_args.get("kwargs", {})
-    
+
             fig = plot_func(*args, **kwargs)
 
             # Under PLOTS, not the run root. These used to be logged with no artifact_path at all,
@@ -1149,18 +1151,26 @@ class ChildRunLogger:
         target_names = [str(name) for name in (targets or split_target_names(target))] or [str(target)]
         run_name = f"{target}_{model_name}"
         # --- Tags ---
-        mlflow.set_tags({
-            "mlflow.runName": run_name,
-            "target": target,
-            "model_name": model_name,
-            "framework": "sklearn",
-            **run_owner_tags(),
-        })
+        mlflow.set_tags(
+            {
+                "mlflow.runName": run_name,
+                "target": target,
+                "model_name": model_name,
+                "framework": "sklearn",
+                **run_owner_tags(),
+            }
+        )
         # --- Params ---
-        mlflow.log_params({
-            "cell_size_m": config.CLUSTERING_STRATEGY.get('params', {}).get('cell_size_m', None) if config.ENABLE_CLUSTERING else None,
-            "n_clusters": config.CLUSTERING_STRATEGY.get('params', {}).get('n_clusters', None) if config.ENABLE_CLUSTERING else None,
-        })
+        mlflow.log_params(
+            {
+                "cell_size_m": config.CLUSTERING_STRATEGY.get("params", {}).get("cell_size_m", None)
+                if config.ENABLE_CLUSTERING
+                else None,
+                "n_clusters": config.CLUSTERING_STRATEGY.get("params", {}).get("n_clusters", None)
+                if config.ENABLE_CLUSTERING
+                else None,
+            }
+        )
         if extra_params:
             mlflow.log_params(extra_params)
         mlflow.log_params(search.best_params_)
@@ -1188,57 +1198,55 @@ class ChildRunLogger:
         # registry under several names, each claiming to be about one target.
         logged_model_name = ArtifactLayout.logged_model_name(target, model_name)
         signature = infer_signature(X_test, test_predictions)
-        model_info = mlflow.sklearn.log_model(sk_model=best_model,  # type: ignore
-                                     signature=signature,
-                                     name=logged_model_name,
-                                     # Deliberately NOT registered here. The artifact is written
-                                     # now because the signature needs test_predictions, but the
-                                     # registry entry is created after the metrics exist - see
-                                     # _register_sklearn_model below.
-                                     registered_model_name=None,
-                                     input_example=X_test[:5],
-                                     skops_trusted_types=[
-                                         "numpy.dtype",
-                                         "xgboost.core.Booster",
-                                         "xgboost.sklearn.XGBRegressor",
-                                         # An uncertainty run logs the ENSEMBLE, not a bare
-                                         # pipeline, and skops refuses any type it was not told
-                                         # about - including ours. Without these two the model
-                                         # logging step raises and the whole run is lost, having
-                                         # already paid for n_members fits.
-                                         "yg_eo_soilnet.uncertainty.predictors.EnsembleRegressor",
-                                         # One entry per interval estimator the ensemble may carry.
-                                         # skops refuses any type it was not told about, so a method
-                                         # missing from this list fails the model logging step -
-                                         # after the run has already paid for every fit.
-                                         "yg_eo_soilnet.uncertainty.conformal.ConformalCalibrator",
-                                         "yg_eo_soilnet.uncertainty.intervals.GaussianInterval",
-                                         "yg_eo_soilnet.uncertainty.intervals.SigmaInterval",
-                                         # TabICL ships its own preprocessing estimators inside
-                                         # the fitted regressor; skops refuses to persist any of
-                                         # them unless they are named here.
-                                         "random.Random",
-                                         "tabicl._sklearn.preprocessing.CustomStandardScaler",
-                                         "tabicl._sklearn.preprocessing.EnsembleGenerator",
-                                         "tabicl._sklearn.preprocessing.OutlierRemover",
-                                         "tabicl._sklearn.preprocessing.PreprocessingPipeline",
-                                         "tabicl._sklearn.preprocessing.TransformToNumerical",
-                                         "tabicl._sklearn.preprocessing.UniqueFeatureFilter",
-                                         "tabicl._sklearn.regressor.TabICLRegressor",
-                                         ])
+        model_info = mlflow.sklearn.log_model(
+            sk_model=best_model,  # type: ignore
+            signature=signature,
+            name=logged_model_name,
+            # Deliberately NOT registered here. The artifact is written
+            # now because the signature needs test_predictions, but the
+            # registry entry is created after the metrics exist - see
+            # _register_sklearn_model below.
+            registered_model_name=None,
+            input_example=X_test[:5],
+            skops_trusted_types=[
+                "numpy.dtype",
+                "xgboost.core.Booster",
+                "xgboost.sklearn.XGBRegressor",
+                # An uncertainty run logs the ENSEMBLE, not a bare
+                # pipeline, and skops refuses any type it was not told
+                # about - including ours. Without these two the model
+                # logging step raises and the whole run is lost, having
+                # already paid for n_members fits.
+                "yg_eo_soilnet.uncertainty.predictors.EnsembleRegressor",
+                # One entry per interval estimator the ensemble may carry.
+                # skops refuses any type it was not told about, so a method
+                # missing from this list fails the model logging step -
+                # after the run has already paid for every fit.
+                "yg_eo_soilnet.uncertainty.conformal.ConformalCalibrator",
+                "yg_eo_soilnet.uncertainty.intervals.GaussianInterval",
+                "yg_eo_soilnet.uncertainty.intervals.SigmaInterval",
+                # TabICL ships its own preprocessing estimators inside
+                # the fitted regressor; skops refuses to persist any of
+                # them unless they are named here.
+                "random.Random",
+                "tabicl._sklearn.preprocessing.CustomStandardScaler",
+                "tabicl._sklearn.preprocessing.EnsembleGenerator",
+                "tabicl._sklearn.preprocessing.OutlierRemover",
+                "tabicl._sklearn.preprocessing.PreprocessingPipeline",
+                "tabicl._sklearn.preprocessing.TransformToNumerical",
+                "tabicl._sklearn.preprocessing.UniqueFeatureFilter",
+                "tabicl._sklearn.regressor.TabICLRegressor",
+            ],
+        )
         # --- CV results as artifact ---
         self._log_cv_results(cv_results, target, model_name, param_names)
 
         # --- Evaluation frame, in ORIGINAL target units ---
-        eval_df = self._build_sklearn_evaluation_frame(
-            test_predictions, X_test, y_test, target_names, model_name
-        )
+        eval_df = self._build_sklearn_evaluation_frame(test_predictions, X_test, y_test, target_names, model_name)
         if ensemble_prediction is not None:
             # The sigma and interval columns land beside the predictions the builder just wrote, so
             # eval_results.csv carries the estimate and its uncertainty in one row per point.
-            attach_uncertainty_columns(
-                eval_df, ensemble_prediction, target_names, ensemble.calibrators
-            )
+            attach_uncertainty_columns(eval_df, ensemble_prediction, target_names, ensemble.calibrators)
             mlflow.log_params(ensemble.describe())
 
         # --- Metrics ---
@@ -1252,9 +1260,7 @@ class ChildRunLogger:
         # artifact - so an OOM kill during it lost the metrics, the plots and the run summary that
         # were all already computable. It now runs last, after everything durable is written. See
         # the block below _log_per_target_runs.
-        model_metrics.update(
-            self._per_target_metrics(eval_df, target, model_name, alpha=_uncertainty_alpha(config))
-        )
+        model_metrics.update(self._per_target_metrics(eval_df, target, model_name, alpha=_uncertainty_alpha(config)))
         self._log_metric_dict(model_metrics)
 
         self._log_table_artifact(
@@ -1271,7 +1277,10 @@ class ChildRunLogger:
         registered_version = self._register_sklearn_model(config, model_info, logged_model_name)
 
         champion = self._promote_champion(
-            target, model_name, model_metrics, registered_version,
+            target,
+            model_name,
+            model_metrics,
+            registered_version,
         )
 
         # Predictions for EVERY point, not just the holdout. Written on the model run because that
@@ -1315,9 +1324,7 @@ class ChildRunLogger:
         def log_one(frame, target_name):
             """Everything that is about ONE target, in whichever run holds that target."""
             metrics = regression_metrics(frame[target_name], frame["prediction"])
-            metrics.update(
-                self._uncertainty_metrics(frame, target_name, alpha=_uncertainty_alpha(config))
-            )
+            metrics.update(self._uncertainty_metrics(frame, target_name, alpha=_uncertainty_alpha(config)))
             if target_name == target:
                 # Single-target run: the CV and train-fit numbers belong here too, since there is
                 # no separate model run holding them.
@@ -1348,9 +1355,7 @@ class ChildRunLogger:
                     target=target_name,
                     model_name=model_name,
                     artifact_path=ArtifactLayout.plots_path(),
-                    interval_label=describe_interval(
-                        ensemble.calibrators.get(target_name) if ensemble else None
-                    ),
+                    interval_label=describe_interval(ensemble.calibrators.get(target_name) if ensemble else None),
                 )
 
                 # --- Test Plots ---
@@ -1405,7 +1410,7 @@ class ChildRunLogger:
             )
             return explain_summary
 
-        target_runs = self._log_per_target_runs(eval_df, target, model_name, log_one)
+        target_runs = self._log_per_target_runs(eval_df, target, model_name, log_one, "sklearn")
         self._record_model_run_explain(shap_summary, results=shap_results, target_runs=target_runs)
 
         # --- The train-fit diagnostic, LAST ---
@@ -1470,10 +1475,12 @@ class ChildRunLogger:
             try:
                 # Truncated for the same reason _tag_model_logging truncates: MLflow rejects very
                 # long tag values. Tagging is a diagnostic and must not take the run down with it.
-                mlflow.set_tags({
-                    "model_registered": "false",
-                    "model_registration_error": error[:450],
-                })
+                mlflow.set_tags(
+                    {
+                        "model_registered": "false",
+                        "model_registration_error": error[:450],
+                    }
+                )
             except Exception:
                 pass
             if bool(getattr(config, "FAIL_ON_MODEL_ERROR", False)):
@@ -1481,7 +1488,10 @@ class ChildRunLogger:
             logging.getLogger(__name__).warning(
                 "Registration FAILED for %s: the model is logged and servable at %s, but is NOT "
                 "in the registry, so models:/%s/<version> will not resolve to it. %s",
-                logged_model_name, model_uri, logged_model_name, error,
+                logged_model_name,
+                model_uri,
+                logged_model_name,
+                error,
             )
             return None
         try:
@@ -1596,13 +1606,15 @@ class ChildRunLogger:
         run_target = self._resolve_run_target_label(evaluation_df, target)
         run_name = f"{run_target}_{model_name}"
 
-        mlflow.set_tags({
-            "mlflow.runName": run_name,
-            "target": run_target,
-            "model_name": model_name,
-            "framework": "lightning",
-            **run_owner_tags(),
-        })
+        mlflow.set_tags(
+            {
+                "mlflow.runName": run_name,
+                "target": run_target,
+                "model_name": model_name,
+                "framework": "lightning",
+                **run_owner_tags(),
+            }
+        )
 
         params = {
             "LIGHTNING_BATCH_SIZE": getattr(config, "LIGHTNING_BATCH_SIZE", None),
@@ -1653,9 +1665,7 @@ class ChildRunLogger:
         model_metrics.update(validation_metrics or {})
         model_metrics.update(test_metrics or {})
         model_metrics.update(
-            self._per_target_metrics(
-                evaluation_df, target, model_name, alpha=_uncertainty_alpha(config)
-            )
+            self._per_target_metrics(evaluation_df, target, model_name, alpha=_uncertainty_alpha(config))
         )
         self._log_metric_dict(model_metrics)
 
@@ -1732,9 +1742,7 @@ class ChildRunLogger:
         # because GradientExplainer is stochastic. _resolve_target_names is the same function the
         # fan-out uses to decide which children exist, so the ordering here matches theirs.
         group_target_names = (
-            self._resolve_target_names(evaluation_df, run_target)
-            if evaluation_df is not None
-            else [run_target]
+            self._resolve_target_names(evaluation_df, run_target) if evaluation_df is not None else [run_target]
         )
         shap_results, shap_summary = self._build_shap_results(
             config,
@@ -1750,11 +1758,7 @@ class ChildRunLogger:
             metrics = dict(model_metrics) if is_model_run else {}
             if frame is not None and target_name in frame.columns and "prediction" in frame.columns:
                 metrics.update(regression_metrics(frame[target_name], frame["prediction"]))
-                metrics.update(
-                    self._uncertainty_metrics(
-                        frame, target_name, alpha=_uncertainty_alpha(config)
-                    )
-                )
+                metrics.update(self._uncertainty_metrics(frame, target_name, alpha=_uncertainty_alpha(config)))
 
             if not is_model_run:
                 self._log_metric_dict(metrics)
@@ -1824,7 +1828,7 @@ class ChildRunLogger:
             )
             return explain_summary
 
-        target_runs = self._log_per_target_runs(evaluation_df, run_target, model_name, log_one)
+        target_runs = self._log_per_target_runs(evaluation_df, run_target, model_name, log_one, "lightning")
         self._record_model_run_explain(shap_summary, results=shap_results, target_runs=target_runs)
 
 
@@ -1848,7 +1852,7 @@ class ParentRunLogger:
         """The individual targets in a results table; see :class:`ChildRunLogger`."""
         return ChildRunLogger._resolve_target_names(evaluation_df, fallback_target)
 
-    def _collect_leaderboard(self,parent_run_id: str):
+    def _collect_leaderboard(self, parent_run_id: str):
         """Build the :term:`leaderboard`: one row per model per target, ranked by test score.
 
         Reads the scores every sub-run recorded. A model predicting several targets keeps its
@@ -1874,16 +1878,20 @@ class ParentRunLogger:
         # level deeper than they used to. Searching only direct children left a joint run out of
         # the leaderboard entirely: its model run carried no target tag and its per-target runs
         # were grandchildren.
-        leaf_runs = []
+        leaf_runs: list[Any] = []
         for child in children_of(parent_run_id):
             grandchildren = _scoring_runs(children_of(child.info.run_id))
             # The model run's own metrics are means over its children, so listing it beside them
             # would put the same model on the board twice, once under a label ("a__b") that names
             # no measurable target.
-            leaf_runs.extend(grandchildren or [child])
+            #
+            # The model run is carried alongside as the fallback for anything its per-target runs
+            # do not carry themselves - the framework, for runs recorded before those sub-runs were
+            # tagged with it.
+            leaf_runs.extend((leaf, child) for leaf in (grandchildren or [child]))
 
         rows = []
-        for run in leaf_runs:
+        for run, model_run in leaf_runs:
             run_data = run.data
             target = run_data.tags.get("target")
             model_name = run_data.tags.get("model_name")
@@ -1894,7 +1902,7 @@ class ParentRunLogger:
                 "run_id": run.info.run_id,
                 "target": target,
                 "model": model_name,
-                "framework": run_data.tags.get("framework", "sklearn"),
+                "framework": run_data.tags.get("framework") or model_run.data.tags.get("framework") or "unknown",
             }
             # Collect all logged metrics (rmse_test, r2_test, mae_test, ...)
             row.update(run_data.metrics)
@@ -1924,9 +1932,9 @@ class ParentRunLogger:
             row["r2_test"] = row["r2_score"]
         return row
 
-    def _collect_eval_dfs(self,parent_run_id: str):
+    def _collect_eval_dfs(self, parent_run_id: str):
         """Read every model's table of test-point results, for the combined figures."""
-        client = mlflow.tracking.MlflowClient() # type: ignore
+        client = mlflow.tracking.MlflowClient()  # type: ignore
         parent_run = client.get_run(parent_run_id)
         exp_id = parent_run.info.experiment_id
 
@@ -1940,7 +1948,7 @@ class ParentRunLogger:
         # Same reason as _collect_leaderboard: a joint run keeps its per-target evaluation frames
         # one level deeper, in the child runs, and its model run holds the joint frame those were
         # split from.
-        child_runs = []
+        child_runs: list[Any] = []
         for child in children_of(parent_run_id):
             grandchildren = _scoring_runs(children_of(child.info.run_id))
             child_runs.extend(grandchildren or [child])
@@ -1958,7 +1966,7 @@ class ParentRunLogger:
                 local_path = None
                 for artifact_path in _eval_results_artifact_paths(target, model_name):
                     try:
-                        local_path = mlflow.artifacts.download_artifacts( # type: ignore
+                        local_path = mlflow.artifacts.download_artifacts(  # type: ignore
                             run_id=run_id,
                             artifact_path=artifact_path,
                         )
@@ -1980,12 +1988,8 @@ class ParentRunLogger:
                 # picked `prediction_std` and assigned it to `prediction` - so the parent's
                 # pred_error_plot.png plotted standard deviations on the predicted axis. Same bug,
                 # and same fix, as in _iter_target_eval_frames.
-                prediction_columns = [
-                    column for column in df.columns if is_prediction_column(column)
-                ]
-                if "prediction" in df.columns and not any(
-                    column != "prediction" for column in prediction_columns
-                ):
+                prediction_columns = [column for column in df.columns if is_prediction_column(column)]
+                if "prediction" in df.columns and not any(column != "prediction" for column in prediction_columns):
                     df["target_name"] = target_names[0] if target_names else target
                     df["model_name"] = model_name
                     eval_dfs.append(df)
@@ -2005,7 +2009,6 @@ class ParentRunLogger:
                 print(f"⚠️ Optional eval CSV missing for {target}-{model_name}; continuing without it: {e}")
 
         return eval_dfs
-
 
     def _collect_point_predictions(self, parent_run_id: str, id_column: str):
         """Read each model's per-point predictions, for the combined export.
@@ -2028,9 +2031,7 @@ class ParentRunLogger:
             try:
                 local_path = mlflow.artifacts.download_artifacts(  # type: ignore
                     run_id=run.info.run_id,
-                    artifact_path=(
-                        f"{ArtifactLayout.PREDICTIONS}/{ArtifactLayout.POINT_PREDICTIONS_FILE}"
-                    ),
+                    artifact_path=(f"{ArtifactLayout.PREDICTIONS}/{ArtifactLayout.POINT_PREDICTIONS_FILE}"),
                 )
             except Exception:
                 # A child that did not export - skipped by name, a graph entry, or a failure it
@@ -2081,42 +2082,53 @@ class ParentRunLogger:
         trainer : ModelTrainer
             The scikit-learn trainer, read for the run's configuration.
         """
-        mlflow.set_tags({
-            "DATA_FILE": trainer.config.DATA_FILE,
-            "STATIC_FEATURES_FILE": getattr(trainer.config, "STATIC_FEATURES_FILE", trainer.config.DATA_FILE),
-            "TARGETS_FILE": getattr(trainer.config, "TARGETS_FILE", trainer.config.DATA_FILE),
-            "ENABLE_CLUSTERING": trainer.config.ENABLE_CLUSTERING,
-            "CLUSTERING_STRATEGY": trainer.config.CLUSTERING_STRATEGY if trainer.config.ENABLE_CLUSTERING else None,
-            # The INNER cross-validation strategy. SPLIT_HOLDOUT_STRATEGY below is the holdout.
-            "SPLIT_STRATEGY": trainer.config.SPLIT_STRATEGY,
-            "SPLIT_HOLDOUT_STRATEGY": getattr(trainer.config, "SPLIT_HOLDOUT_STRATEGY", None),
-            "SPLIT_POPULATION_POLICY": getattr(trainer.config, "SPLIT_POPULATION_POLICY", None),
-        })
+        mlflow.set_tags(
+            {
+                "DATA_FILE": trainer.config.DATA_FILE,
+                "STATIC_FEATURES_FILE": getattr(trainer.config, "STATIC_FEATURES_FILE", trainer.config.DATA_FILE),
+                "TARGETS_FILE": getattr(trainer.config, "TARGETS_FILE", trainer.config.DATA_FILE),
+                "ENABLE_CLUSTERING": trainer.config.ENABLE_CLUSTERING,
+                "CLUSTERING_STRATEGY": trainer.config.CLUSTERING_STRATEGY if trainer.config.ENABLE_CLUSTERING else None,
+                # The INNER cross-validation strategy. SPLIT_HOLDOUT_STRATEGY below is the holdout.
+                "SPLIT_STRATEGY": trainer.config.SPLIT_STRATEGY,
+                "SPLIT_HOLDOUT_STRATEGY": getattr(trainer.config, "SPLIT_HOLDOUT_STRATEGY", None),
+                "SPLIT_POPULATION_POLICY": getattr(trainer.config, "SPLIT_POPULATION_POLICY", None),
+            }
+        )
         # log_params_once, not log_params: these land at the END of a run, so an immutable-param
         # clash here destroys the summary of work that has already fully succeeded.
-        log_params_once({
-            "DATA_FOLDER": trainer.config.DATA_FOLDER,
-            "DATA_FILE": trainer.config.DATA_FILE,
-            "STATIC_FEATURES_FILE": getattr(trainer.config, "STATIC_FEATURES_FILE", trainer.config.DATA_FILE),
-            "TARGETS_FILE": getattr(trainer.config, "TARGETS_FILE", trainer.config.DATA_FILE),
-            "RANDOM_SEED": trainer.config.RANDOM_SEED,
-            # TARGET_COLUMNS is deliberately NOT logged here. SoilModelTraining._log_target_plan
-            # writes it at the START of training, beside the resolved target groups, so a run that
-            # is killed partway still records what it set out to fit. Writing it again here - in a
-            # different format - is what made a finished run fail on MLflow's immutable params.
-            "COLUMNS_TO_TRANSFORM": [column for column in trainer.config.COLUMNS_TO_TRANSFORM
-                                     if column in trainer.config.TARGET_COLUMNS],
-            "CLUSTERING_STRATEGY": trainer.config.CLUSTERING_STRATEGY.get('class_path').rsplit('.', 1)[1] if trainer.config.ENABLE_CLUSTERING else None,
-            "cell_size_m": trainer.config.CLUSTERING_STRATEGY.get('params', {}).get('cell_size_m', None) if trainer.config.ENABLE_CLUSTERING else None,
-            "n_clusters": trainer.config.CLUSTERING_STRATEGY.get('params', {}).get('n_clusters', None) if trainer.config.ENABLE_CLUSTERING else None,
-            # The shared holdout. TEST_SIZE was previously logged nowhere at all, so a finished run
-            # did not record how much data it held out, let alone which points.
-            "SPLIT_HOLDOUT_STRATEGY": getattr(trainer.config, "SPLIT_HOLDOUT_STRATEGY", None),
-            "SPLIT_TEST_SIZE": getattr(trainer.config, "SPLIT_TEST_SIZE", None),
-            "SPLIT_VAL_SIZE": getattr(trainer.config, "SPLIT_VAL_SIZE", None),
-            "SPLIT_SEED": getattr(trainer.config, "SPLIT_SEED", None),
-            "SPLIT_POPULATION_POLICY": getattr(trainer.config, "SPLIT_POPULATION_POLICY", None),
-        })
+        log_params_once(
+            {
+                "DATA_FOLDER": trainer.config.DATA_FOLDER,
+                "DATA_FILE": trainer.config.DATA_FILE,
+                "STATIC_FEATURES_FILE": getattr(trainer.config, "STATIC_FEATURES_FILE", trainer.config.DATA_FILE),
+                "TARGETS_FILE": getattr(trainer.config, "TARGETS_FILE", trainer.config.DATA_FILE),
+                "RANDOM_SEED": trainer.config.RANDOM_SEED,
+                # TARGET_COLUMNS is deliberately NOT logged here. SoilModelTraining._log_target_plan
+                # writes it at the START of training, beside the resolved target groups, so a run that
+                # is killed partway still records what it set out to fit. Writing it again here - in a
+                # different format - is what made a finished run fail on MLflow's immutable params.
+                "COLUMNS_TO_TRANSFORM": [
+                    column for column in trainer.config.COLUMNS_TO_TRANSFORM if column in trainer.config.TARGET_COLUMNS
+                ],
+                "CLUSTERING_STRATEGY": trainer.config.CLUSTERING_STRATEGY.get("class_path").rsplit(".", 1)[1]
+                if trainer.config.ENABLE_CLUSTERING
+                else None,
+                "cell_size_m": trainer.config.CLUSTERING_STRATEGY.get("params", {}).get("cell_size_m", None)
+                if trainer.config.ENABLE_CLUSTERING
+                else None,
+                "n_clusters": trainer.config.CLUSTERING_STRATEGY.get("params", {}).get("n_clusters", None)
+                if trainer.config.ENABLE_CLUSTERING
+                else None,
+                # The shared holdout. TEST_SIZE was previously logged nowhere at all, so a finished run
+                # did not record how much data it held out, let alone which points.
+                "SPLIT_HOLDOUT_STRATEGY": getattr(trainer.config, "SPLIT_HOLDOUT_STRATEGY", None),
+                "SPLIT_TEST_SIZE": getattr(trainer.config, "SPLIT_TEST_SIZE", None),
+                "SPLIT_VAL_SIZE": getattr(trainer.config, "SPLIT_VAL_SIZE", None),
+                "SPLIT_SEED": getattr(trainer.config, "SPLIT_SEED", None),
+                "SPLIT_POPULATION_POLICY": getattr(trainer.config, "SPLIT_POPULATION_POLICY", None),
+            }
+        )
 
         self.log_parent_figures(parent_run_id)
         self._log_point_prediction_export(parent_run_id, trainer.config)

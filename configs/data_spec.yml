@@ -148,9 +148,16 @@ ELIMINATED_FEATURES: *ignored_columns
 # Columns that hold categories/labels rather than numbers (e.g. a soil-texture class). These are
 # handled differently from numeric features: models that support them learn a separate
 # representation for each category (an "embedding") instead of treating the values as numbers.
-CATEGORICAL_FEATURES:
-  - texture_20cm
-  - landform_class
+#
+# A column listed here must NOT also be in LABEL_COLUMNS above - a lab column is removed from the
+# feature set before the category handling ever sees it, so listing it in both places would mean no
+# model receives it. The run now stops and says so rather than dropping it silently.
+#
+# texture_20cm and landform_class were listed here until 2026-09-23. Both stay in LABEL_COLUMNS:
+# like the *_median_0_30cm layers beside them they come from an existing soil map, and keeping them
+# out of the ordinary feature set is deliberate - the models are meant to learn from the EO data
+# rather than echo that map. Move one out of LABEL_COLUMNS if you want it as a real input.
+CATEGORICAL_FEATURES: []
 
 existing_hs_features:
   # Off by default, and not commonly needed. Lets you tell the pipeline to ignore a set of

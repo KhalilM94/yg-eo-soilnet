@@ -117,7 +117,7 @@ class StudyProgress:
         Where the score shown beside the bar comes from.
     mode : {"auto", "bar", "plain", "none"}
         How to display progress.
-        """
+    """
 
     def __init__(
         self,

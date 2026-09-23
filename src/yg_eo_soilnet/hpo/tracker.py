@@ -42,6 +42,7 @@ def best_trial_number_or_none(study: optuna.Study) -> int | None:
 @dataclass
 class TrialRecord:
     """One trial's outcome: its number, its score, its state and its settings."""
+
     number: int
     value: float | None
     state: str
@@ -54,7 +55,7 @@ class TrialRecord:
         """Whether the trial finished, rather than being abandoned partway.
 
         Not simply "has a score": an abandoned trial carries its last score too.
-                """
+        """
         return self.state == COMPLETE
 
     @classmethod
@@ -162,7 +163,7 @@ class ObjectiveTracker:
 
         The settings are left out: a dozen of them would make the table unreadable in a terminal, and the
         winning set is printed separately.
-                """
+        """
         completed = [record for record in self.records if record.is_complete and record.value is not None]
         if not completed:
             return pd.DataFrame(columns=["trial", self.objective.metric, "best_epoch", "epochs_run", "duration_s"])

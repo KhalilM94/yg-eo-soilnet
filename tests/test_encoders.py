@@ -99,7 +99,13 @@ def test_the_default_layout_norms_and_drops_only_the_first_blocks() -> None:
     head = build_mlp_stack(10, [64, 32], 1, dropout=0.1)
 
     assert [type(module) for module in head] == [
-        nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout, nn.Linear, nn.ReLU, nn.Linear
+        nn.Linear,
+        nn.LayerNorm,
+        nn.ReLU,
+        nn.Dropout,
+        nn.Linear,
+        nn.ReLU,
+        nn.Linear,
     ]
 
 
@@ -124,21 +130,23 @@ def test_an_empty_stack_with_no_output_dim_is_an_identity() -> None:
 
 
 def test_dropout_final_makes_every_block_a_full_block() -> None:
-    modules = list(
-        build_mlp_stack(16, [64, 32], None, dropout=0.1, norm_final=True, dropout_final=True)
-    )
+    modules = list(build_mlp_stack(16, [64, 32], None, dropout=0.1, norm_final=True, dropout_final=True))
 
     assert [type(m) for m in modules] == [
-        nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout,
-        nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout,
+        nn.Linear,
+        nn.LayerNorm,
+        nn.ReLU,
+        nn.Dropout,
+        nn.Linear,
+        nn.LayerNorm,
+        nn.ReLU,
+        nn.Dropout,
     ]
 
 
 def test_the_static_encoder_layout_is_reproduced() -> None:
     """What TabularStaticEncoder used to hand-build, projection included."""
-    modules = list(
-        build_mlp_stack(16, [64], 32, dropout=0.1, norm_final=True, dropout_final=True)
-    )
+    modules = list(build_mlp_stack(16, [64], 32, dropout=0.1, norm_final=True, dropout_final=True))
 
     assert [type(m) for m in modules] == [nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout, nn.Linear]
 
@@ -393,8 +401,10 @@ def test_a_repeated_width_reproduces_the_old_num_blocks_stack(encoder_cls) -> No
 
     # Two conv stages per block, and the first of each block reads the previous block's width.
     assert [(c.in_channels, c.out_channels) for c in convs] == [
-        (7, 64), (64, 64),      # block 1: raw channels in, then the dilated/inter-annual pass
-        (64, 64), (64, 64),     # block 2
+        (7, 64),
+        (64, 64),  # block 1: raw channels in, then the dilated/inter-annual pass
+        (64, 64),
+        (64, 64),  # block 2
     ]
     assert encoder.projection.in_features == 64
 
@@ -406,9 +416,12 @@ def test_the_conv_stack_can_widen_across_blocks(encoder_cls) -> None:
     convs = [m for m in encoder.blocks.modules() if isinstance(m, (torch.nn.Conv1d, torch.nn.Conv2d))]
 
     assert [(c.in_channels, c.out_channels) for c in convs] == [
-        (7, 32), (32, 32),
-        (32, 64), (64, 64),
-        (64, 128), (128, 128),
+        (7, 32),
+        (32, 32),
+        (32, 64),
+        (64, 64),
+        (64, 128),
+        (128, 128),
     ]
     assert encoder.projection.in_features == 128
 

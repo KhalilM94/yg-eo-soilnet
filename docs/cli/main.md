@@ -67,5 +67,8 @@ your targets file. Names are case-sensitive.
 honestly. Drop it (`IGNORED_COLUMNS`), exempt it (`common.data_quality.allow_sparse_columns`), or
 raise the limit deliberately.
 
-**It tries to use a graphics card you do not have** - set `accelerator: cpu` in
-`configs/lightning/config.yml`, and `device: cpu` for TabICL in the scikit-learn model list.
+**It tries to use a graphics card you do not have** - the shipped model lists detect one
+rather than assume it, so this means something names a card explicitly. Look for
+`accelerator:` in `configs/lightning/models/defaults.yml` or the model's own file, and
+`device:` for TabICL in the scikit-learn model list; `auto` and unset respectively let each
+one choose.

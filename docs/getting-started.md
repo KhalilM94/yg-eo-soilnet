@@ -73,6 +73,9 @@ common:
 
 A relative `root` is taken from the folder you run the command in.
 
+`root`, `static` and `POINT_ID_COLUMN` are required, as is `temporal.time_column` when you have a
+time series: they name your data, so the run stops and says which is missing rather than guessing.
+
 ## 4. Say what your columns are
 
 In `configs/data_spec.yml`:
@@ -103,9 +106,10 @@ IGNORED_COLUMNS:
   - lon
 ```
 
-:::{warning}
-A column in both `LABEL_COLUMNS` and `CATEGORICAL_FEATURES` is used by no model at all - see
-[Known issues](known-issues.md). Pick one.
+:::{note}
+A column cannot be in both `LABEL_COLUMNS` and `CATEGORICAL_FEATURES`: a lab column is removed from
+the inputs before the category handling sees it, so no model would receive it. The run stops and
+names the column, rather than dropping it quietly.
 :::
 
 Everything not set aside and not too empty becomes a model input. You do not list the inputs.
@@ -138,8 +142,8 @@ Run it both ways: the gap between the two is how much of your score was proximit
 `enabled: true` on one or two - `Ridge` is a good first choice, `XGBoost` a good second - and
 `configs/lightning/models/soil_cnn.yml` for the deep-learning model.
 
-On a machine without an NVIDIA card, also set `accelerator: cpu` in
-`configs/lightning/models/defaults.yml`, and `device: "cpu"` for TabICL.
+Nothing to change for the processor: both model lists detect a graphics card and fall back to
+the CPU when there is none.
 
 ## 7. Run it
 

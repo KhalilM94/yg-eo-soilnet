@@ -4,6 +4,7 @@ Used by the :term:`spatial split`: points near each other are much alike, so hol
 points would leave near-copies of them in the training set and flatter every score. ``split.group``
 chooses the strategy.
 """
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import pandas as pd
@@ -26,11 +27,12 @@ import os
 import mlflow
 import numpy as np
 
+
 class BaseSpatialClusterStrategy(ABC):
     """What a grouping strategy has to provide.
 
     Name a subclass in ``split.group.class_path`` to use it.
-        """
+    """
 
     @abstractmethod
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -44,7 +46,7 @@ class BaseSpatialClusterStrategy(ABC):
         Returns
         -------
         pandas.DataFrame
-                """
+        """
         pass
 
     def plot_train_test(
@@ -63,11 +65,9 @@ class BaseSpatialClusterStrategy(ABC):
 
         The one plotter here that saves itself, because it is drawn while the split is being made rather
         than by a logger.
-                """
+        """
         with style_context():
-            fig, ax = plt.subplots(
-                figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
-            )
+            fig, ax = plt.subplots(figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained")
 
             # Train is context and test is the focus, so train takes the grey and test the colour -
             # the eye should land on the held-out points, which are the ones the picture is about.
@@ -107,8 +107,15 @@ class BaseSpatialClusterStrategy(ABC):
                 spine.set_color(INK_2)
                 spine.set_linewidth(0.8)
             ax.tick_params(
-                which="both", direction="out", length=3, color=INK_2, labelsize=8,
-                top=True, right=True, labeltop=False, labelright=False,
+                which="both",
+                direction="out",
+                length=3,
+                color=INK_2,
+                labelsize=8,
+                top=True,
+                right=True,
+                labeltop=False,
+                labelright=False,
             )
             ax.set_aspect("equal")
 
@@ -116,8 +123,12 @@ class BaseSpatialClusterStrategy(ABC):
             ax.set_ylabel("Latitude")
             panel_subtitle(ax, title)
             ax.legend(
-                loc="upper left", frameon=True, framealpha=0.9, edgecolor=BASELINE,
-                fontsize=7.5, handletextpad=0.4,
+                loc="upper left",
+                frameon=True,
+                framealpha=0.9,
+                edgecolor=BASELINE,
+                fontsize=7.5,
+                handletextpad=0.4,
             )
 
             # save to temp file and log to MLflow
@@ -131,6 +142,7 @@ class BaseSpatialClusterStrategy(ABC):
 
             plt.close(fig)
 
+
 @dataclass
 class KMeansClusterStrategy(BaseSpatialClusterStrategy):
     """Group the points into a set number of clusters by location.
@@ -143,10 +155,11 @@ class KMeansClusterStrategy(BaseSpatialClusterStrategy):
         The coordinate columns.
     random_state : int, default 42
         The random seed.
-        """
+    """
+
     n_clusters: int = 12
-    lat_col: str = 'lat'
-    lon_col: str = 'lon'
+    lat_col: str = "lat"
+    lon_col: str = "lon"
     random_state: int = 42
 
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -156,8 +169,9 @@ class KMeansClusterStrategy(BaseSpatialClusterStrategy):
         labels = kmeans.fit_predict(coords) + 1  # 1-indexed
 
         df = df.copy()
-        df.loc[coords.index, 'cluster'] = labels.astype(int)
-        return df.dropna(subset=['cluster'])
+        df.loc[coords.index, "cluster"] = labels.astype(int)
+        return df.dropna(subset=["cluster"])
+
 
 @dataclass
 class SpatialGridClusterStrategy(BaseSpatialClusterStrategy):
@@ -169,7 +183,7 @@ class SpatialGridClusterStrategy(BaseSpatialClusterStrategy):
         The width of a square, in metres.
     lat_col, lon_col : str
         The coordinate columns.
-        """
+    """
 
     cell_size_m: int
     lat_col: str = "lat"

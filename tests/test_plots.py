@@ -149,9 +149,7 @@ def test_the_error_bars_have_ends_you_can_actually_see():
 
     figure, axis = plt.subplots()
     y = np.array([1.0, 2.0, 3.0])
-    caplines, barlinecols = _draw_error_bars(
-        axis, np.arange(3.0), y, y - 1.0, y + 1.0, np.arange(3)
-    )
+    caplines, barlinecols = _draw_error_bars(axis, np.arange(3.0), y, y - 1.0, y + 1.0, np.arange(3))
     assert caplines, "no caps drawn, so the interval ends are invisible"
     expected = mcolors.to_rgba(ERROR_BAR_CAP_COLOR)[:3]
     for cap in caplines:
@@ -249,9 +247,7 @@ def test_the_parent_overlay_renders_with_and_without_intervals():
 def test_the_reliability_curve_returns_a_figure_the_caller_saves():
     frame = eval_frame(200)
 
-    figure = reliability_curve(
-        frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
-    )
+    figure = reliability_curve(frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct")
     assert figure is not None
     assert figure.axes[0].get_xlabel() == "Nominal coverage"
 
@@ -261,17 +257,13 @@ def test_the_reliability_curve_draws_into_a_supplied_axis_and_returns_none():
 
     frame = eval_frame(200)
     figure, axis = plt.subplots()
-    assert reliability_curve(
-        frame["target"], frame["prediction"], frame["prediction_std"], axis=axis
-    ) is None
+    assert reliability_curve(frame["target"], frame["prediction"], frame["prediction_std"], axis=axis) is None
 
 
 def test_sigma_vs_error_bins_by_equal_count_and_returns_a_figure():
     frame = eval_frame(200)
 
-    figure = sigma_vs_error(
-        frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct"
-    )
+    figure = sigma_vs_error(frame["target"], frame["prediction"], frame["prediction_std"], target_name="clay_pct")
     assert figure is not None
     assert figure.axes[0].get_xlabel().startswith("Predicted")
 
@@ -371,9 +363,7 @@ def test_a_frame_without_a_target_name_still_plots():
 
 
 def test_a_frame_with_no_numeric_column_is_skipped_rather_than_guessed_at():
-    frame = pd.DataFrame(
-        {"landform_class": ["a", "b"], "prediction": [1.0, 2.0], "model_name": "Ridge"}
-    )
+    frame = pd.DataFrame({"landform_class": ["a", "b"], "prediction": [1.0, 2.0], "model_name": "Ridge"})
     figure = create_parent_pred_obs([frame])
     assert figure is not None  # renders an empty panel rather than inventing an x axis
 
@@ -388,10 +378,6 @@ def test_numbers_stored_as_strings_still_plot():
 
 # --- the house style --------------------------------------------------------------------------
 # The shared style, and the one promise it has to keep: it does not leak.
-
-
-
-
 
 
 def test_the_style_is_a_context_not_a_global_mutation():

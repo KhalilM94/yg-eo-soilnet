@@ -34,7 +34,7 @@ def export_enabled_for(config: Any, model_name: str) -> bool:
 
     ``export_point_predictions.models`` names the models to do it for and ``exclude_models`` names ones
     to leave out; naming a model explicitly wins.
-        """
+    """
     if not bool(getattr(config, "EXPORT_POINT_PREDICTIONS", False)):
         return False
 
@@ -42,15 +42,13 @@ def export_enabled_for(config: Any, model_name: str) -> bool:
     if allowed:
         return str(model_name) in allowed
 
-    skipped = [
-        str(name) for name in (getattr(config, "EXPORT_POINT_PREDICTIONS_SKIP_MODELS", None) or [])
-    ]
+    skipped = [str(name) for name in (getattr(config, "EXPORT_POINT_PREDICTIONS_SKIP_MODELS", None) or [])]
     return str(model_name) not in skipped
 
 
 def point_id_column(config: Any) -> str:
     """What the id column is called in the exported files."""
-    return str(getattr(config, "POINT_ID_COLUMN", "point_id") or "point_id")
+    return str(config.POINT_ID_COLUMN)
 
 
 def point_prediction_frame(
@@ -62,7 +60,7 @@ def point_prediction_frame(
     """One model's contribution: the point ids, and one column per target it predicts.
 
     ``point_ids`` must line up with ``predictions`` row for row.
-        """
+    """
     values = np.asarray(predictions, dtype=float)
     if values.ndim == 1:
         values = values.reshape(-1, 1)
@@ -75,9 +73,7 @@ def point_prediction_frame(
             "predictions do - refusing rather than writing a plausible, wrong file."
         )
     if values.shape[1] != len(target_names):
-        raise ValueError(
-            f"{values.shape[1]} prediction columns against {len(target_names)} target names."
-        )
+        raise ValueError(f"{values.shape[1]} prediction columns against {len(target_names)} target names.")
 
     frame = pd.DataFrame({id_column: ids})
     for index, target_name in enumerate(target_names):
@@ -114,21 +110,18 @@ def to_wide(long_frame: pd.DataFrame, id_column: str = "point_id") -> pd.DataFra
     """One row per point, one column per target and model.
 
     Built from the long form rather than from the models again, so the two files cannot disagree.
-        """
+    """
     if long_frame.empty:
         return pd.DataFrame(columns=[id_column])
 
     frame = long_frame.copy()
     frame["_column"] = [
-        wide_column_name(target, model)
-        for target, model in zip(frame[TARGET_COLUMN], frame[MODEL_COLUMN])
+        wide_column_name(target, model) for target, model in zip(frame[TARGET_COLUMN], frame[MODEL_COLUMN])
     ]
     # `first` rather than the default mean: a duplicated (point, target, model) means the same model
     # reported twice for one point, which is a bug upstream, and silently averaging it away would
     # hide it. The count check below is what surfaces it.
-    wide = frame.pivot_table(
-        index=id_column, columns="_column", values=PREDICTION_COLUMN, aggfunc="first"
-    )
+    wide = frame.pivot_table(index=id_column, columns="_column", values=PREDICTION_COLUMN, aggfunc="first")
     wide.columns.name = None
     return wide.reset_index()
 
@@ -140,7 +133,7 @@ def wide_column_name(target: Any, model: Any) -> str:
     --------
     >>> wide_column_name("clay_pct", "soil_cnn")
     'clay_pct__soil_cnn'
-        """
+    """
     return f"{ArtifactLayout.safe(target)}{NAME_SEPARATOR}{ArtifactLayout.safe(model)}"
 
 
@@ -158,7 +151,7 @@ def duplicate_report(long_frame: pd.DataFrame, id_column: str = "point_id") -> O
 
     The wide form keeps only the first of a duplicate, so without this a model counted twice would
     quietly lose predictions.
-        """
+    """
     if long_frame.empty:
         return None
     keys = [id_column, TARGET_COLUMN, MODEL_COLUMN]

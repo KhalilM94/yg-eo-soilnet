@@ -53,7 +53,7 @@ def default_study_name(entry: str, space: SearchSpace) -> str:
     Returns
     -------
     str
-        """
+    """
     return f"{entry}-{space.fingerprint()}"
 
 
@@ -117,17 +117,24 @@ def reset_study(study_name: str, storage: str, logger: Any = None) -> None:
         logger.info(f"--reset: deleted study {study_name!r} from {storage}")
 
 
-def set_hpo_experiment(name: str = HPO_EXPERIMENT_NAME) -> None:
+def set_hpo_experiment(name: str = HPO_EXPERIMENT_NAME, config: Any = None) -> None:
     """Point MLflow at the tuning experiment, and close any run left open.
 
-    Called before the data is prepared, and even when the study itself is not being recorded, so
-    nothing lands in the training experiment by accident.
-        """
+    Called before the data is prepared, so nothing lands in the training experiment by accident.
+
+    Parameters
+    ----------
+    name : str
+        The experiment to record under.
+    config : Config, optional
+        Read for ``MLFLOW_TRACKING_URI``. Without it the default location wins and an explicitly
+        configured one is overridden - tuning would record somewhere other than training does.
+    """
     from yg_eo_soilnet.tracking import configure_tracking
 
     # Through configure_tracking so HPO records into the same tracking root as training, and so the
     # MLflow 3.14 file-store opt-in is applied here too rather than depending on the launcher.
-    configure_tracking(experiment_name=name)
+    configure_tracking(config, experiment_name=name)
     if mlflow.active_run():
         mlflow.end_run()
 
@@ -139,6 +146,7 @@ def _log_params(params: dict[str, Any]) -> None:
 
 def _mlflow_trial_callback() -> Callable[[optuna.Study, optuna.trial.FrozenTrial], None]:
     """Build the callback that records each trial's score on the study's run."""
+
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         """Record one finished trial's score."""
         if trial.value is not None:
@@ -186,6 +194,7 @@ def run_study(
     tracker: ObjectiveTracker | None = None,
     progress: Any = None,
     artifact_dir: str | Path | None = None,
+    config: Any = None,
 ) -> optuna.Study:
     """Run the study: draw, train and score trials until the budget is used up.
 
@@ -199,11 +208,13 @@ def run_study(
         How many trials to run in this session.
     callbacks : list, optional
         Extra things to call when a trial finishes, such as the progress display.
+    config : Config, optional
+        Read for where runs are recorded, so tuning writes where training does.
 
     Returns
     -------
     optuna.Study
-        """
+    """
     study = create_or_load_study(space, study_name, storage)
     # Read before optimize() adds any: n_trials is an increment on whatever is already stored, and
     # a resumed study's sparkline and counts include that history.
@@ -221,7 +232,7 @@ def run_study(
         # After the tracker's, so the bar's postfix reflects this trial.
         callbacks.append(progress.on_trial_end)
     if use_mlflow:
-        set_hpo_experiment()
+        set_hpo_experiment(config=config)
         callbacks.append(_mlflow_trial_callback())
 
     run_context = mlflow.start_run(run_name=study_name) if use_mlflow else nullcontext()
@@ -252,9 +263,7 @@ def run_study(
                     _log_params({f"best.{key}": value for key, value in study.best_trial.params.items()})
                     mlflow.log_metric(f"best_{space.objective.metric}", best_value)
             if artifact_dir is not None and tracker is not None:
-                write_study_artifacts(
-                    study, tracker, artifact_dir, log_to_mlflow=use_mlflow, logger=logger
-                )
+                write_study_artifacts(study, tracker, artifact_dir, log_to_mlflow=use_mlflow, logger=logger)
             if logger is not None:
                 logger.info(f"Study summary: {summary}")
     return study

@@ -20,6 +20,7 @@ eval_results.csv - usually ensemble copies and runs that failed early - are skip
 from __future__ import annotations
 
 import argparse
+import datetime
 import sys
 from typing import Any
 
@@ -38,9 +39,7 @@ from yg_eo_soilnet.tracking import configure_tracking_uri
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Read the command-line options; ``argv`` defaults to the real command line."""
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument(
         "--run-id",
@@ -62,16 +61,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--only",
         default=None,
-        help=(
-            "Only redraw these kinds of figure, comma-separated (default: all): "
-            + ", ".join(ALL_KINDS)
-        ),
+        help=("Only redraw these kinds of figure, comma-separated (default: all): " + ", ".join(ALL_KINDS)),
     )
     parser.add_argument(
         "--since",
         default=None,
-        help="With --experiment, skip runs that started before this date (YYYY-MM-DD). Note: this "
-        "option currently stops with an MLflow error; see docs/known-issues.md.",
+        help="With --experiment, skip runs that started before this date (YYYY-MM-DD), read in local time.",
     )
     parser.add_argument(
         "--dry-run",
@@ -88,10 +83,29 @@ def _kinds(only: str | None) -> list[str] | None:
     kinds = [kind.strip() for kind in only.split(",") if kind.strip()]
     unknown = [kind for kind in kinds if kind not in ALL_KINDS]
     if unknown:
-        raise SystemExit(
-            f"Unknown figure kind(s): {', '.join(unknown)}. Choose from: {', '.join(ALL_KINDS)}"
-        )
+        raise SystemExit(f"Unknown figure kind(s): {', '.join(unknown)}. Choose from: {', '.join(ALL_KINDS)}")
     return kinds
+
+
+def _since_filter(since: str | None) -> str:
+    """The MLflow filter for ``--since``, or an empty string when no date was given.
+
+    A run's start time is stored as milliseconds since the epoch, and MLflow refuses a quoted
+    string there, so the date is converted rather than passed through. Read in local time, which is
+    the clock a run's name is written in.
+
+    Raises
+    ------
+    SystemExit
+        If the date is not ``YYYY-MM-DD``, said here rather than as an MLflow parse error.
+    """
+    if not since:
+        return ""
+    try:
+        moment = datetime.datetime.strptime(since, "%Y-%m-%d")
+    except ValueError:
+        raise SystemExit(f"--since expects a date as YYYY-MM-DD, got {since!r}") from None
+    return f"attributes.start_time >= {int(moment.timestamp() * 1000)}"
 
 
 def _parent_runs(experiment: str, since: str | None) -> list:
@@ -100,11 +114,16 @@ def _parent_runs(experiment: str, since: str | None) -> list:
     A main run is one with no ``mlflow.parentRunId`` tag.
     """
     client = mlflow.tracking.MlflowClient()
-    found = client.get_experiment_by_name(experiment) or client.get_experiment(experiment)
+    try:
+        found = client.get_experiment_by_name(experiment) or client.get_experiment(experiment)
+    except Exception:
+        # get_experiment takes an id, so a name that is not an experiment raises rather than
+        # returning None. Either way the answer is the same: there is no such experiment.
+        found = None
     if found is None:
         raise SystemExit(f"No experiment named or numbered {experiment!r}")
 
-    filter_string = f"attributes.start_time >= '{since}'" if since else ""
+    filter_string = _since_filter(since)
     runs = client.search_runs(
         experiment_ids=[found.experiment_id],
         filter_string=filter_string,
@@ -154,9 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             outcomes.append(regenerate_child_figures(run, only=only, dry_run=args.dry_run))
         else:
             # A main run has no predictions of its own; its figures are the leaderboard pair.
-            outcomes.append(
-                regenerate_parent_figures(args.run_id, only=only, dry_run=args.dry_run)
-            )
+            outcomes.append(regenerate_parent_figures(args.run_id, only=only, dry_run=args.dry_run))
     elif args.parent_run_id:
         parent = client.get_run(args.parent_run_id)
         mlflow.set_experiment(experiment_id=parent.info.experiment_id)
@@ -168,9 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         for parent in parents:
             mlflow.set_experiment(experiment_id=parent.info.experiment_id)
             logger.info(f"Replotting {parent.info.run_name or parent.info.run_id}")
-            outcomes.extend(
-                regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run)
-            )
+            outcomes.extend(regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run))
 
     written = _report(outcomes, logger, args.dry_run)
     verb = "would be refreshed" if args.dry_run else "refreshed"

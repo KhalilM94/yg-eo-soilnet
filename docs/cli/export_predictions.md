@@ -30,7 +30,7 @@ The run id is on the run's page in MLflow, and in the `Run ID` column of the run
 |---|---|---|
 | `--parent-run-id` | **required** | The finished run to add the predictions to. |
 | `--config-path` | `configs/main_config.yml` | The main configuration file. It must point at the data the run trained on: the points are rebuilt from it, and predictions for different points would be meaningless. |
-| `--models` | every model the run trained | Only export these, comma-separated: `Ridge,soil_cnn`. |
+| `--models` | the configuration's `export_point_predictions.models`, or every model the run trained | Only export these, comma-separated: `Ridge,soil_cnn`. |
 | `--skip-models` | from the configuration | Models to leave out, comma-separated. |
 | `--allow-population-drift` | off | Carry on even when the rebuilt data holds different points from the run - points added since, say - instead of stopping. |
 | `--member-checkpoint-dir` | `lightning_logs` | Where to look for the checkpoints of a deep-learning {term}`ensemble`'s members that were not saved in MLflow. |

@@ -287,7 +287,7 @@ def test_lightning_trainer_fans_out_multitarget_child_runs(monkeypatch) -> None:
         datamodule=SimpleNamespace(
             y_test_frame_=pd.DataFrame({"target_a": [1.0, 2.0], "target_b": [3.0, 4.0]}),
             target_names=["target_a", "target_b"],
-                setup=lambda stage=None: None,
+            setup=lambda stage=None: None,
         ),
         trainer_kwargs={},
         callback_specs={},
@@ -317,7 +317,10 @@ def test_lightning_trainer_fans_out_multitarget_child_runs(monkeypatch) -> None:
     monkeypatch.setattr(trainer, "_resolve_best_checkpoint", MagicMock(return_value="/tmp/best.ckpt"))
     monkeypatch.setattr(trainer, "_build_evaluation_frame", MagicMock(return_value=evaluation_df))
     monkeypatch.setattr(trainer, "_serialize_params", MagicMock(return_value={"foo": "bar"}))
-    monkeypatch.setattr("yg_eo_soilnet.trainers.lightning_trainer.mlflow.start_run", lambda *args, **kwargs: nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run"))))
+    monkeypatch.setattr(
+        "yg_eo_soilnet.trainers.lightning_trainer.mlflow.start_run",
+        lambda *args, **kwargs: nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run"))),
+    )
 
     trainer.train(target="target_a__target_b", data={}, model_bundles={"toy_lightning": bundle})
 
@@ -361,6 +364,7 @@ def test_the_logger_splits_a_joint_frame_into_one_frame_per_target() -> None:
     assert first["target_a"].tolist() == [1.0, 2.0]
     assert first["prediction"].tolist() == [1.1, 1.9]
 
+
 # --- checkpoint round-trip -------------------------------------------------
 # A real fit -> checkpoint -> restore was untested, so a numpy value leaking into
 # hyper_parameters crashed every real run while the suite stayed green.
@@ -396,13 +400,21 @@ def _fit_and_checkpoint(tmp_path):
     # No modalities in the bundle, so the CNN runs its static branch alone - all a checkpoint round
     # trip needs, and small enough for one CPU epoch.
     model = SoilCNNLightningModule(
-        static_dim=datamodule.static_dim, target_dim=datamodule.target_dim,
-        static_hidden_dims=[8], head_hidden_dims=[8], **init_args,
+        static_dim=datamodule.static_dim,
+        target_dim=datamodule.target_dim,
+        static_hidden_dims=[8],
+        head_hidden_dims=[8],
+        **init_args,
     )
     checkpoint = ModelCheckpoint(dirpath=str(tmp_path), monitor="val_loss", save_top_k=1)
     Trainer(
-        max_epochs=1, accelerator="cpu", devices=1, logger=False, enable_progress_bar=False,
-        enable_model_summary=False, callbacks=[checkpoint],
+        max_epochs=1,
+        accelerator="cpu",
+        devices=1,
+        logger=False,
+        enable_progress_bar=False,
+        enable_model_summary=False,
+        callbacks=[checkpoint],
     ).fit(model, datamodule=datamodule)
     assert checkpoint.best_model_path, "no checkpoint was written"
     return checkpoint.best_model_path, datamodule

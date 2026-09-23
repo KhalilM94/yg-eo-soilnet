@@ -58,7 +58,7 @@ def _read_first(run_id: str, artifact_paths: Iterable[str]) -> Optional[pd.DataF
     """Read the first of several possible paths that exists.
 
     Runs recorded at different times keep their files in different places.
-        """
+    """
     for artifact_path in artifact_paths:
         local_path = _download(run_id, artifact_path)
         if local_path is None:
@@ -75,7 +75,7 @@ def _interval_estimator(run: Any, target: str) -> Any:
 
     Only the label needs it - "±1σ" against "conformal 95%" - but a figure that says the wrong thing
     about what its bars mean is worse than one with no label.
-        """
+    """
     params = dict(run.data.params)
     parent_id = run.data.tags.get("mlflow.parentRunId")
     if f"interval_method_{target}" not in params and parent_id:
@@ -110,7 +110,7 @@ def _calibrator_for(run_id: str, artifact_path: str) -> Optional[ConformalCalibr
 
     With it, the reliability figure grades the procedure the run actually used rather than a
     reconstruction of it.
-        """
+    """
     local_path = _download(run_id, f"{artifact_path}/{ArtifactLayout.UNCERTAINTY_SUMMARY_FILE}")
     if local_path is None:
         return None
@@ -142,7 +142,7 @@ def regenerate_child_figures(
     -------
     dict
         What was written, or why nothing was.
-        """
+    """
     run_id = run.info.run_id
     target = run.data.tags.get("target")
     model_name = run.data.tags.get("model_name")
@@ -171,9 +171,7 @@ def regenerate_child_figures(
 
     cv_results = None
     if _wanted(only, "cv"):
-        cv_results = _read_first(
-            run_id, candidate_artifact_paths(ArtifactLayout.CV, ArtifactLayout.CV_RESULTS_FILE)
-        )
+        cv_results = _read_first(run_id, candidate_artifact_paths(ArtifactLayout.CV, ArtifactLayout.CV_RESULTS_FILE))
 
     if evaluation_df is None and cv_results is None:
         outcome["skipped"] = "nothing to redraw for the requested kinds"
@@ -202,9 +200,7 @@ def regenerate_child_figures(
                 artifact_path=ArtifactLayout.plots_path(),
                 interval_label=describe_interval(_interval_estimator(run, target)),
             ):
-                outcome["written"].append(
-                    f"{ArtifactLayout.PLOTS}/{ArtifactLayout.PRED_OBS_FILE}"
-                )
+                outcome["written"].append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.PRED_OBS_FILE}")
 
             if _wanted(only, "uncertainty") and has_sigma:
                 written = logger._log_uncertainty_artifacts(
@@ -227,7 +223,7 @@ def _own_target_frame(
     """The results this run is responsible for, chosen by its own target tag.
 
     A run covers exactly one target, even when its model predicted several.
-        """
+    """
     if evaluation_df is None:
         return None
     frames = list(logger._iter_target_eval_frames(evaluation_df, target, model_name))
@@ -255,7 +251,7 @@ def _cv_plot_name(cv_results: pd.DataFrame) -> Optional[str]:
 
     The same choice the trainer makes: a line for one searched setting, a parallel-coordinates figure
     for several.
-        """
+    """
     param_columns = [column for column in cv_results.columns if str(column).startswith("param_")]
     if not param_columns:
         return None
@@ -267,9 +263,7 @@ def _log_cv_figures(logger: ChildRunLogger, cv_results: pd.DataFrame, target, mo
     name = _cv_plot_name(cv_results)
     if name is None:
         return []
-    logger._log_plots(
-        {f"yg_eo_soilnet.plot_utils.{name}": {"args": [cv_results]}}, target, model_name
-    )
+    logger._log_plots({f"yg_eo_soilnet.plot_utils.{name}": {"args": [cv_results]}}, target, model_name)
     return [f"{ArtifactLayout.PLOTS}/{name}.png"]
 
 
@@ -307,7 +301,7 @@ def scoring_descendants(parent_run_id: str) -> list:
 
     Walks the same two levels the leaderboard does, since a model predicting several targets keeps its
     results a level deeper.
-        """
+    """
     client = mlflow.tracking.MlflowClient()
     experiment_id = client.get_run(parent_run_id).info.experiment_id
 
@@ -318,7 +312,7 @@ def scoring_descendants(parent_run_id: str) -> list:
             filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
         )
 
-    runs = []
+    runs: list[Any] = []
     for child in children_of(parent_run_id):
         grandchildren = _scoring_runs(children_of(child.info.run_id))
         runs.extend(grandchildren or [child])
@@ -334,10 +328,7 @@ def regenerate_tree(
     """Redraw every figure under one main run: each model's, then the run's own.
 
     The run's own go last, because they are built from the models' tables.
-        """
-    outcomes = [
-        regenerate_child_figures(run, only=only, dry_run=dry_run)
-        for run in scoring_descendants(parent_run_id)
-    ]
+    """
+    outcomes = [regenerate_child_figures(run, only=only, dry_run=dry_run) for run in scoring_descendants(parent_run_id)]
     outcomes.append(regenerate_parent_figures(parent_run_id, only=only, dry_run=dry_run))
     return outcomes

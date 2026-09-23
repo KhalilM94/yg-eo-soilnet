@@ -65,10 +65,8 @@ def uncertainty_metrics(
     dict of str to float
         ``picp`` the share of measurements inside the interval, ``coverage_error`` how far that is from
         what was promised, ``mpiw`` the average width, and the rest.
-        """
-    observed, predicted, sigma_values, lower_values, upper_values = _finite_rows(
-        y_true, y_pred, sigma, lower, upper
-    )
+    """
+    observed, predicted, sigma_values, lower_values, upper_values = _finite_rows(y_true, y_pred, sigma, lower, upper)
 
     count = int(observed.shape[0])
     if count < 2:
@@ -95,9 +93,7 @@ def uncertainty_metrics(
         metrics[key("mpiw")] = float(np.mean(widths))
         if target_range > 1e-12:
             metrics[key("nmpiw")] = float(np.mean(widths) / target_range)
-        metrics[key("interval_score")] = _interval_score(
-            observed, lower_values, upper_values, alpha
-        )
+        metrics[key("interval_score")] = _interval_score(observed, lower_values, upper_values, alpha)
 
     # Distributional scores need a non-degenerate sigma; a deterministic ensemble has none and gets
     # the interval metrics only. Omitted individually rather than reported as inf, the same policy
@@ -121,7 +117,7 @@ def _interval_score(observed: np.ndarray, lower: np.ndarray, upper: np.ndarray, 
 
     The one number that ranks intervals fairly: coverage alone rewards a band spanning everything, and
     width alone rewards a band of nothing.
-        """
+    """
     widths = upper - lower
     below = np.maximum(lower - observed, 0.0)
     above = np.maximum(observed - upper, 0.0)
@@ -132,7 +128,7 @@ def _gaussian_crps(residuals: np.ndarray, sigma: np.ndarray) -> float:
     """How well the whole predicted distribution matches the single measured value.
 
     Unlike the likelihood score below, one badly missed point cannot dominate it.
-        """
+    """
     standardized = residuals / sigma
     return float(
         np.mean(
@@ -150,7 +146,7 @@ def _gaussian_nll(residuals: np.ndarray, sigma: np.ndarray) -> float:
     """How likely the measurements are under the predicted distribution; lower is better.
 
     It can legitimately be negative when the intervals are genuinely tight.
-        """
+    """
     return float(np.mean(0.5 * np.log(2.0 * np.pi * sigma**2) + (residuals**2) / (2.0 * sigma**2)))
 
 
@@ -160,7 +156,7 @@ def _ence(absolute_residuals: np.ndarray, sigma: np.ndarray) -> Optional[float]:
     Coverage is one number for the whole test set, and a model can hit it while being over-confident on
     its easy points and over-cautious on its hard ones, the two cancelling out. This compares them
     level by level instead.
-        """
+    """
     count = int(sigma.shape[0])
     if count < ENCE_BINS * 2:
         return None
@@ -184,7 +180,7 @@ def _sigma_error_correlation(absolute_residuals: np.ndarray, sigma: np.ndarray) 
     """Is the model actually less accurate where it says it is less certain?
 
     An interval can be perfectly calibrated on average and still rank its points the wrong way round.
-        """
+    """
     if np.ptp(sigma) <= 0.0 or np.ptp(absolute_residuals) <= 0.0:
         return None
     correlation = stats.spearmanr(sigma, absolute_residuals).statistic
@@ -237,6 +233,4 @@ def _finite_rows(
 
 def _to_float(values: Any) -> np.ndarray:
     """One value as a plain float, or NaN when it cannot be one."""
-    return pd.to_numeric(
-        pd.Series(np.asarray(values).reshape(-1)), errors="coerce"
-    ).to_numpy(dtype=float)
+    return pd.to_numeric(pd.Series(np.asarray(values).reshape(-1)), errors="coerce").to_numpy(dtype=float)

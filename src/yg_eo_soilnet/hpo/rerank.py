@@ -37,7 +37,8 @@ class RerankResult:
         The settings it ran with.
     headline : float
         What the study originally reported for it.
-        """
+    """
+
     trial_number: int
     original_value: float
     overrides: dict[str, Any]
@@ -60,7 +61,7 @@ class RerankResult:
 
         The first seed is deliberately the trial's own, so this doubles as a check that seeding really
         reaches the weights. False means a run is not reproducible from its seed.
-                """
+        """
         if not self.values:
             return None
         return abs(self.values[0] - self.original_value) <= REPRODUCTION_TOLERANCE
@@ -94,7 +95,7 @@ def rerank(
     Returns
     -------
     list of RerankResult
-        """
+    """
     candidates = top_trials(study, top_k)
     if not candidates:
         return []
@@ -112,9 +113,7 @@ def rerank(
                 logger.warning(f"Trial {trial.number} has no {OVERRIDES_ATTR!r} attribute; skipping.")
             continue
 
-        result = RerankResult(
-            trial_number=trial.number, original_value=float(trial.value), overrides=dict(overrides)
-        )
+        result = RerankResult(trial_number=trial.number, original_value=float(trial.value), overrides=dict(overrides))
         for index in range(max(1, int(seeds))):
             # Seed 0 is the trial's own, so it re-runs the original; the rest are fresh draws.
             seed = objective.seed + index

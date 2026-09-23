@@ -69,7 +69,7 @@ def to_builtin(value: Any) -> Any:
     """A plain-Python copy of a drawn value.
 
     A model's settings are saved in its :term:`checkpoint`, which can only hold plain values.
-        """
+    """
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
     if isinstance(value, (str, bytes)) or value is None:
@@ -94,19 +94,17 @@ def split_dotted(dotted: str) -> tuple[str, str]:
     --------
     >>> split_dotted("model.learning_rate")
     ('model', 'learning_rate')
-        """
+    """
     prefix, _, remainder = dotted.partition(".")
     if not remainder:
         raise ValueError(
-            f"Override key {dotted!r} needs a section prefix, e.g. 'model.learning_rate' or "
-            f"'datamodule.batch_size'."
+            f"Override key {dotted!r} needs a section prefix, e.g. 'model.learning_rate' or 'datamodule.batch_size'."
         )
     if prefix == "callbacks":
         group, _, key = remainder.partition(".")
         if not key or "." in key:
             raise ValueError(
-                f"Override key {dotted!r} must be 'callbacks.<group>.<key>', e.g. "
-                f"'callbacks.early_stopping.patience'."
+                f"Override key {dotted!r} must be 'callbacks.<group>.<key>', e.g. 'callbacks.early_stopping.patience'."
             )
         return prefix, remainder
     if prefix not in PREFIX_SECTIONS:
@@ -122,7 +120,7 @@ def validate_override_keys(dotted_keys: Iterable[str], *, searched: bool) -> Non
 
     Some settings would change what the trials are being compared on - the split, the targets - so a
     search that touched them would not be measuring what it claims.
-        """
+    """
     problems: list[str] = []
     for dotted in dotted_keys:
         prefix, key = split_dotted(dotted)

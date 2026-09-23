@@ -199,9 +199,7 @@ def test_every_other_model_is_still_explained(model_name: str) -> None:
     These get past the guard and fail later on the empty payload, which is what distinguishes
     "was not skipped" from "was skipped".
     """
-    summary = _skip_summary(
-        SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"]), model_name
-    )
+    summary = _skip_summary(SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"]), model_name)
 
     assert summary.get("skipped") is not True
     assert summary["enabled"] is True
@@ -214,9 +212,7 @@ def test_the_allowlist_overrides_the_denylist() -> None:
     the user asks for the expensive explanation and gets neither a plot nor a reason.
     """
     summary = _skip_summary(
-        SimpleNamespace(
-            EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"], EXPLAIN_MODELS=["TabICL"]
-        ),
+        SimpleNamespace(EXPLAIN_ENABLED=True, EXPLAIN_SKIP_MODELS=["TabICL"], EXPLAIN_MODELS=["TabICL"]),
         "TabICL",
     )
 
@@ -244,9 +240,7 @@ def test_the_shipped_default_excludes_tabicl_and_nothing_else(tmp_path) -> None:
     """No per-run configuration should be needed for the behaviour the user asked for."""
     import yaml
 
-    document = yaml.safe_load(
-        (pathlib.Path(__file__).resolve().parents[1] / "configs" / "main_config.yml").read_text()
-    )
+    document = yaml.safe_load((pathlib.Path(__file__).resolve().parents[1] / "configs" / "main_config.yml").read_text())
 
     assert document["common"]["EXPLAIN_SKIP_MODELS"] == ["TabICL"]
     assert document["common"]["EXPLAIN_MODELS"] == []
@@ -276,10 +270,21 @@ def _quiet_logger(monkeypatch):
     for name in ("set_tags", "log_params", "log_metric", "log_artifact", "log_metrics"):
         monkeypatch.setattr(loggers_module.mlflow, name, MagicMock())
     monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", MagicMock())
-    for name in ("_log_plots", "_write_json_artifact", "_log_table_artifact", "_write_split_summary",
-                 "_log_split_summary", "_promote_champion", "_log_cv_results", "_log_checkpoint",
-                 "_tag_model_logging", "_log_pred_obs_artifact", "_evaluate_sklearn_target",
-                 "_log_uncertainty_artifacts", "_log_train_fit_metric"):
+    for name in (
+        "_log_plots",
+        "_write_json_artifact",
+        "_log_table_artifact",
+        "_write_split_summary",
+        "_log_split_summary",
+        "_promote_champion",
+        "_log_cv_results",
+        "_log_checkpoint",
+        "_tag_model_logging",
+        "_log_pred_obs_artifact",
+        "_evaluate_sklearn_target",
+        "_log_uncertainty_artifacts",
+        "_log_train_fit_metric",
+    ):
         monkeypatch.setattr(logger, name, MagicMock())
     return logger
 
@@ -290,9 +295,7 @@ def _spy_on_explain(monkeypatch, target_names):
     Both are imported inside the method that calls them, so the import resolves the module attribute
     at call time and patching the module is enough - no shap install required.
     """
-    build = MagicMock(
-        return_value=[SimpleNamespace(target_name=name) for name in target_names]
-    )
+    build = MagicMock(return_value=[SimpleNamespace(target_name=name) for name in target_names])
     log = MagicMock(return_value={"targets": [], "artifacts": []})
     monkeypatch.setattr("yg_eo_soilnet.explain.build_shap_results", build)
     monkeypatch.setattr("yg_eo_soilnet.explain.log_shap_artifacts", log)
@@ -354,9 +357,7 @@ def test_a_single_target_lightning_fit_still_explains_once_into_its_own_run(monk
         config=SimpleNamespace(EXPLAIN_ENABLED=True),
         target="clay_pct",
         model_name="soil_cnn",
-        evaluation_df=pd.DataFrame(
-            {"clay_pct": [1.0, 2.0, 3.0, 4.0], "prediction": [1.1, 1.9, 3.2, 3.8]}
-        ),
+        evaluation_df=pd.DataFrame({"clay_pct": [1.0, 2.0, 3.0, 4.0], "prediction": [1.1, 1.9, 3.2, 3.8]}),
         validation_metrics={"val_loss": 0.25},
         test_metrics={"test_loss": 0.5},
         model=SimpleNamespace(),
@@ -475,15 +476,23 @@ def test_a_child_run_points_at_the_model_run_rather_than_repeating_the_reason() 
     skipped = {"enabled": True, "logged": False, "skipped": True, "reason": "TabICL is expensive"}
 
     child = logger._log_shap_slice(
-        None, skipped, target="ph_water", target_names=TARGETS,
-        config=SimpleNamespace(), is_model_run=False,
+        None,
+        skipped,
+        target="ph_water",
+        target_names=TARGETS,
+        config=SimpleNamespace(),
+        is_model_run=False,
     )
     assert child == {"enabled": True, "logged": False, "scope": "model_run"}
 
     # A group of one has no level to climb to, so it keeps the full reason inline as it always has.
     alone = logger._log_shap_slice(
-        None, skipped, target="clay_pct", target_names=["clay_pct"],
-        config=SimpleNamespace(), is_model_run=True,
+        None,
+        skipped,
+        target="clay_pct",
+        target_names=["clay_pct"],
+        config=SimpleNamespace(),
+        is_model_run=True,
     )
     assert alone == skipped
 

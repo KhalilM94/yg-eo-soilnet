@@ -90,16 +90,12 @@ def param_importances(study: optuna.Study) -> Figure:
     # fANOVA needs at least two completed trials and something that varies between them; below that
     # get_param_importances raises rather than returning an empty result.
     if _completed(study) < 2:
-        return _message_figure(
-            "Need at least two completed trials for importances", figsize=(FIG_WIDTH_FULL, 1.6)
-        )
+        return _message_figure("Need at least two completed trials for importances", figsize=(FIG_WIDTH_FULL, 1.6))
     with style_context():
         try:
             axes = plot_param_importances(study)
         except (ValueError, RuntimeError, ZeroDivisionError) as exc:
-            return _message_figure(
-                f"Importances unavailable: {exc}", figsize=(FIG_WIDTH_FULL, 1.6)
-            )
+            return _message_figure(f"Importances unavailable: {exc}", figsize=(FIG_WIDTH_FULL, 1.6))
         return _dress(axes, "hyperparameter importance", horizontal_bars=True)
 
 
@@ -115,7 +111,7 @@ def write_study_artifacts(
 
     Written to a real folder first, so a run with recording switched off still leaves the same files
     behind.
-        """
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

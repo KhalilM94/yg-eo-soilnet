@@ -9,6 +9,7 @@ from pyproj import CRS, Transformer
 from sklearn.metrics import root_mean_squared_error
 from mlflow.models import make_metric
 
+
 class LogTransformer(BaseEstimator, TransformerMixin):
     """Convert target values to 10·ln(1 + y) and back.
 
@@ -34,6 +35,7 @@ class LogTransformer(BaseEstimator, TransformerMixin):
         """Return exp(y / 10) - 1, undoing :meth:`transform`."""
         return np.expm1(y / 10)
 
+
 def _infer_utm_crs(lon_series, lat_series):
     """Return the UTM zone projection covering the average of the given coordinates."""
     lon_mean = lon_series.mean()
@@ -42,7 +44,8 @@ def _infer_utm_crs(lon_series, lat_series):
     epsg = 32600 + zone if lat_mean >= 0 else 32700 + zone
     return CRS.from_epsg(epsg)
 
-def assign_grid_ids(df, cell_size_m, lon_col='lon', lat_col='lat'):
+
+def assign_grid_ids(df, cell_size_m, lon_col="lon", lat_col="lat"):
     """Assign each point to a square cell of a regular grid laid over the data.
 
     The points are projected to the local UTM zone (units: metres) and a grid of ``cell_size_m``
@@ -82,15 +85,11 @@ def assign_grid_ids(df, cell_size_m, lon_col='lon', lat_col='lat'):
     if isinstance(df, gpd.GeoDataFrame):
         gdf_wgs = df.copy()
         if gdf_wgs.crs is None:
-            gdf_wgs.set_crs('EPSG:4326', inplace=True)
+            gdf_wgs.set_crs("EPSG:4326", inplace=True)
         elif gdf_wgs.crs.to_epsg() != 4326:
             gdf_wgs = gdf_wgs.to_crs(epsg=4326)
     else:
-        gdf_wgs = gpd.GeoDataFrame(
-            df.copy(),
-            geometry=gpd.points_from_xy(df[lon_col], df[lat_col]),
-            crs='EPSG:4326'
-        )
+        gdf_wgs = gpd.GeoDataFrame(df.copy(), geometry=gpd.points_from_xy(df[lon_col], df[lat_col]), crs="EPSG:4326")
 
     lon_mean = float(gdf_wgs[lon_col].mean())
     lat_mean = float(gdf_wgs[lat_col].mean())
@@ -103,9 +102,9 @@ def assign_grid_ids(df, cell_size_m, lon_col='lon', lat_col='lat'):
     transformer = Transformer.from_crs(gdf_wgs.crs, utm_crs, always_xy=True)
     gdf_utm = gdf_wgs.copy()
     gdf_utm.geometry = gdf_utm.geometry.apply(
-        lambda geom: shapely_transform(lambda x, y, z=None: transformer.transform(x, y), geom)
-        if geom is not None
-        else None
+        lambda geom: (
+            shapely_transform(lambda x, y, z=None: transformer.transform(x, y), geom) if geom is not None else None
+        )
     )
     gdf_utm = gdf_utm.set_crs(utm_crs, allow_override=True)
 
@@ -144,6 +143,7 @@ def assign_grid_ids(df, cell_size_m, lon_col='lon', lat_col='lat'):
 
     return grid_id, grid_gdf
 
+
 def rpd_score(predictions, targets):
     """Ratio of performance to deviation: standard deviation of the measurements / RMSE.
 
@@ -158,6 +158,7 @@ def rpd_score(predictions, targets):
     rmse = root_mean_squared_error(targets, predictions)
     return std_dev / rmse
 
+
 def rpiq_score(predictions, targets):
     """Ratio of performance to interquartile range: IQR of the measurements / RMSE.
 
@@ -171,6 +172,7 @@ def rpiq_score(predictions, targets):
     iqr = np.percentile(targets, 75) - np.percentile(targets, 25)
     rmse = root_mean_squared_error(targets, predictions)
     return iqr / rmse
+
 
 #: RPIQ as an MLflow evaluation metric, added to MLflow's own scores for scikit-learn models.
 mlflow_rpiq_score = make_metric(eval_fn=rpiq_score, greater_is_better=True, name="rpiq_score")

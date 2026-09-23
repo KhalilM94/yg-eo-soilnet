@@ -45,8 +45,7 @@ def normalize_method(method: Any) -> str:
         return CONFORMAL
     if name not in INTERVAL_METHODS:
         raise ValueError(
-            f"Unknown uncertainty.interval.method {method!r}; expected one of "
-            f"{', '.join(INTERVAL_METHODS)}."
+            f"Unknown uncertainty.interval.method {method!r}; expected one of {', '.join(INTERVAL_METHODS)}."
         )
     return name
 
@@ -64,7 +63,7 @@ class GaussianInterval:
         The share of points allowed to fall outside.
     target : str
         Which target it belongs to.
-        """
+    """
 
     alpha: float = 0.05
 
@@ -106,7 +105,7 @@ class SigmaInterval:
         What the spread is multiplied by.
     target : str
         Which target it belongs to.
-        """
+    """
 
     k: float = 1.0
 
@@ -136,7 +135,7 @@ def effective_alpha(method: Any, alpha: float = 0.05, k: float = 1.0) -> float:
     ``alpha`` for the calibrated and bell-curve methods; for a plain spread band, whatever that
     multiple implies. The scores use this, so a one-sigma band is graded against the 68% it claims
     rather than against 95%.
-        """
+    """
     return 1.0 - SigmaInterval(k).nominal_coverage if normalize_method(method) == SIGMA else float(alpha)
 
 
@@ -169,7 +168,7 @@ def build_interval_estimators(
     Returns
     -------
     dict of str to object
-        """
+    """
     resolved = normalize_method(method)
     if resolved == NONE:
         return {}

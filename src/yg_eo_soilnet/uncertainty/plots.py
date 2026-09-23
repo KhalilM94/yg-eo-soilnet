@@ -57,24 +57,19 @@ def reliability_curve(
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     observed = np.asarray(y_true, dtype=float).reshape(-1)
     predicted = np.asarray(y_pred, dtype=float).reshape(-1)
     sigma_values = np.asarray(sigma, dtype=float).reshape(-1)
 
     figure = None
     if axis is None:
-        figure, axis = plt.subplots(
-            figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
-        )
+        figure, axis = plt.subplots(figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained")
     # Both axes are coverages on the same 0-1 scale, so this panel is read against its diagonal the
     # same way the pred-vs-obs scatter is.
     square_panel(axis)
 
-    empirical = [
-        _empirical_coverage(observed, predicted, sigma_values, level, calibrator)
-        for level in NOMINAL_LEVELS
-    ]
+    empirical = [_empirical_coverage(observed, predicted, sigma_values, level, calibrator) for level in NOMINAL_LEVELS]
 
     axis.plot([0, 1], [0, 1], linestyle="--", color=INK_2, linewidth=0.8, label="perfect", zorder=2)
     axis.plot(
@@ -92,9 +87,7 @@ def reliability_curve(
     # Shading the gap makes the DIRECTION of the miscalibration readable at a glance, which is the
     # thing that determines what to do about it: below the diagonal is over-confident (intervals too
     # narrow), above is over-cautious (too wide, and the bars are not saying much).
-    axis.fill_between(
-        NOMINAL_LEVELS, NOMINAL_LEVELS, empirical, color=FERTIMAP_AREA_FILL, alpha=0.5, lw=0, zorder=1
-    )
+    axis.fill_between(NOMINAL_LEVELS, NOMINAL_LEVELS, empirical, color=FERTIMAP_AREA_FILL, alpha=0.5, lw=0, zorder=1)
 
     axis.set_xlabel("Nominal coverage")
     axis.set_ylabel("Empirical coverage")
@@ -125,7 +118,7 @@ def sigma_vs_error(
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     observed = np.asarray(y_true, dtype=float).reshape(-1)
     predicted = np.asarray(y_pred, dtype=float).reshape(-1)
     sigma_values = np.asarray(sigma, dtype=float).reshape(-1)
@@ -133,9 +126,7 @@ def sigma_vs_error(
 
     figure = None
     if axis is None:
-        figure, axis = plt.subplots(
-            figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained"
-        )
+        figure, axis = plt.subplots(figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN), layout="constrained")
     # Both axes are in the target's units, and the whole reading is "how far off the diagonal".
     square_panel(axis)
 
@@ -158,9 +149,7 @@ def sigma_vs_error(
 
     axis.set_xlabel("Predicted σ (bin mean)")
     axis.set_ylabel("Observed RMSE (bin)")
-    panel_subtitle(
-        axis, f"{target_name} σ vs realised error" if target_name else "σ vs realised error"
-    )
+    panel_subtitle(axis, f"{target_name} σ vs realised error" if target_name else "σ vs realised error")
 
     return figure
 
@@ -187,9 +176,7 @@ def _empirical_coverage(
             # the same approximation the alternative would make and keeps the curve monotone.
             from scipy import stats
 
-            scale = stats.norm.ppf(0.5 + level / 2.0) / stats.norm.ppf(
-                0.5 + (1.0 - calibrator.alpha) / 2.0
-            )
+            scale = stats.norm.ppf(0.5 + level / 2.0) / stats.norm.ppf(0.5 + (1.0 - calibrator.alpha) / 2.0)
             half_width = (upper - lower) / 2.0 * scale
             lower, upper = predicted - half_width, predicted + half_width
 
@@ -205,7 +192,7 @@ def _bin_by_sigma(
 
     Equal-sized rather than equal-width bands: predicted spreads are usually bunched at the low end, so
     equal-width bands would leave most of them holding one or two points.
-        """
+    """
     finite = np.isfinite(absolute_residuals) & np.isfinite(sigma)
     absolute_residuals, sigma = absolute_residuals[finite], sigma[finite]
     if sigma.size < n_bins * 2:

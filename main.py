@@ -166,17 +166,19 @@ class SoilModelTraining:
         _seed_everything(int(self.config.RANDOM_SEED))
         self.log_transformer = LogTransformer()
         self.logger_wrapper = TrainingLogger(
-            name='AlMoutmir Soil Models Training',
+            name="AlMoutmir Soil Models Training",
             log_filename=self.run_name,
             enable_file_logging=self.config.MAIN_FILE_LOGGING_ENABLED,
         )
         self.logger = self.logger_wrapper.get_logger()
         self.sklearn_logger_wrapper = TrainingLogger(
-            name='AlMoutmir Soil Models Training - sklearn',
-            log_filename=f'{self.run_name}_sklearn',
+            name="AlMoutmir Soil Models Training - sklearn",
+            log_filename=f"{self.run_name}_sklearn",
             enable_file_logging=self.config.SKLEARN_FILE_LOGGING_ENABLED,
         )
         self.sklearn_logger = self.sklearn_logger_wrapper.get_logger()
+        # Stated in the log because repeating a run means repeating this number.
+        self.logger.info("Random seed for this run: %s", self.config.RANDOM_SEED)
 
         self.data_manager = DataManager(self.config, self.logger)
         # One split for the whole run, shared by both model families, so a point in the test set
@@ -212,7 +214,7 @@ class SoilModelTraining:
         trainer = ModelTrainer(
             config=self.config,
             columns_to_transform=self.config.COLUMNS_TO_TRANSFORM,
-            enable_clustering =self.config.ENABLE_CLUSTERING,
+            enable_clustering=self.config.ENABLE_CLUSTERING,
             split_strategy=self.config.SPLIT_STRATEGY,
             seed=self.config.RANDOM_SEED,
             logger=self.sklearn_logger,
@@ -240,16 +242,16 @@ class SoilModelTraining:
                 logger=self.logger,
                 entry_name=model_name,
             )
-            for target_group in groups:
-                sklearn_groups.setdefault(tuple(target_group), {})[model_name] = pipeline
+            for group in groups:
+                sklearn_groups.setdefault(tuple(group), {})[model_name] = pipeline
 
         # The same decision, model by model, for the deep-learning models.
         lightning_groups: dict[tuple, list[str]] = {}
         for entry_name, spec in self.config.LIGHTNING_MODEL_REGISTRY.items():
             if not spec.get("enabled", False):
                 continue
-            for target_group in resolve_target_groups(self.config, spec):
-                lightning_groups.setdefault(tuple(target_group), []).append(entry_name)
+            for group in resolve_target_groups(self.config, spec):
+                lightning_groups.setdefault(tuple(group), []).append(entry_name)
 
         # Recorded on the main run before training starts, so the run always says what it set out
         # to fit, even if it is stopped part-way.
@@ -278,6 +280,7 @@ class SoilModelTraining:
             label = join_target_names(list(target_group))
             self.logger.info(f"[lightning group {index}/{len(lightning_groups)}] {label} - starting")
             started = time.perf_counter()
+
             def build_bundles(seed: int, _label=label, _entries=entry_names):
                 """Build this group's deep-learning models, starting from random seed ``seed``.
 
@@ -316,6 +319,7 @@ class SoilModelTraining:
         sklearn_groups, lightning_groups : dict
             Target groups as keys (tuples of target names), for each model family.
         """
+
         def describe(groups) -> str:
             """The target groups as one readable line, for the run's settings."""
             return " | ".join(join_target_names(list(group)) for group in groups) or "(none)"
@@ -341,9 +345,7 @@ class SoilModelTraining:
 def parse_args() -> argparse.Namespace:
     """Read the command-line options (just ``--config-path``)."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Train every enabled model on the configured data and record the results in MLflow."
-        )
+        description=("Train every enabled model on the configured data and record the results in MLflow.")
     )
     parser.add_argument(
         "--config-path",
@@ -421,9 +423,7 @@ def main():
             stage_start = time.perf_counter()
             split_plan = trainer.split_plan_provider.plan()
             mlflow.log_params(split_plan.describe())
-            trainer.logger.info(
-                f"split plan built in {time.perf_counter() - stage_start:.2f}s | {split_plan.counts()}"
-            )
+            trainer.logger.info(f"split plan built in {time.perf_counter() - stage_start:.2f}s | {split_plan.counts()}")
 
             stage_start = time.perf_counter()
             split_data = trainer.scikit_datamodule.split(processed_data, split_plan)
@@ -444,8 +444,7 @@ def main():
                 mlflow_logger.log_parent_summary(main_run.info.run_id, trainer)
             except Exception as summary_error:
                 trainer.logger.error(
-                    f"Parent summary failed after training completed: "
-                    f"{type(summary_error).__name__}: {summary_error}",
+                    f"Parent summary failed after training completed: {type(summary_error).__name__}: {summary_error}",
                     exc_info=True,
                 )
                 mlflow.set_tag(
@@ -463,6 +462,7 @@ def main():
     run_id = getattr(main_run.info, "run_id", None)
     if experiment_id is not None and run_id is not None:
         _export_mlflow_run_folder(trainer, experiment_id, run_id, run_name)
+
 
 if __name__ == "__main__":
     main()

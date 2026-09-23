@@ -289,12 +289,10 @@ class SoilSequenceDataModule(LightningDataModule):
         self.label_scale_ = as_array(state.get("label_scale"))
         self.label_median_ = as_array(state.get("label_median"))
         self.sequence_mean_ = {
-            name: np.asarray(values, dtype=np.float32)
-            for name, values in (state.get("sequence_mean") or {}).items()
+            name: np.asarray(values, dtype=np.float32) for name, values in (state.get("sequence_mean") or {}).items()
         }
         self.sequence_scale_ = {
-            name: np.asarray(values, dtype=np.float32)
-            for name, values in (state.get("sequence_scale") or {}).items()
+            name: np.asarray(values, dtype=np.float32) for name, values in (state.get("sequence_scale") or {}).items()
         }
 
         vocabularies = state.get("categorical_vocabularies") or []
@@ -468,9 +466,7 @@ class SoilSequenceDataModule(LightningDataModule):
             # first, so this is the correlation matrix.
             if indices.size > 1 and train_targets.shape[1] > 1:
                 standardized = (train_targets - self.target_mean_) / self.target_scale_
-                self.target_covariance_ = np.atleast_2d(
-                    np.cov(standardized, rowvar=False, ddof=0)
-                ).astype(np.float64)
+                self.target_covariance_ = np.atleast_2d(np.cov(standardized, rowvar=False, ddof=0)).astype(np.float64)
 
         label_features = np.asarray(self.sequence_bundle.label_features)
         if label_features.size:
@@ -494,9 +490,7 @@ class SoilSequenceDataModule(LightningDataModule):
         # One statistic per channel per data source, over the training points' real readings.
         for modality_name, per_point_values in (self.sequence_bundle.sequences or {}).items():
             channels = len(self.sequence_bundle.modality_columns.get(modality_name, []))
-            selected = [
-                index for index in indices if index < len(per_point_values) and len(per_point_values[index])
-            ]
+            selected = [index for index in indices if index < len(per_point_values) and len(per_point_values[index])]
             if not selected:
                 self.sequence_mean_[modality_name] = np.zeros(channels, dtype=np.float32)
                 self.sequence_scale_[modality_name] = np.ones(channels, dtype=np.float32)
@@ -567,9 +561,7 @@ class SoilSequenceDataModule(LightningDataModule):
             standardized = np.concatenate([standardized, flags], axis=1)
         return standardized
 
-    def _static_validity_channels(
-        self, measured: np.ndarray, validity: Optional[np.ndarray]
-    ) -> np.ndarray:
+    def _static_validity_channels(self, measured: np.ndarray, validity: Optional[np.ndarray]) -> np.ndarray:
         """The measured-or-filled flags, for the covariates that have gaps."""
         if not self.static_validity_names:
             return np.empty((measured.shape[0], 0), dtype=np.float32)
@@ -666,8 +658,10 @@ class SoilSequenceDataModule(LightningDataModule):
             if static_features.size
             else np.empty((indices.size, 0), dtype=np.float32)
         )
-        y = self._standardize_targets(targets[indices]) if targets.size else np.empty(
-            (indices.size, 0), dtype=np.float32
+        y = (
+            self._standardize_targets(targets[indices])
+            if targets.size
+            else np.empty((indices.size, 0), dtype=np.float32)
         )
 
         # Codes, never scaled: they look up a vector rather than measure anything. Always present,
@@ -741,9 +735,7 @@ class SoilSequenceDataModule(LightningDataModule):
             times_padded = np.zeros((indices.size, max_length), dtype=np.float64)
             validity_padded = np.zeros((indices.size, max_length, channels), dtype=bool)
 
-            for row, (values, times, validity) in enumerate(
-                zip(selected_values, selected_times, selected_validity)
-            ):
+            for row, (values, times, validity) in enumerate(zip(selected_values, selected_times, selected_validity)):
                 length = len(times)
                 if length == 0:
                     continue
@@ -857,7 +849,5 @@ class SoilSequenceDataModule(LightningDataModule):
 
         from sklearn.model_selection import train_test_split
 
-        remainder, held_out = train_test_split(
-            indices, test_size=fraction, random_state=self.seed, shuffle=True
-        )
+        remainder, held_out = train_test_split(indices, test_size=fraction, random_state=self.seed, shuffle=True)
         return np.asarray(held_out, dtype=np.int64), np.asarray(remainder, dtype=np.int64)

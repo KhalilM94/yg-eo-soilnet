@@ -78,9 +78,7 @@ def _write_csvs(tmp_path: Path, *, year_offset: int = 0, dates_by_point=None, wi
     return static_path, timeseries_path
 
 
-def _config(
-    tmp_path: Path, static_path: Path, timeseries_path: Path, categorical_features=()
-) -> SimpleNamespace:
+def _config(tmp_path: Path, static_path: Path, timeseries_path: Path, categorical_features=()) -> SimpleNamespace:
     return sequence_builder_config(
         tmp_path,
         static_path,
@@ -98,9 +96,7 @@ def _build_bundle(tmp_path: Path, logger, *, categorical_features=(), **kwargs) 
 
 
 def _categorical_bundle(tmp_path: Path, logger) -> SoilSequenceBundle:
-    return _build_bundle(
-        tmp_path, logger, with_categoricals=True, categorical_features=["texture", "landform"]
-    )
+    return _build_bundle(tmp_path, logger, with_categoricals=True, categorical_features=["texture", "landform"])
 
 
 # --- builder ---------------------------------------------------------------
@@ -231,7 +227,9 @@ def test_datamodule_fits_standardization_on_the_train_split_only(tmp_path: Path,
     train_static = bundle.static_features[datamodule.train_idx_]
     np.testing.assert_allclose(datamodule.static_mean_, train_static.mean(axis=0), rtol=1e-5)
 
-    observed = np.concatenate([bundle.sequences["s2"][i] for i in datamodule.train_idx_ if len(bundle.sequences["s2"][i])])
+    observed = np.concatenate(
+        [bundle.sequences["s2"][i] for i in datamodule.train_idx_ if len(bundle.sequences["s2"][i])]
+    )
     np.testing.assert_allclose(datamodule.sequence_mean_["s2"], observed.mean(axis=0), rtol=1e-5)
 
 
@@ -276,9 +274,7 @@ def test_vocabulary_is_fitted_on_the_train_split_only(tmp_path: Path, logger) ->
     datamodule.setup("fit")
 
     raw = np.asarray(bundle.static_categoricals, dtype=object)
-    train_textures = {
-        label for label in raw[datamodule.train_idx_, 0].tolist() if label not in (None, "")
-    }
+    train_textures = {label for label in raw[datamodule.train_idx_, 0].tolist() if label not in (None, "")}
     assert datamodule.categorical_vocabularies[0] == sorted(train_textures)
     assert datamodule.categorical_cardinalities[0] == len(train_textures) + 1
 
@@ -300,9 +296,7 @@ def test_datamodule_exports_the_categorical_contract(tmp_path: Path, logger) -> 
     assert len(datamodule.categorical_cardinalities) == 2
     assert all(
         len(vocabulary) + 1 == cardinality
-        for vocabulary, cardinality in zip(
-            datamodule.categorical_vocabularies, datamodule.categorical_cardinalities
-        )
+        for vocabulary, cardinality in zip(datamodule.categorical_vocabularies, datamodule.categorical_cardinalities)
     )
 
 
@@ -451,9 +445,7 @@ def test_a_split_plan_decides_the_holdout_instead_of_val_size_and_test_size(tmp_
     point_ids = list(bundle.point_ids)
     plan = _plan_over(point_ids, test_ids=point_ids[:2], val_ids=point_ids[2:3])
 
-    datamodule = SoilSequenceDataModule(
-        bundle, batch_size=2, val_size=0.5, test_size=0.5, seed=7, split_plan=plan
-    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.5, test_size=0.5, seed=7, split_plan=plan)
     datamodule.setup("fit")
 
     assert {point_ids[i] for i in datamodule.test_idx_} == set(point_ids[:2])
@@ -583,9 +575,7 @@ def test_a_split_targets_file_offers_the_same_lab_columns_as_a_joint_one(tmp_pat
     split = built_sequence_bundle(tmp_path / "split", logger, dates, split=True)
 
     assert split.label_feature_names == joint.label_feature_names == ["target_a", "lab_dense", "lab_sparse"]
-    np.testing.assert_array_equal(
-        np.isfinite(split.label_features), np.isfinite(joint.label_features)
-    )
+    np.testing.assert_array_equal(np.isfinite(split.label_features), np.isfinite(joint.label_features))
     # The join must not have promoted anything: features come from filter_schema either way.
     assert split.static_feature_names == joint.static_feature_names == ["static_1"]
 

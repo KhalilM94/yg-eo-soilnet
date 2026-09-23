@@ -92,7 +92,7 @@ def serving_requirements() -> list[str]:
     """The libraries a served model needs, listed rather than guessed.
 
     Guessing them from what was loaded while saving would list the whole training stack.
-        """
+    """
     from importlib.metadata import PackageNotFoundError, version
 
     requirements = []
@@ -119,7 +119,7 @@ def _as_list_of_arrays(column: pd.Series, *, dtype, label: str) -> list[np.ndarr
 
     A request can arrive as JSON, as a saved file or as a hand-built table, and each delivers nested
     values slightly differently.
-        """
+    """
     arrays: list[np.ndarray] = []
     for position, value in enumerate(column.tolist()):
         if value is None:
@@ -149,7 +149,7 @@ def bundle_from_frame(frame: pd.DataFrame, state: Mapping[str, Any]):
     Returns
     -------
     SoilSequenceBundle
-        """
+    """
     from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 
     static_names = list(state.get("static_feature_names") or [])
@@ -159,8 +159,7 @@ def bundle_from_frame(frame: pd.DataFrame, state: Mapping[str, Any]):
     # coordinate branch - or one predating it - requires nothing new and rebuilds nothing.
     coord_names = list(state.get("coord_names") or [])
     modality_columns = {
-        str(name): list(columns)
-        for name, columns in (state.get("modality_column_names") or {}).items()
+        str(name): list(columns) for name, columns in (state.get("modality_column_names") or {}).items()
     }
 
     # Coordinates are REQUIRED, alongside the static and categorical blocks, rather than optional
@@ -168,38 +167,25 @@ def bundle_from_frame(frame: pd.DataFrame, state: Mapping[str, Any]):
     # there is no honest fill for one: the train-median trick that rescues a covariate would place
     # the sample at a location it does not occupy, and the encoder would read that as a confident
     # position rather than as an absence. The builder drops such a row for the same reason.
-    missing = [
-        name for name in static_names + categorical_names + coord_names if name not in frame.columns
-    ]
+    missing = [name for name in static_names + categorical_names + coord_names if name not in frame.columns]
     if missing:
         raise KeyError(
-            f"Input is missing {len(missing)} column(s) this model was trained on: "
-            f"{', '.join(missing[:10])}"
+            f"Input is missing {len(missing)} column(s) this model was trained on: {', '.join(missing[:10])}"
         )
 
     n_rows = len(frame)
-    point_ids = (
-        frame[POINT_ID_COLUMN].tolist() if POINT_ID_COLUMN in frame.columns else list(range(n_rows))
-    )
+    point_ids = frame[POINT_ID_COLUMN].tolist() if POINT_ID_COLUMN in frame.columns else list(range(n_rows))
 
     static_features = (
-        frame[static_names].to_numpy(dtype=np.float32)
-        if static_names
-        else np.empty((n_rows, 0), dtype=np.float32)
+        frame[static_names].to_numpy(dtype=np.float32) if static_names else np.empty((n_rows, 0), dtype=np.float32)
     )
     static_categoricals = (
-        frame[categorical_names].astype(object).to_numpy()
-        if categorical_names
-        else np.empty((n_rows, 0), dtype=object)
+        frame[categorical_names].astype(object).to_numpy() if categorical_names else np.empty((n_rows, 0), dtype=object)
     )
     # float64, not the float32 the static block uses: the bundle keeps coordinates in float64
     # because float32 resolves about a metre at this latitude, and the train-bbox normalization
     # downstream subtracts two nearby numbers and would spend most of it.
-    coords = (
-        frame[coord_names].to_numpy(dtype=np.float64)
-        if coord_names
-        else np.empty((n_rows, 0), dtype=np.float64)
-    )
+    coords = frame[coord_names].to_numpy(dtype=np.float64) if coord_names else np.empty((n_rows, 0), dtype=np.float64)
     # The lab block is rebuilt at FULL ROSTER WIDTH, with each supplied column at its own roster
     # position and the rest left NaN.
     #
@@ -241,8 +227,8 @@ def bundle_from_frame(frame: pd.DataFrame, state: Mapping[str, Any]):
 
         per_point = []
         for position, values in enumerate(raw_values):
-            reshaped = values.reshape(-1, len(columns)) if values.size else np.empty(
-                (0, len(columns)), dtype=np.float32
+            reshaped = (
+                values.reshape(-1, len(columns)) if values.size else np.empty((0, len(columns)), dtype=np.float32)
             )
             if reshaped.shape[0] != times[position].shape[0]:
                 raise ValueError(
@@ -283,7 +269,7 @@ def frame_from_bundle(
 
     Used to produce the example that ships with a saved model, which is what makes its declared inputs
     real rather than a description.
-        """
+    """
     from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 
     bundle = SoilSequenceBundle.from_mapping(bundle)
@@ -316,14 +302,12 @@ def frame_from_bundle(
             if name in wanted:
                 data[name] = np.asarray(labels[:count, index], dtype=np.float64)
 
-    for modality in (state.get("modality_column_names") or {}):
+    for modality in state.get("modality_column_names") or {}:
         data[time_column(modality)] = [
-            np.asarray(values, dtype=np.float64).tolist()
-            for values in bundle.sequence_times.get(modality, [])[:count]
+            np.asarray(values, dtype=np.float64).tolist() for values in bundle.sequence_times.get(modality, [])[:count]
         ]
         data[values_column(modality)] = [
-            np.asarray(values, dtype=np.float64).tolist()
-            for values in bundle.sequences.get(modality, [])[:count]
+            np.asarray(values, dtype=np.float64).tolist() for values in bundle.sequences.get(modality, [])[:count]
         ]
 
     return pd.DataFrame(data)
@@ -337,7 +321,7 @@ class SoilSequencePyfunc:
     >>> import mlflow                                                    # doctest: +SKIP
     >>> model = mlflow.pyfunc.load_model("models:/clay_pct_soil_cnn@champion")   # doctest: +SKIP
     >>> model.predict(request_frame)                                     # doctest: +SKIP
-        """
+    """
 
     def __init__(self, model=None):
         """Hold the stored input statistics the model was trained with."""
@@ -373,16 +357,14 @@ class SoilSequencePyfunc:
         -------
         pandas.DataFrame
             One column per target, in the target's own units.
-                """
+        """
         predictor = self._ensure_predictor()
         frame = pd.DataFrame(model_input)
         bundle = bundle_from_frame(frame, predictor.preprocessing_state)
         predictions, sigma = predictor.predict_with_uncertainty(bundle)
 
         names = list(predictor.preprocessing_state.get("target_names") or [])
-        names = names[: predictions.shape[1]] or [
-            f"prediction_{index}" for index in range(predictions.shape[1])
-        ]
+        names = names[: predictions.shape[1]] or [f"prediction_{index}" for index in range(predictions.shape[1])]
         output = pd.DataFrame(predictions, columns=names)
 
         if bool((params or {}).get("uncertainty", False)) and sigma is not None:
@@ -403,7 +385,7 @@ def example_from_state(
 
     The version of :func:`build_input_example` that needs no data - a checkpoint carries every column
     name it expects.
-        """
+    """
     static_names = list(state.get("static_feature_names") or [])
     static_mean = list(state.get("static_mean") or [])
     categorical_names = list(state.get("categorical_feature_names") or [])
@@ -411,8 +393,7 @@ def example_from_state(
     label_names = list(state.get("label_feature_names") or [])
     label_mean = list(state.get("label_mean") or [])
     modality_columns = {
-        str(name): list(columns)
-        for name, columns in (state.get("modality_column_names") or {}).items()
+        str(name): list(columns) for name, columns in (state.get("modality_column_names") or {}).items()
     }
     sequence_mean = state.get("sequence_mean") or {}
 
@@ -445,12 +426,8 @@ def example_from_state(
     for modality, columns in modality_columns.items():
         means = list(sequence_mean.get(modality) or [])
         per_band = [float(means[index]) if index < len(means) else 0.0 for index in range(len(columns))]
-        data[time_column(modality)] = [
-            [2020.0 + step / 4.0 for step in range(sequence_length)] for _ in range(n_rows)
-        ]
-        data[values_column(modality)] = [
-            [list(per_band) for _ in range(sequence_length)] for _ in range(n_rows)
-        ]
+        data[time_column(modality)] = [[2020.0 + step / 4.0 for step in range(sequence_length)] for _ in range(n_rows)]
+        data[values_column(modality)] = [[list(per_band) for _ in range(sequence_length)] for _ in range(n_rows)]
 
     return pd.DataFrame(data)
 
@@ -460,7 +437,7 @@ def required_label_columns(model) -> list[str]:
 
     Asked of the model itself, since a model may read a lab column as an
     :term:`auxiliary lab input`, as a :term:`residual base`, or not at all.
-        """
+    """
     columns = getattr(model, "serving_label_columns", None)
     if columns is None:
         columns = getattr(model, "auxiliary_label_columns", None)
@@ -471,7 +448,7 @@ def build_input_example(model, bundle, n_rows: int = 3) -> pd.DataFrame:
     """A small, valid request table built from the model's own training data.
 
     It ships with the saved model, so anyone loading it can see exactly what a request looks like.
-        """
+    """
     state = model.get_preprocessing_state() if hasattr(model, "get_preprocessing_state") else {}
     if not state:
         raise ValueError("The model carries no preprocessing state, so no input example can be built.")

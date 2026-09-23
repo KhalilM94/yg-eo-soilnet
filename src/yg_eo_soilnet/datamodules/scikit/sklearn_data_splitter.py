@@ -133,12 +133,10 @@ class SklearnDataSplitter:
             split_data["groups_train"] = groups.iloc[fit_pos]
             split_data["groups_test"] = groups.iloc[test_pos]
             self.logger.info(
-                f"Fit-pool group distribution:\n"
-                f"{split_data['groups_train'].value_counts().sort_index().to_string()}"
+                f"Fit-pool group distribution:\n{split_data['groups_train'].value_counts().sort_index().to_string()}"
             )
             self.logger.info(
-                f"Test group distribution:\n"
-                f"{split_data['groups_test'].value_counts().sort_index().to_string()}"
+                f"Test group distribution:\n{split_data['groups_test'].value_counts().sort_index().to_string()}"
             )
 
         point_id_series = pd.Series(np.asarray(point_ids), index=X.index, name="point_id")
@@ -210,12 +208,8 @@ class SklearnDataSplitter:
                 keyed = frame.copy()
                 keyed.insert(0, "point_id", point_ids.reindex(frame.index).to_numpy())
                 keyed.to_parquet(os.path.join(tmpdir, f"{name}.parquet"), index=False)
-            split_plan.to_frame().to_parquet(
-                os.path.join(tmpdir, "split_assignments.parquet"), index=False
-            )
-            self.logger.info(
-                f"split_data parquet writes completed in {time.perf_counter() - split_start:.2f}s"
-            )
+            split_plan.to_frame().to_parquet(os.path.join(tmpdir, "split_assignments.parquet"), index=False)
+            self.logger.info(f"split_data parquet writes completed in {time.perf_counter() - split_start:.2f}s")
 
             artifact_start = time.perf_counter()
             mlflow.log_artifacts(tmpdir, artifact_path="data_splits")

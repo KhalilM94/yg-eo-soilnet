@@ -140,6 +140,7 @@ def test_one_failing_seed_does_not_end_the_pass(seeds_applied):
 
 def test_a_candidate_whose_every_rerun_fails_has_no_mean(seeds_applied):
     study = _study([0.5, 0.6])
+
     def always_fails(overrides, seed):
         raise RuntimeError("boom")
 

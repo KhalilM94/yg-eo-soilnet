@@ -129,11 +129,14 @@ def make_timeseries(static: pd.DataFrame, rng: np.random.Generator) -> tuple[pd.
                     "S2_B8": round(0.20 + 0.35 * ndvi + rng.normal(0, 0.01), 4),
                     "S2_NDVI": round(ndvi, 4),
                     "CLIM_precip_mm": round(
-                        max(0.0, 80 * aridity[point] * max(0.0, np.cos(2 * np.pi * (month - 1) / 12)) + rng.normal(0, 5)),
+                        max(
+                            0.0, 80 * aridity[point] * max(0.0, np.cos(2 * np.pi * (month - 1) / 12)) + rng.normal(0, 5)
+                        ),
                         1,
                     ),
                     "CLIM_LST_celsius": round(
-                        18 + 12 * np.sin(2 * np.pi * (month - 4) / 12)
+                        18
+                        + 12 * np.sin(2 * np.pi * (month - 4) / 12)
                         - 0.004 * static["elevation"].iat[point]
                         + rng.normal(0, 1.5),
                         2,
@@ -195,8 +198,12 @@ def main(argv: list[str] | None = None) -> Path:
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--n-points", type=int, default=300, help="How many sample points to invent (default 300).")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed; the same seed gives the same files (default 0).")
-    parser.add_argument("--out", type=Path, default=OUTPUT_FOLDER, help="Folder to write into (default examples/demo_data).")
+    parser.add_argument(
+        "--seed", type=int, default=0, help="Random seed; the same seed gives the same files (default 0)."
+    )
+    parser.add_argument(
+        "--out", type=Path, default=OUTPUT_FOLDER, help="Folder to write into (default examples/demo_data)."
+    )
     args = parser.parse_args(argv)
 
     rng = np.random.default_rng(args.seed)

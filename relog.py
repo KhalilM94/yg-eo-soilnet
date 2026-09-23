@@ -52,9 +52,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Main configuration file (default: configs/main_config.yml), read for the MLflow "
         "location and the model list.",
     )
-    parser.add_argument(
-        "--no-register", action="store_true", help="Save the model in the run but do not register it."
-    )
+    parser.add_argument("--no-register", action="store_true", help="Save the model in the run but do not register it.")
     parser.add_argument(
         "--allow-ensemble-member",
         action="store_true",
@@ -79,8 +77,7 @@ def resolve_model_class(class_path: str):
 #: Used for runs whose ``model_name`` is no longer in the model list.
 LEGACY_MODEL_CLASSES = {
     "soil_residual_cnn": (
-        "yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module."
-        "SoilResidualCNNLightningModule"
+        "yg_eo_soilnet.models.lightningmodules.soil_residual_cnn_lightning_module.SoilResidualCNNLightningModule"
     ),
     "soil_residual_attention_cnn": (
         "yg_eo_soilnet.models.lightningmodules.soil_residual_attention_cnn_lightning_module."

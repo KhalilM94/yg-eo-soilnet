@@ -42,6 +42,25 @@ First match wins:
 4. The top level of the main file.
 5. The default in the code.
 
+Step 5 is the one to watch: a setting deleted from a YAML file does not become "off" or "unset", it
+becomes whatever the code says. Those defaults are kept in step with the shipped files by
+`tests/test_config_defaults.py`, which fails naming any setting whose default has drifted away from
+what the project ships, so the two cannot disagree without someone writing down why.
+
+## Required settings
+
+Four settings name *your* data, so there is nothing sensible to fall back on. A run that omits one
+stops and says which it is, rather than guessing at a file or column that does not exist:
+
+| Setting | What it names |
+|---|---|
+| `common.data.root` | The folder your data files live in. |
+| `common.data.static` | The file, or folder, holding one row per sample point. (The older `STATIC_FEATURES_FILE` and `STATIC_FEATURES_FOLDER` spellings count too, as does a manifest.) |
+| `POINT_ID_COLUMN` | The column identifying each point, which the shared split is keyed on. |
+| `temporal.time_column` | The column holding each reading's date - required only when a time series is configured. |
+
+Everything else has a default, listed with its setting below.
+
 So a setting can be overridden for a single run without editing anything:
 
 ```bash
@@ -86,7 +105,7 @@ common:
 |---|---|
 | `TARGET_COLUMNS` | What to predict. |
 | `LABEL_COLUMNS` | **Every** lab measurement, targets included. These are never inputs, so a property you stop predicting cannot leak into predicting the others. |
-| `CATEGORICAL_FEATURES` | Columns holding categories rather than numbers. A column that is also in `LABEL_COLUMNS` is used by nothing - see [Known issues](../known-issues.md). |
+| `CATEGORICAL_FEATURES` | Columns holding categories rather than numbers. A column cannot also be in `LABEL_COLUMNS` - a lab column never reaches a model, so the run stops and names it. |
 | `IGNORED_COLUMNS` | Ids, coordinates, geometry - anything identifying a point rather than describing it. |
 | `MULTI_TARGET_MODE` | `joint` (one model predicts every target) or `per_target`. |
 | `COLUMNS_TO_TRANSFORM` | Targets trained on a log scale, which suits skewed properties. |
@@ -135,8 +154,14 @@ soil_cnn:
 ```
 
 Settings shared by every deep-learning model - the processor, the epochs, early stopping - are in
-`configs/lightning/models/defaults.yml`. On a machine without an NVIDIA card, set
-`accelerator: cpu` there.
+`configs/lightning/models/defaults.yml`. The processor is `auto`, which means the graphics card
+when the machine has one; set `accelerator: cpu` there to insist on the CPU.
+
+The two model lists are the one part of the configuration that is **not** in the lookup chain above.
+They are not searched for a setting; each model entry is built by merging `defaults.yml` into it, and
+whatever neither names falls straight through to the code default. So a `trainer_args` key deleted
+from both files is not inherited from `main_config.yml` - it comes from `config.py`. This is why the
+two are kept in step by a test.
 
 The full meaning of every `soil_cnn` setting is in
 {class}`~yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule`,

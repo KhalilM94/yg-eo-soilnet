@@ -94,9 +94,7 @@ def tiny_cnn(
 ) -> tuple[SoilCNNLightningModule, SoilSequenceDataModule]:
     """A small, untrained soil_cnn fitted to ``bundle``'s shapes, with its preprocessing attached."""
     torch.manual_seed(seed)
-    datamodule = SoilSequenceDataModule(
-        sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42
-    )
+    datamodule = SoilSequenceDataModule(sequence_bundle=bundle, batch_size=8, val_size=0.25, test_size=0.25, seed=42)
     datamodule.setup("fit")
 
     kwargs = dict(

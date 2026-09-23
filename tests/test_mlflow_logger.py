@@ -3,6 +3,7 @@ contract both families share, and the training log file."""
 
 import gc
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -60,10 +61,12 @@ def test_log_lightning_child_run_logs_metrics_artifacts_and_tags(monkeypatch, tm
         ),
         target="target_a",
         model_name="toy_lightning",
-        evaluation_df=pd.DataFrame({
-            "target_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "prediction": [1.3, 1.8, 3.4, 3.6, 5.5, 5.7],
-        }),
+        evaluation_df=pd.DataFrame(
+            {
+                "target_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "prediction": [1.3, 1.8, 3.4, 3.6, 5.5, 5.7],
+            }
+        ),
         validation_metrics={"val_loss": 0.5},
         test_metrics={"test_loss": 0.4},
         best_model_path=str(_checkpoint(tmp_path)),
@@ -75,28 +78,28 @@ def test_log_lightning_child_run_logs_metrics_artifacts_and_tags(monkeypatch, tm
     # Three calls: the run identity, the checkpoint's original filename, and the model-logging
     # outcome, which is tagged so a run that saved no model cannot look like one that did.
     assert set_tags.call_count == 3
-    log_params.assert_any_call({
-        "LIGHTNING_BATCH_SIZE": 8,
-        "LIGHTNING_VAL_SIZE": 0.2,
-        "LIGHTNING_MAX_EPOCHS": 10,
-        "LIGHTNING_ACCELERATOR": "cpu",
-        "LIGHTNING_DEVICES": 1,
-        "LIGHTNING_PRECISION": "32-true",
-    })
+    log_params.assert_any_call(
+        {
+            "LIGHTNING_BATCH_SIZE": 8,
+            "LIGHTNING_VAL_SIZE": 0.2,
+            "LIGHTNING_MAX_EPOCHS": 10,
+            "LIGHTNING_ACCELERATOR": "cpu",
+            "LIGHTNING_DEVICES": 1,
+            "LIGHTNING_PRECISION": "32-true",
+        }
+    )
     log_metric.assert_any_call("val_loss", 0.5)
     log_metric.assert_any_call("test_loss", 0.4)
     # Logged under a STABLE leaf name, not Lightning's epoch=NN-step=MMM, so two runs of the
     # same model produce the same artifact path and MLflow can compare them.
     checkpoint_calls = [
-        call for call in log_artifact.call_args_list
-        if call.kwargs.get("artifact_path") == "checkpoints"
+        call for call in log_artifact.call_args_list if call.kwargs.get("artifact_path") == "checkpoints"
     ]
     assert len(checkpoint_calls) == 1
     assert Path(checkpoint_calls[0].args[0]).name == "best.ckpt"
     # The original name survives as a tag rather than in the path.
     assert any(
-        c.args and c.args[0].get("checkpoint_filename") == "epoch=7-step=42.ckpt"
-        for c in set_tags.call_args_list
+        c.args and c.args[0].get("checkpoint_filename") == "epoch=7-step=42.ckpt" for c in set_tags.call_args_list
     )
     assert any(call.kwargs.get("artifact_path") == "eval_results" for call in log_artifact.call_args_list)
     assert log_model.called
@@ -140,10 +143,12 @@ def test_log_lightning_child_run_logs_split_summary_metrics(monkeypatch, tmp_pat
         ),
         target="target_a",
         model_name="toy_lightning",
-        evaluation_df=pd.DataFrame({
-            "target_a": [6.0, 7.0],
-            "prediction": [5.5, 7.5],
-        }),
+        evaluation_df=pd.DataFrame(
+            {
+                "target_a": [6.0, 7.0],
+                "prediction": [5.5, 7.5],
+            }
+        ),
         validation_metrics={"val_loss": 0.5},
         test_metrics={"test_loss": 0.4},
         best_model_path=str(_checkpoint(tmp_path)),
@@ -207,10 +212,12 @@ def test_log_lightning_child_run_logs_architecture_dimensions(monkeypatch, tmp_p
         ),
         target="target_a",
         model_name="toy_lightning",
-        evaluation_df=pd.DataFrame({
-            "target_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
-            "prediction": [1.3, 1.8, 3.4, 3.6, 5.5, 5.7],
-        }),
+        evaluation_df=pd.DataFrame(
+            {
+                "target_a": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+                "prediction": [1.3, 1.8, 3.4, 3.6, 5.5, 5.7],
+            }
+        ),
         validation_metrics={"val_loss": 0.5},
         test_metrics={"test_loss": 0.4},
         best_model_path=str(_checkpoint(tmp_path)),
@@ -220,7 +227,9 @@ def test_log_lightning_child_run_logs_architecture_dimensions(monkeypatch, tmp_p
         model=model,
     )
 
-    architecture_calls = [call for call in log_params.call_args_list if any(key.startswith("architecture.") for key in call.args[0])]
+    architecture_calls = [
+        call for call in log_params.call_args_list if any(key.startswith("architecture.") for key in call.args[0])
+    ]
     assert architecture_calls, "Expected architecture dimensions to be logged"
     assert architecture_calls[0].args[0] == {
         "architecture.static_dim": 3,
@@ -266,9 +275,7 @@ def test_log_lightning_child_run_skips_pred_obs_for_multi_output(monkeypatch) ->
         model=SimpleNamespace(),
     )
 
-    eval_plot_calls = [
-        call for call in log_artifact.call_args_list if call.kwargs.get("artifact_path") == "plots"
-    ]
+    eval_plot_calls = [call for call in log_artifact.call_args_list if call.kwargs.get("artifact_path") == "plots"]
     assert eval_plot_calls == []
 
 
@@ -436,6 +443,7 @@ def test_log_lightning_child_run_logs_pred_obs_for_single_target_frame(monkeypat
     )
 
     assert any(call.kwargs.get("artifact_path") == "plots" for call in log_artifact.call_args_list)
+
 
 # --- architecture introspection over real modules ---------------------------
 # The fakes above use SimpleNamespace(in_features=...), which hides the case that actually
@@ -740,9 +748,7 @@ def test_both_families_summarize_the_same_numbers_identically(captured_artifacts
 
 def test_an_unnamed_series_still_summarizes(captured_artifacts) -> None:
     """`to_frame()` needs a name; a nameless Series must not become a KeyError."""
-    ChildRunLogger()._write_split_summary(
-        {"train": pd.Series(OBSERVED)}, None, "caco3_pct_total"
-    )
+    ChildRunLogger()._write_split_summary({"train": pd.Series(OBSERVED)}, None, "caco3_pct_total")
 
     assert captured_artifacts["split_summary.json"]["train"]["count"] == len(OBSERVED)
 
@@ -793,3 +799,107 @@ def test_file_logging_can_be_disabled() -> None:
     logger = TrainingLogger(name="logger-off", log_filename="off", enable_file_logging=False)
 
     assert logger.log_file is None
+
+
+# --- the leaderboard's framework column ----------------------------------------------------
+# A model predicting several targets keeps its results in per-target sub-runs, and those are what
+# the leaderboard reads. They carried no framework tag, so every such row - deep-learning included -
+# fell through to a hardcoded "sklearn".
+
+
+def _patch_run_tree(monkeypatch, tree: dict[str, list]):
+    """Point ParentRunLogger at a run tree given as {parent run id: [(run id, tags), ...]}."""
+
+    def runs_for(parent_run_id: str):
+        return [
+            SimpleNamespace(
+                info=SimpleNamespace(run_id=run_id),
+                data=SimpleNamespace(tags=tags, metrics={"rmse_test": 1.0}),
+            )
+            for run_id, tags in tree.get(parent_run_id, [])
+        ]
+
+    class FakeMlflowClient:
+        def get_run(self, run_id):
+            return SimpleNamespace(info=SimpleNamespace(run_id=run_id, experiment_id="experiment-1"))
+
+        def search_runs(self, experiment_ids, filter_string):
+            parent = filter_string.split("'")[1]
+            return runs_for(parent)
+
+    monkeypatch.setattr(mlflow_loggers_module.mlflow.tracking, "MlflowClient", FakeMlflowClient)
+
+
+def test_a_per_target_row_reports_the_framework_of_the_model_it_belongs_to(monkeypatch) -> None:
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [
+                ("cnn-model", {"model_name": "soil_cnn", "framework": "lightning"}),
+                ("ridge-model", {"model_name": "Ridge", "framework": "sklearn"}),
+            ],
+            # Per-target sub-runs, as runs recorded before this fix hold them: no framework tag.
+            "cnn-model": [("cnn-clay", {"target": "clay_pct", "model_name": "soil_cnn"})],
+            "ridge-model": [("ridge-clay", {"target": "clay_pct", "model_name": "Ridge"})],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    frameworks = dict(zip(board["model"], board["framework"]))
+    assert frameworks == {"soil_cnn": "lightning", "Ridge": "sklearn"}
+
+
+def test_a_sub_runs_own_framework_tag_wins(monkeypatch) -> None:
+    """New runs carry it themselves; the model run is only the fallback."""
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [("cnn-model", {"model_name": "soil_cnn", "framework": "lightning"})],
+            "cnn-model": [("cnn-clay", {"target": "clay_pct", "model_name": "soil_cnn", "framework": "lightning"})],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    assert list(board["framework"]) == ["lightning"]
+
+
+def test_a_single_target_model_run_keeps_its_own_tag(monkeypatch) -> None:
+    """With one target there are no sub-runs, so the model run is the row."""
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [("cnn-model", {"target": "clay_pct", "model_name": "soil_cnn", "framework": "lightning"})],
+            "cnn-model": [],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    assert list(board["framework"]) == ["lightning"]
+
+
+def test_the_per_target_sub_runs_are_tagged_with_the_framework(monkeypatch) -> None:
+    """The other half of the fix: new runs no longer need the fallback."""
+    opened = []
+
+    def recording_start_child_run(run_name, tags=None):
+        opened.append((run_name, tags or {}))
+        return nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run")))
+
+    monkeypatch.setattr(mlflow_loggers_module, "start_child_run", recording_start_child_run)
+
+    frame = pd.DataFrame(
+        {
+            "clay_pct": [1.0, 2.0],
+            "ph_water": [7.0, 7.5],
+            "prediction_clay_pct": [1.1, 1.9],
+            "prediction_ph_water": [7.1, 7.4],
+            "target_names": ["clay_pct__ph_water"] * 2,
+        }
+    )
+    ChildRunLogger()._log_per_target_runs(frame, "clay_pct__ph_water", "soil_cnn", lambda *_: None, "lightning")
+
+    assert [tags.get("framework") for _name, tags in opened] == ["lightning", "lightning"]
+    assert [tags["target"] for _name, tags in opened] == ["clay_pct", "ph_water"]

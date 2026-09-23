@@ -80,7 +80,9 @@ class TabularPreprocessor:
 
         X = data[valid_feature_columns]
         categorical_cols = [
-            col for col in self.config.CATEGORICAL_FEATURES if col in X.columns and col not in self.config.EXCLUDE_CATEGORICAL
+            col
+            for col in self.config.CATEGORICAL_FEATURES
+            if col in X.columns and col not in self.config.EXCLUDE_CATEGORICAL
         ]
         # The same check the deep-learning side makes, so a column too empty to fill in stops both
         # families. Numeric columns only: a missing category is a code of its own, not a filled gap.
@@ -146,7 +148,7 @@ class TabularPreprocessor:
 
     def _point_ids(self, data: pd.DataFrame) -> pd.Series:
         """The point id of every row, or its row number when the data has no id column."""
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
+        point_col = self.data_manager.point_id_column()
         if point_col in data.columns:
             return data[point_col]
         # With no id column, row numbers still key the split: both families read the same file in

@@ -69,20 +69,28 @@ def test_a_child_failure_is_raised_rather_than_swallowed():
 
 
 def test_the_cli_model_filters_override_the_config_lists():
-    config = SimpleNamespace(
-        EXPORT_POINT_PREDICTIONS_MODELS=[], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"]
-    )
+    config = SimpleNamespace(EXPORT_POINT_PREDICTIONS_MODELS=[], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"])
     proxy = ep._export_config(config, _args(models="Ridge,XGBoost", skip_models="PLSRegression"))
     assert proxy.EXPORT_POINT_PREDICTIONS_MODELS == ["Ridge", "XGBoost"]
     assert proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS == ["PLSRegression"]
 
 
-def test_the_config_skip_list_survives_when_the_cli_names_none():
-    config = SimpleNamespace(
-        EXPORT_POINT_PREDICTIONS_MODELS=[], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"]
-    )
+def test_the_config_lists_survive_when_the_cli_names_none():
+    """Both filters, not just the skip list: --models used to clear the allowlist on every run."""
+    config = SimpleNamespace(EXPORT_POINT_PREDICTIONS_MODELS=["Ridge"], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"])
     proxy = ep._export_config(config, _args())
+    assert proxy.EXPORT_POINT_PREDICTIONS_MODELS == ["Ridge"]
     assert proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS == ["TabICL"]
+
+
+def test_the_config_allowlist_decides_which_models_are_exported():
+    """The end the allowlist exists for, checked through the gate the logger actually calls."""
+    from yg_eo_soilnet.predictions_export import export_enabled_for
+
+    config = SimpleNamespace(EXPORT_POINT_PREDICTIONS_MODELS=["Ridge"], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=[])
+    proxy = ep._export_config(config, _args())
+    assert export_enabled_for(proxy, "Ridge") is True
+    assert export_enabled_for(proxy, "soil_cnn") is False
 
 
 # --- the drift guard -------------------------------------------------------
@@ -299,14 +307,10 @@ def test_a_model_that_cannot_be_reloaded_says_which_uris_were_tried(monkeypatch)
     import mlflow.sklearn
 
     monkeypatch.setattr(ep, "_run_summary", lambda run_id: {})
-    monkeypatch.setattr(
-        mlflow.sklearn, "load_model", lambda uri: (_ for _ in ()).throw(OSError("not there"))
-    )
+    monkeypatch.setattr(mlflow.sklearn, "load_model", lambda uri: (_ for _ in ()).throw(OSError("not there")))
 
     with pytest.raises(SystemExit, match="runs:/child/"):
-        ep.sklearn_predictor(
-            _run(model_name="Ridge", framework="sklearn", target="clay_pct"), pd.DataFrame()
-        )
+        ep.sklearn_predictor(_run(model_name="Ridge", framework="sklearn", target="clay_pct"), pd.DataFrame())
 
 
 # --- recovering a Lightning ensemble's members ------------------------------
@@ -363,8 +367,8 @@ def test_members_are_matched_by_validation_loss_not_by_position(monkeypatch, tmp
     The two version dirs here are deliberately in the OPPOSITE order to the members, so a matcher
     that paired them by position would get both wrong and one that reads val_loss gets both right.
     """
-    _version_dir(tmp_path, 10, "clay_pct", [0.9, 0.55])   # -> member 1
-    _version_dir(tmp_path, 11, "clay_pct", [0.8, 0.44])   # -> member 0
+    _version_dir(tmp_path, 10, "clay_pct", [0.9, 0.55])  # -> member 1
+    _version_dir(tmp_path, 11, "clay_pct", [0.8, 0.44])  # -> member 0
     monkeypatch.setattr(ep, "_download", lambda run_id, artifact_path: None)
 
     client = _FakeClient(
@@ -379,7 +383,7 @@ def test_members_are_matched_by_validation_loss_not_by_position(monkeypatch, tmp
 
 
 def test_a_version_dir_for_another_target_is_never_a_candidate(monkeypatch, tmp_path):
-    _version_dir(tmp_path, 10, "sand_pct", [0.44])        # same loss, wrong target
+    _version_dir(tmp_path, 10, "sand_pct", [0.44])  # same loss, wrong target
     monkeypatch.setattr(ep, "_download", lambda run_id, artifact_path: None)
 
     client = _FakeClient([_member(0, "m0")], {"m0": [0.44]})
@@ -481,9 +485,7 @@ def test_the_recovered_value_is_the_mean_of_the_members(logger, monkeypatch):
 
     monkeypatch.setattr(sp, "SoilSequencePredictor", _Predictor)
     monkeypatch.setattr(ep, "_restore_lightning_model", lambda ckpt, name, config: object())
-    monkeypatch.setattr(
-        ep, "sequence_bundle_for", lambda name, config, logger: SimpleNamespace(point_ids=list("abcd"))
-    )
+    monkeypatch.setattr(ep, "sequence_bundle_for", lambda name, config, logger: SimpleNamespace(point_ids=list("abcd")))
 
     predict, ids, targets = ep.lightning_ensemble_predictor(
         _run(model_name="soil_cnn", framework="lightning", target="clay_pct"),

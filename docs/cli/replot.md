@@ -33,7 +33,7 @@ Exactly one of `--run-id`, `--parent-run-id` or `--experiment` is required.
 | `--experiment` | - | Redraw every training run in this MLflow experiment, by name or id. |
 | `--config-path` | `configs/main_config.yml` | The main configuration file, read only to find where the runs are recorded. |
 | `--only` | all | Only redraw these kinds, comma-separated: `pred_obs`, `uncertainty`, `cv`, `leaderboard`. |
-| `--since` | - | With `--experiment`, skip runs that started before this date (`YYYY-MM-DD`). **This option currently stops with an error** - see [Known issues](../known-issues.md). |
+| `--since` | - | With `--experiment`, skip runs that started before this date (`YYYY-MM-DD`), read in local time. |
 | `--dry-run` | off | List which runs would be redrawn and which files would be written, without writing. |
 
 ## What it writes

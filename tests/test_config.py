@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ common:
     DATA_FOLDER: base_folder
     STATIC_FEATURES_FILE: base_static.csv
     TARGETS_FILE: base_targets.csv
+    POINT_ID_COLUMN: point_id
     RANDOM_SEED: 1
     TEST_SIZE: 0.3
     DATA_SPEC_PATH: data_spec.yml
@@ -107,9 +109,7 @@ def base_config_paths(tmp_path: Path):
     }
 
 
-def test_config_reads_env_overrides(
-    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict
-) -> None:
+def test_config_reads_env_overrides(monkeypatch: pytest.MonkeyPatch, base_config_paths: dict) -> None:
     monkeypatch.setenv("DATA_FOLDER", "override_folder")
     monkeypatch.setenv("RANDOM_SEED", "7")
     monkeypatch.setenv("TEST_SIZE", "0.25")
@@ -119,6 +119,9 @@ def test_config_reads_env_overrides(
         "CLUSTERING_STRATEGY",
         '{"enabled": true, "class_path": "yg_eo_soilnet.clustering_utils.KMeansClusterStrategy", "params": {"n_clusters": 2}}',
     )
+    # Clustering that the folds actually group by, so this test is about the overrides alone and
+    # not about the warning an ignored clustering raises.
+    monkeypatch.setenv("SPLIT_STRATEGY", "groupkfold")
 
     config = Config(**base_config_paths)
 
@@ -217,6 +220,8 @@ def test_config_reads_temporal_features_from_common_section(tmp_path: Path) -> N
         f"""
 common:
   DATA_FOLDER: {tmp_path}
+  POINT_ID_COLUMN: point_id
+  STATIC_FEATURES_FILE: static.csv
   DATA_SPEC_PATH: data_spec.yml
   SKLEARN_CONFIG_PATH: sklearn.yml
   LIGHTNING_CONFIG_PATH: lightning.yml
@@ -260,6 +265,7 @@ def test_config_resolves_manifest_and_folder_paths_relative_to_data_folder(tmp_p
         f"""
 common:
   DATA_FOLDER: {data_root}
+  POINT_ID_COLUMN: point_id
   DATA_INDEX_MANIFEST: index.json
   STATIC_FEATURES_FOLDER: static_features
   TARGETS_FOLDER: targets
@@ -299,6 +305,8 @@ def test_config_loads_layered_data_spec_and_family_files(tmp_path: Path) -> None
         f"""
 common:
   DATA_FOLDER: {tmp_path}
+  POINT_ID_COLUMN: point_id
+  STATIC_FEATURES_FILE: static.csv
   DATA_SPEC_PATH: data_spec.yml
   SKLEARN_CONFIG_PATH: sklearn.yml
   LIGHTNING_CONFIG_PATH: lightning.yml
@@ -376,6 +384,7 @@ common:
             lightning_registry_path=str(lightning_registry_path),
         )
 
+
 # --- unified data: block ---------------------------------------------------
 
 
@@ -387,6 +396,7 @@ common:
         targets: targets_dir
         timeseries: ts_dir
         manifest: index.json
+    POINT_ID_COLUMN: point_id
     RANDOM_SEED: 1
     DATA_SPEC_PATH: data_spec.yml
     SKLEARN_CONFIG_PATH: sklearn.yml
@@ -435,7 +445,8 @@ def test_legacy_flat_keys_still_resolve_without_a_data_block(base_config_paths: 
 def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths: dict) -> None:
     """config.py used to reassign DATA_FILE = STATIC_FEATURES_FILE after deriving STATIC_CSV_PATH."""
     content = BASE_CONFIG_CONTENT.replace(
-        "    STATIC_FEATURES_FILE: base_static.csv", "    DATA_FILE: base_data.csv\n    STATIC_FEATURES_FILE: base_static.csv"
+        "    STATIC_FEATURES_FILE: base_static.csv",
+        "    DATA_FILE: base_data.csv\n    STATIC_FEATURES_FILE: base_static.csv",
     )
     config = Config(**_write_config(base_config_paths, content))
 
@@ -495,9 +506,7 @@ def test_registry_defaults_are_merged_into_every_entry(base_config_paths: dict) 
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
     assert registry["inheritor"]["modeltype"] == "dl"
-    assert registry["inheritor"]["trainer_args"] == {
-        "max_epochs": 500, "accelerator": "cuda", "deterministic": True
-    }
+    assert registry["inheritor"]["trainer_args"] == {"max_epochs": 500, "accelerator": "cuda", "deterministic": True}
     assert registry["inheritor"]["callbacks"]["checkpoint"]["save_top_k"] == 1
 
 
@@ -505,11 +514,11 @@ def test_an_entry_overriding_one_key_keeps_the_rest_of_the_block(base_config_pat
     """The whole point of merging per key: `max_epochs: 150` must not drop the accelerator."""
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
-    assert registry["overrider"]["trainer_args"] == {
-        "max_epochs": 150, "accelerator": "cuda", "deterministic": True
-    }
+    assert registry["overrider"]["trainer_args"] == {"max_epochs": 150, "accelerator": "cuda", "deterministic": True}
     assert registry["overrider"]["datamodule_init_args"] == {
-        "batch_size": 64, "num_workers": 11, "max_sequence_length": None
+        "batch_size": 64,
+        "num_workers": 11,
+        "max_sequence_length": None,
     }
 
 
@@ -517,9 +526,7 @@ def test_merging_recurses_into_a_callback_group(base_config_paths: dict) -> None
     """`early_stopping: {patience: 3}` keeps monitor and mode rather than replacing the group."""
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
-    assert registry["overrider"]["callbacks"]["early_stopping"] == {
-        "monitor": "val_loss", "mode": "min", "patience": 3
-    }
+    assert registry["overrider"]["callbacks"]["early_stopping"] == {"monitor": "val_loss", "mode": "min", "patience": 3}
 
 
 def test_defaults_is_not_itself_a_registry_entry(base_config_paths: dict) -> None:
@@ -621,10 +628,11 @@ def test_the_same_entry_in_two_files_raises(base_config_paths: dict) -> None:
         Config(**paths)
 
 
-def test_explain_switch_defaults_to_on(base_config_paths: dict) -> None:
+def test_explain_switch_defaults_to_off(base_config_paths: dict) -> None:
+    """Off, like the other two expensive extras, and like every shipped configuration."""
     config = Config(**base_config_paths)
 
-    assert config.EXPLAIN_ENABLED is True
+    assert config.EXPLAIN_ENABLED is False
     assert isinstance(config.EXPLAIN_MAX_SAMPLES, int)
     assert isinstance(config.EXPLAIN_BACKGROUND_SAMPLES, int)
     assert isinstance(config.EXPLAIN_MAX_DISPLAY, int)
@@ -632,9 +640,7 @@ def test_explain_switch_defaults_to_on(base_config_paths: dict) -> None:
     assert config.EXPLAIN_FAIL_ON_ERROR is False
 
 
-def test_explain_switch_honours_an_env_override(
-    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict
-) -> None:
+def test_explain_switch_honours_an_env_override(monkeypatch: pytest.MonkeyPatch, base_config_paths: dict) -> None:
     """_get_config coerces an env override to the type of the DEFAULT.
 
     Declaring EXPLAIN_ENABLED with a bool default is what makes `EXPLAIN_ENABLED=false python
@@ -725,20 +731,18 @@ def test_active_targets_are_declared_as_labels() -> None:
 # --- module paths -----------------------------------------------------------------------------
 
 
-
-
-
 # --- uncertainty interval block ---------------------------------------------------------------
 # The uncertainty interval block: read from the config, legacy spellings included.
 
 
-def _config_with(tmp_path, uncertainty_yaml: str):
+def _config_with(tmp_path, uncertainty_yaml: str, *, data_spec: str = BASE_DATA_SPEC_CONTENT):
     """A real Config over a minimal tree, reusing this file's fixture content.
 
     Building the whole tree matters: Config resolves its sub-configs relative to the main file, so
-    a one-key stub raises before it ever reaches the uncertainty block.
+    a one-key stub raises before it ever reaches the uncertainty block. `data_spec` replaces the
+    column declarations for tests about those.
     """
-    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "data_spec.yml").write_text(data_spec.strip())
     (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
     (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
     (tmp_path / "registry.yml").write_text("enabled: true\n")
@@ -747,12 +751,15 @@ def _config_with(tmp_path, uncertainty_yaml: str):
     config_path = tmp_path / "config.yml"
     config_path.write_text(
         "common:\n"
+        # Every configuration must name its own data; see Config._require.
+        "    DATA_FOLDER: base_folder\n"
+        "    STATIC_FEATURES_FILE: base_static.csv\n"
+        "    POINT_ID_COLUMN: point_id\n"
         "    DATA_SPEC_PATH: data_spec.yml\n"
         "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
         "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
         "    SKLEARN_REGISTRY_PATH: registry.yml\n"
-        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
-        + uncertainty_yaml
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n" + uncertainty_yaml
     )
     return Config(
         config_path=str(config_path),
@@ -762,44 +769,246 @@ def _config_with(tmp_path, uncertainty_yaml: str):
 
 
 def test_the_interval_block_is_read_from_the_config(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         interval:
             method: sigma
             k: 2.0
-""")
+""",
+    )
     assert config.UNCERTAINTY_INTERVAL_METHOD == "sigma"
     assert config.UNCERTAINTY_INTERVAL_K == 2.0
 
 
 def test_a_config_predating_the_interval_block_still_works(tmp_path):
     """`calibration.method` is what configs in the wild set; it must keep resolving."""
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         calibration:
             method: split_conformal
             alpha: 0.10
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
     assert config.UNCERTAINTY_ALPHA == pytest.approx(0.10)
 
 
 def test_the_legacy_none_still_means_none(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         calibration:
             method: none
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "none"
 
 
 def test_the_interval_block_wins_over_the_legacy_key(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         interval:
             method: gaussian
         calibration:
             method: split_conformal
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "gaussian"
 
 
 def test_the_default_is_conformal_when_nothing_is_configured(tmp_path):
     config = _config_with(tmp_path, "")
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
+
+
+# --- a column may not be both a lab column and a category ------------------
+# A lab column is removed from the feature set before the category handling sees it, so a column in
+# both lists reaches no model. That was silent until Config started refusing it.
+
+
+def test_a_column_in_both_label_and_categorical_stops_the_run(tmp_path):
+    with pytest.raises(ValueError) as raised:
+        _config_with(
+            tmp_path,
+            "",
+            data_spec="""
+TARGET_COLUMNS: [clay_pct]
+LABEL_COLUMNS: [clay_pct, texture_20cm]
+CATEGORICAL_FEATURES: [texture_20cm]
+""",
+        )
+
+    message = str(raised.value)
+    assert "texture_20cm" in message
+    assert "LABEL_COLUMNS" in message and "CATEGORICAL_FEATURES" in message
+    # Both ways out are named, because which one is right depends on the column.
+    assert "Remove each one from CATEGORICAL_FEATURES" in message
+
+
+def test_a_category_that_is_not_a_lab_column_is_fine(tmp_path):
+    config = _config_with(
+        tmp_path,
+        "",
+        data_spec="""
+TARGET_COLUMNS: [clay_pct]
+LABEL_COLUMNS: [clay_pct]
+CATEGORICAL_FEATURES: [landform_class]
+""",
+    )
+    assert config.CATEGORICAL_FEATURES == ["landform_class"]
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [CONFIGS_ROOT / "main_config.yml", PROJECT_ROOT / "examples" / "demo_config" / "main_config.yml"],
+    ids=["shipped", "demo"],
+)
+def test_the_shipped_configurations_pass_every_check(config_path):
+    """Both must construct: a check that rejects the project's own configuration is a broken check."""
+    config = Config(config_path=str(config_path))
+    assert not set(config.CATEGORICAL_FEATURES) & set(config.LABEL_COLUMNS)
+
+
+# --- clustering needs the split that builds the clusters -------------------
+# The groups the folds use are written only by a spatial split. With any other strategy the
+# training stopped on a missing key after the data had been loaded.
+
+
+def test_clustering_without_a_spatial_split_stops_the_run(tmp_path):
+    with pytest.raises(ValueError) as raised:
+        _config_with(
+            tmp_path,
+            """    split:
+        strategy: random
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+        )
+
+    message = str(raised.value)
+    assert "CLUSTERING_STRATEGY" in message and "split.strategy" in message
+    assert "spatial_group" in message
+
+
+def test_clustering_with_a_spatial_split_is_fine(tmp_path):
+    config = _config_with(
+        tmp_path,
+        """    split:
+        strategy: spatial_group
+    SPLIT_STRATEGY: groupkfold
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+    )
+    assert config.ENABLE_CLUSTERING is True
+    assert config.SPLIT_HOLDOUT_STRATEGY == "spatial_group"
+
+
+def test_clustering_that_the_folds_ignore_warns_rather_than_stopping(tmp_path):
+    """The milder half: the clusters are built, but plain kfold never groups by them.
+
+    The run works, which is why this warns instead of raising - but the near-duplicate points the
+    clustering exists to keep apart can still land on both sides of a fold.
+    """
+    with pytest.warns(UserWarning, match="SPLIT_STRATEGY"):
+        config = _config_with(
+            tmp_path,
+            """    split:
+        strategy: spatial_group
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+        )
+    assert config.SPLIT_STRATEGY == "kfold"
+
+
+def test_a_random_split_without_clustering_is_fine(tmp_path):
+    config = _config_with(tmp_path, "    split:\n        strategy: random\n")
+    assert config.ENABLE_CLUSTERING is False
+
+
+def test_a_list_of_band_prefixes_generates_one_name_per_prefix(tmp_path):
+    """The other half of the prefix fix: the generated band names, not the column match."""
+    config = _config_with(
+        tmp_path,
+        "",
+        data_spec="""
+TARGET_COLUMNS: [clay_pct]
+existing_hs_features:
+    enabled: true
+    ignore: true
+    prefix: ["S2_", "CLIM_"]
+    band_count: 2
+    band_names: []
+""",
+    )
+    assert config.IGNORE_BANDS == ["S2_1", "S2_2", "CLIM_1", "CLIM_2"]
+
+
+# --- the settings that name your own data ----------------------------------
+# These have no sensible fallback. The values that used to stand in for them named a retired
+# dataset, so a config that omitted one looked for a folder that has not existed for years.
+
+
+@pytest.mark.parametrize(
+    ("dropped", "named"),
+    [
+        ("    DATA_FOLDER: base_folder\n", "common.data.root"),
+        ("    POINT_ID_COLUMN: point_id\n", "POINT_ID_COLUMN"),
+        ("    STATIC_FEATURES_FILE: base_static.csv\n", "common.data.static"),
+    ],
+    ids=["root", "point-id", "static"],
+)
+def test_a_setting_that_names_your_data_must_be_declared(tmp_path, dropped, named):
+    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
+    (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
+    (tmp_path / "registry.yml").write_text("enabled: true\n")
+    (tmp_path / "lightning_registry.yml").write_text(MOCK_LIGHTNING_REGISTRY)
+
+    full = (
+        "common:\n"
+        "    DATA_FOLDER: base_folder\n"
+        "    STATIC_FEATURES_FILE: base_static.csv\n"
+        "    POINT_ID_COLUMN: point_id\n"
+        "    DATA_SPEC_PATH: data_spec.yml\n"
+        "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
+        "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
+        "    SKLEARN_REGISTRY_PATH: registry.yml\n"
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
+    )
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(full.replace(dropped, ""))
+
+    with pytest.raises(ValueError, match=re.escape(named)):
+        Config(
+            config_path=str(config_path),
+            registry_path=str(tmp_path / "registry.yml"),
+            lightning_registry_path=str(tmp_path / "lightning_registry.yml"),
+        )
+
+
+def test_the_date_column_is_required_only_with_a_time_series(tmp_path):
+    """A covariates-only run has no date column to name, so it must not be asked for one."""
+    without = _config_with(tmp_path, "    temporal:\n        enabled: false\n")
+    assert without.TIME_COLUMN is None
+
+    with pytest.raises(ValueError, match="temporal.time_column"):
+        _config_with(
+            tmp_path,
+            "    data:\n"
+            "        root: base_folder\n"
+            "        static: base_static.csv\n"
+            "        timeseries: ts.csv\n"
+            "    temporal:\n"
+            "        enabled: true\n",
+        )

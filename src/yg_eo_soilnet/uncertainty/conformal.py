@@ -44,7 +44,7 @@ class ConformalCalibrator:
         How many held-back points it was fitted on.
     target : str
         Which target it belongs to.
-        """
+    """
 
     q: float
     alpha: float
@@ -59,7 +59,7 @@ class ConformalCalibrator:
         """The share of measurements this interval claims to contain.
 
         Compared against the share that actually fall inside, which is what ``coverage_error`` reports.
-                """
+        """
         return 1.0 - float(self.alpha)
 
     def intervals(self, mean: Any, sigma: Any) -> tuple[np.ndarray, np.ndarray]:
@@ -86,7 +86,7 @@ class ConformalCalibrator:
 
         Everything it holds is a plain number and all of it is written into
         ``uncertainty/uncertainty_summary.json``, so a finished run carries enough to rebuild it exactly.
-                """
+        """
         if not isinstance(payload, dict) or "conformal_q" not in payload:
             return None
         try:
@@ -127,7 +127,7 @@ def fit_conformal(
     -------
     ConformalCalibrator or None
         None when there are too few usable points to fit one.
-        """
+    """
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must be in (0, 1); got {alpha}")
 
@@ -144,9 +144,7 @@ def fit_conformal(
     else:
         sigma_array = np.asarray(sigma_calib, dtype=float).reshape(-1)
         if sigma_array.shape != y_array.shape:
-            raise ValueError(
-                f"sigma_calib has {sigma_array.shape[0]} rows but y_calib has {y_array.shape[0]}."
-            )
+            raise ValueError(f"sigma_calib has {sigma_array.shape[0]} rows but y_calib has {y_array.shape[0]}.")
 
     finite = np.isfinite(y_array) & np.isfinite(mean_array) & np.isfinite(sigma_array)
     y_array, mean_array, sigma_array = y_array[finite], mean_array[finite], sigma_array[finite]
@@ -189,7 +187,7 @@ def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
 
     Slightly beyond the plain quantile, because the promise is about where a *new* point falls among
     the calibration points, not among themselves.
-        """
+    """
     n_scores = int(scores.shape[0])
     rank = math.ceil((n_scores + 1) * (1.0 - alpha))
     if rank > n_scores:

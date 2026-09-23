@@ -52,7 +52,7 @@ def column_name(stem: str, target_name: Optional[str] = None, *, multi_target: b
     'prediction_std'
     >>> column_name("prediction_std", "clay_pct", multi_target=True)
     'prediction_std_clay_pct'
-        """
+    """
     if not multi_target or target_name is None:
         return stem
     return f"{stem}_{target_name}"
@@ -68,7 +68,7 @@ def is_prediction_column(column_name_value: Any) -> bool:
     --------
     >>> is_prediction_column("prediction_clay_pct"), is_prediction_column("prediction_std")
     (True, False)
-        """
+    """
     name = str(column_name_value)
     if not name.startswith("prediction"):
         return False
@@ -85,7 +85,7 @@ def interval_columns(
 
     None rather than an error: most runs have no uncertainty, and every caller would otherwise have to
     check first.
-        """
+    """
     lower = _first_present(frame, LOWER, target_name)
     upper = _first_present(frame, UPPER, target_name)
     if lower is None or upper is None:
@@ -104,7 +104,7 @@ def _first_present(frame: pd.DataFrame, stem: str, target_name: Optional[str]) -
 
     Suffixed first: a single target's table is a copy of the whole run's, so it carries every target's
     columns and the plain name may be missing.
-        """
+    """
     if target_name:
         suffixed = f"{stem}_{target_name}"
         if suffixed in frame.columns:

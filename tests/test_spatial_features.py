@@ -49,9 +49,7 @@ def _batch(rows: int = 5, *, coords: bool = True, length: int = 4) -> dict:
         "x_categorical": torch.zeros(rows, 0, dtype=torch.long),
         "sequences": {"s2": torch.randn(rows, length, 3, generator=generator)},
         "sequence_mask": {"s2": torch.ones(rows, length, dtype=torch.bool)},
-        "sequence_time": {
-            "s2": torch.tensor([[2020.1, 2020.5, 2021.2, 2021.8]] * rows, dtype=torch.float64)
-        },
+        "sequence_time": {"s2": torch.tensor([[2020.1, 2020.5, 2021.2, 2021.8]] * rows, dtype=torch.float64)},
         "sequence_validity": {"s2": torch.ones(rows, length, 3, dtype=torch.bool)},
     }
     if coords:
@@ -73,9 +71,7 @@ def test_coordinates_off_adds_no_parameters_and_no_state_dict_keys() -> None:
     explicit_zero = SoilCNNLightningModule(**MODEL_ARGS, coord_dim=0)
 
     assert set(off.state_dict()) == set(explicit_zero.state_dict())
-    assert sum(p.numel() for p in off.parameters()) == sum(
-        p.numel() for p in explicit_zero.parameters()
-    )
+    assert sum(p.numel() for p in off.parameters()) == sum(p.numel() for p in explicit_zero.parameters())
     assert not [key for key in off.state_dict() if "coord" in key]
     assert off.coordinate_output_dim == 0
     assert off.has_coordinates is False
@@ -113,9 +109,7 @@ def test_coordinates_widen_the_fusion_by_exactly_the_branch_output() -> None:
 @pytest.mark.parametrize("num_frequencies", [1, 3, 6])
 @pytest.mark.parametrize("include_input", [True, False])
 def test_output_dim_is_the_documented_arithmetic(num_frequencies: int, include_input: bool) -> None:
-    encoder = HarmonicPositionEncoder(
-        num_frequencies=num_frequencies, include_input=include_input
-    )
+    encoder = HarmonicPositionEncoder(num_frequencies=num_frequencies, include_input=include_input)
     expected = 2 * (2 * num_frequencies + (1 if include_input else 0))
 
     assert encoder.output_dim == expected
@@ -273,9 +267,7 @@ def test_the_module_survives_a_weights_only_checkpoint_round_trip(tmp_path: Path
     checkpoint unloadable under torch.load's weights_only=True default."""
     import lightning.pytorch as pl
 
-    model = SoilCNNLightningModule(
-        **MODEL_ARGS, coord_dim=2, harmonic_num_frequencies=4, harmonic_hidden_dims=[5]
-    )
+    model = SoilCNNLightningModule(**MODEL_ARGS, coord_dim=2, harmonic_num_frequencies=4, harmonic_hidden_dims=[5])
     path = tmp_path / "model.ckpt"
     pl.Trainer(logger=False, enable_checkpointing=False).strategy.connect(model)
     torch.save({"state_dict": model.state_dict(), "hyper_parameters": dict(model.hparams)}, path)
@@ -341,9 +333,7 @@ def test_the_flag_off_leaves_no_coordinates_on_the_bundle(tmp_path: Path, logger
     assert np.asarray(bundle.coords).shape[1] == 0
 
 
-def test_the_flag_on_carries_coordinates_without_making_them_features(
-    tmp_path: Path, logger
-) -> None:
+def test_the_flag_on_carries_coordinates_without_making_them_features(tmp_path: Path, logger) -> None:
     """The whole point: they travel, and they are still not predictors. lat/lon must not appear
     among the continuous covariates that reach TabularStaticEncoder."""
     bundle = _bundle(tmp_path, logger, USE_HARMONIC_COORDS=True)
@@ -354,30 +344,21 @@ def test_the_flag_on_carries_coordinates_without_making_them_features(
     assert "lon" not in bundle.static_feature_names
 
 
-def test_a_point_with_no_coordinate_is_dropped_only_when_the_flag_is_on(
-    tmp_path: Path, logger
-) -> None:
+def test_a_point_with_no_coordinate_is_dropped_only_when_the_flag_is_on(tmp_path: Path, logger) -> None:
     """There is no honest fill for a coordinate, so the row goes - but only when it is being used.
     With the flag off the same point must survive, or turning the feature off would not restore the
     dataset it was meant to restore."""
-    csv_kwargs = {
-        "coords": ([31.0, np.nan, 33.0, 34.0, 35.0, 36.0], [-8.0, -7.0, -6.0, -5.0, -4.0, -3.0])
-    }
+    csv_kwargs = {"coords": ([31.0, np.nan, 33.0, 34.0, 35.0, 36.0], [-8.0, -7.0, -6.0, -5.0, -4.0, -3.0])}
 
     assert _bundle(tmp_path / "off", logger, csv_kwargs=csv_kwargs).num_points == 6
-    assert (
-        _bundle(tmp_path / "on", logger, csv_kwargs=csv_kwargs, USE_HARMONIC_COORDS=True).num_points
-        == 5
-    )
+    assert _bundle(tmp_path / "on", logger, csv_kwargs=csv_kwargs, USE_HARMONIC_COORDS=True).num_points == 5
 
 
 def test_the_row_rule_and_the_split_population_agree(tmp_path: Path, logger) -> None:
     """usable_point_ids feeds the unified splitter, and build() produces what actually trains. If
     they disagreed the splitter would assign points the builder then deletes, silently shrinking
     the run's population under population_policy=intersect."""
-    csv_kwargs = {
-        "coords": ([31.0, np.nan, 33.0, 34.0, 35.0, 36.0], [-8.0, -7.0, -6.0, -5.0, -4.0, -3.0])
-    }
+    csv_kwargs = {"coords": ([31.0, np.nan, 33.0, 34.0, 35.0, 36.0], [-8.0, -7.0, -6.0, -5.0, -4.0, -3.0])}
     static_path, timeseries_path = _write_csvs(tmp_path, **csv_kwargs)
     config = _config(tmp_path, static_path, timeseries_path, USE_HARMONIC_COORDS=True)
     builder = SoilSequenceBuilder(config, logger, DataManager(config, logger))
@@ -409,9 +390,7 @@ def test_coordinates_are_normalized_onto_the_train_bounding_box(tmp_path: Path, 
     assert pytest.approx(coords.max(axis=0).tolist()) == [1.0, 1.0]
 
 
-def test_the_box_is_fitted_on_train_alone_so_a_test_point_may_fall_outside(
-    tmp_path: Path, logger
-) -> None:
+def test_the_box_is_fitted_on_train_alone_so_a_test_point_may_fall_outside(tmp_path: Path, logger) -> None:
     """Not clipped: collapsing everything beyond the edge onto the boundary would make a distant
     point indistinguishable from one just outside."""
     datamodule = SoilSequenceDataModule(
@@ -427,9 +406,7 @@ def test_the_box_is_fitted_on_train_alone_so_a_test_point_may_fall_outside(
     assert torch.isfinite(everything).all()
 
 
-def test_a_degenerate_axis_becomes_a_constant_rather_than_an_infinity(
-    tmp_path: Path, logger
-) -> None:
+def test_a_degenerate_axis_becomes_a_constant_rather_than_an_infinity(tmp_path: Path, logger) -> None:
     """Every training point on one meridian carries no east-west information at all. Zero is the
     honest answer; dividing by the zero span would poison every downstream channel."""
     bundle = _bundle(
@@ -446,9 +423,7 @@ def test_a_degenerate_axis_becomes_a_constant_rather_than_an_infinity(
     assert np.allclose(coords[:, 1], 0.0)
 
 
-def test_a_single_point_request_is_placed_on_the_training_box_not_on_itself(
-    tmp_path: Path, logger
-) -> None:
+def test_a_single_point_request_is_placed_on_the_training_box_not_on_itself(tmp_path: Path, logger) -> None:
     """The failure the stored bounding box exists to prevent.
 
     A serving batch can be one point. Re-fitting a box on it gives a degenerate span, so that point
@@ -503,9 +478,7 @@ def test_an_empty_group_changes_nothing(tmp_path: Path, logger) -> None:
     assert "patch_variance_b04" in bundle.static_feature_names
 
 
-def test_the_group_on_keeps_the_columns_as_ordinary_continuous_features(
-    tmp_path: Path, logger
-) -> None:
+def test_the_group_on_keeps_the_columns_as_ordinary_continuous_features(tmp_path: Path, logger) -> None:
     """Named, but not moved. They must still reach TabularStaticEncoder inside x_static, with the
     width and the standardization they would have had unnamed."""
     plain = _bundle(tmp_path / "plain", logger)
@@ -519,9 +492,7 @@ def test_the_group_on_keeps_the_columns_as_ordinary_continuous_features(
 def test_the_group_off_removes_the_columns(tmp_path: Path, logger) -> None:
     """The ablation. Naming a column makes it switchable, which necessarily means the switch can
     take away a column that would otherwise be a feature."""
-    bundle = _bundle(
-        tmp_path, logger, CONTEXT_FEATURES=CONTEXT, USE_CONTEXT_FEATURES=False
-    )
+    bundle = _bundle(tmp_path, logger, CONTEXT_FEATURES=CONTEXT, USE_CONTEXT_FEATURES=False)
 
     assert "patch_variance_b04" not in bundle.static_feature_names
     assert bundle.context_feature_names == []
@@ -529,9 +500,7 @@ def test_the_group_off_removes_the_columns(tmp_path: Path, logger) -> None:
 
 def test_group_membership_follows_the_frame_not_the_config_order(tmp_path: Path, logger) -> None:
     """The names index positions in static_features, so declaration order must not leak in."""
-    bundle = _bundle(
-        tmp_path, logger, CONTEXT_FEATURES=["patch_variance_b04", "static_1"]
-    )
+    bundle = _bundle(tmp_path, logger, CONTEXT_FEATURES=["patch_variance_b04", "static_1"])
     positions = [bundle.static_feature_names.index(name) for name in bundle.context_feature_names]
 
     assert positions == sorted(positions)
@@ -542,9 +511,7 @@ def test_an_unknown_context_column_is_refused(tmp_path: Path, logger) -> None:
         _bundle(tmp_path, logger, CONTEXT_FEATURES=["no_such_column"])
 
 
-def test_a_context_column_something_else_drops_is_refused_distinctly(
-    tmp_path: Path, logger
-) -> None:
+def test_a_context_column_something_else_drops_is_refused_distinctly(tmp_path: Path, logger) -> None:
     """Present but filtered out elsewhere. A different message, because the fix is elsewhere too."""
     with pytest.raises(ValueError, match="present but not continuous features"):
         _bundle(
@@ -559,9 +526,7 @@ def test_a_context_column_something_else_drops_is_refused_distinctly(
 def test_the_group_reaches_the_model_as_its_own_attribution_block(tmp_path: Path, logger) -> None:
     """It rides attach_preprocessing_state, the channel static_feature_names already uses, so it
     lands in the checkpoint without becoming a hyperparameter."""
-    datamodule = SoilSequenceDataModule(
-        _bundle(tmp_path, logger, CONTEXT_FEATURES=CONTEXT), batch_size=6
-    )
+    datamodule = SoilSequenceDataModule(_bundle(tmp_path, logger, CONTEXT_FEATURES=CONTEXT), batch_size=6)
     datamodule.setup("fit")
     model = SoilCNNLightningModule(
         **{
@@ -596,9 +561,7 @@ def test_the_context_group_adds_no_parameters(tmp_path: Path, logger) -> None:
 
 def test_both_features_on_train_together(tmp_path: Path, logger) -> None:
     """Coordinates and the context group are independent switches; the run must survive both."""
-    bundle = _bundle(
-        tmp_path, logger, USE_HARMONIC_COORDS=True, CONTEXT_FEATURES=CONTEXT
-    )
+    bundle = _bundle(tmp_path, logger, USE_HARMONIC_COORDS=True, CONTEXT_FEATURES=CONTEXT)
     datamodule = SoilSequenceDataModule(bundle, batch_size=3, target_transform="log1p")
     datamodule.setup("fit")
     model = SoilCNNLightningModule(
@@ -620,6 +583,5 @@ def test_both_features_on_train_together(tmp_path: Path, logger) -> None:
     assert torch.isfinite(loss)
     assert model.has_coordinates
     assert any(
-        parameter.grad is not None and float(parameter.grad.abs().sum()) > 0
-        for parameter in model.fusion.parameters()
+        parameter.grad is not None and float(parameter.grad.abs().sum()) > 0 for parameter in model.fusion.parameters()
     )

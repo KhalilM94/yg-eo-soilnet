@@ -31,7 +31,7 @@ class SoilSequencePredictor:
     >>> predictions = SoilSequencePredictor(model).predict(bundle)           # doctest: +SKIP
     >>> predictions.shape                                                    # doctest: +SKIP
     (300, 3)
-        """
+    """
 
     def __init__(self, model, preprocessing_state: Mapping[str, Any] | None = None):
         """Hold the model and read the input statistics out of its checkpoint."""
@@ -59,7 +59,7 @@ class SoilSequencePredictor:
 
         Read from the saved weights rather than from the settings, because the weights are what a restored
         model always carries.
-                """
+        """
         return bool(getattr(self.model, "predict_variance", False)) or bool(
             getattr(self.model, "head_predicts_variance", False)
         )
@@ -82,7 +82,7 @@ class SoilSequencePredictor:
         Returns
         -------
         numpy.ndarray of shape (n_points, n_targets)
-                """
+        """
         return self.predict_with_uncertainty(bundle, batch_size=batch_size, **datamodule_kwargs)[0]
 
     @torch.no_grad()
@@ -100,7 +100,7 @@ class SoilSequencePredictor:
         predictions : numpy.ndarray
         sigma : numpy.ndarray or None
             None unless the model has a :term:`variance head`. Both in the target's own units.
-                """
+        """
         bundle = SoilSequenceBundle.from_mapping(bundle)
         if bundle.num_points == 0:
             empty = np.empty((0, int(getattr(self.model, "target_dim", 1))), dtype=np.float64)

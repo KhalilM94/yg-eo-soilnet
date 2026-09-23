@@ -162,9 +162,7 @@ def test_an_infrastructure_key_the_registry_omits_is_dropped():
 
 
 def test_tuned_model_values_survive_the_infrastructure_restore():
-    spec = build_tuned_spec(
-        REGISTRY_ENTRY, {"model.dropout": 0.35, "datamodule.num_workers": 4}, OBJECTIVE
-    )
+    spec = build_tuned_spec(REGISTRY_ENTRY, {"model.dropout": 0.35, "datamodule.num_workers": 4}, OBJECTIVE)
 
     assert spec["init_args"]["dropout"] == 0.35
     assert spec["datamodule_init_args"]["num_workers"] == 11
@@ -262,9 +260,7 @@ def test_a_reranked_export_carries_the_expected_value_and_the_winner(tmp_path):
         overrides={"model.dropout": 0.42},
         values=[0.51, 0.53],
     )
-    path = export_best_config(
-        study, "fake_entry", context.registry_entry, OBJECTIVE, tmp_path / "t.yml", rerank=winner
-    )
+    path = export_best_config(study, "fake_entry", context.registry_entry, OBJECTIVE, tmp_path / "t.yml", rerank=winner)
 
     header = path.read_text()
     assert "reranked" in header
@@ -281,9 +277,7 @@ def test_a_reranked_export_flags_a_trial_that_did_not_reproduce(tmp_path):
 
     study, context = _study_with_a_best_trial()
     winner = RerankResult(trial_number=1, original_value=0.80, overrides={}, values=[0.20, 0.22])
-    path = export_best_config(
-        study, "fake_entry", context.registry_entry, OBJECTIVE, tmp_path / "t.yml", rerank=winner
-    )
+    path = export_best_config(study, "fake_entry", context.registry_entry, OBJECTIVE, tmp_path / "t.yml", rerank=winner)
 
     assert "WARNING" in path.read_text()
     assert "does not reproduce the trial" in path.read_text()
@@ -405,9 +399,7 @@ def test_study_state_distinguishes_a_new_study_from_a_resumed_one(tmp_path):
 
     _study_with_a_best_trial(values=(0.3, 0.8), storage=storage, name="counted")
 
-    assert study_state(create_or_load_study(_space(), "counted", storage)) == (
-        "(resuming, 2 trials on record)"
-    )
+    assert study_state(create_or_load_study(_space(), "counted", storage)) == ("(resuming, 2 trials on record)")
 
 
 def test_reset_deletes_the_study_so_the_next_run_starts_clean(tmp_path):

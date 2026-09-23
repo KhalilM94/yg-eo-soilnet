@@ -32,7 +32,7 @@ class UnrecoverableAcceleratorError(RuntimeError):
 
     Kept apart from an ordinary trial failure on purpose: a bad corner of the search space should cost
     one trial, while a dead GPU should stop the study rather than let it record hundreds of failures.
-        """
+    """
 
 
 @dataclass
@@ -47,7 +47,8 @@ class TrialResult:
         How many epochs it ran.
     pruned : bool
         Whether it was abandoned early as hopeless.
-        """
+    """
+
     value: float
     best_epoch: int | None
     epochs_run: int
@@ -58,7 +59,7 @@ def cuda_context_is_dead() -> bool:
 
     Asked rather than guessed from the error message, which names whatever call came next rather than
     the one that failed.
-        """
+    """
     torch = sys.modules.get("torch")
     if torch is None or not torch.cuda.is_initialized():
         return False
@@ -74,7 +75,7 @@ def raise_if_accelerator_is_dead(exc: BaseException, trial_number: int) -> None:
 
     Running out of memory needs nothing special: it leaves the GPU usable, so the trial fails and the
     study carries on.
-        """
+    """
     if not cuda_context_is_dead():
         return
     raise UnrecoverableAcceleratorError(
@@ -89,7 +90,7 @@ def release_dataloader_workers() -> None:
 
     They are not released on their own, and a few hundred trials would otherwise leave hundreds of
     processes behind.
-        """
+    """
     gc.collect()
     torch = sys.modules.get("torch")
     if torch is not None and torch.cuda.is_initialized():
@@ -119,7 +120,8 @@ class TrialRunner:
         Which score to watch, and whether lower or higher is better.
     extra_callbacks : list, optional
         Anything extra to attach to the training, such as the progress display.
-        """
+    """
+
     def __init__(self, objective: Objective, *, logger=None, fail_fast: bool = False, extra_callbacks=None):
         """Hold what to watch and anything extra to attach to each trial's training."""
         self.objective = objective
@@ -160,7 +162,7 @@ class TrialRunner:
         ------
         UnrecoverableAcceleratorError
             If the GPU has died, so the study can stop rather than fail every remaining trial.
-                """
+        """
         pruning_callback = OptunaPruningCallback(
             trial, monitor=self.objective.metric, mode=self.objective.mode, report=report
         )

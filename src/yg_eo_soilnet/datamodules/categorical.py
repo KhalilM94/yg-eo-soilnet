@@ -135,9 +135,7 @@ class CategoricalEncoder:
         feature_names = [str(name) for name in feature_names]
         vocabularies = [[str(category) for category in vocabulary] for vocabulary in vocabularies]
         if len(feature_names) != len(vocabularies):
-            raise ValueError(
-                f"Got {len(feature_names)} feature name(s) but {len(vocabularies)} vocabulary/ies"
-            )
+            raise ValueError(f"Got {len(feature_names)} feature name(s) but {len(vocabularies)} vocabulary/ies")
 
         encoder = cls()
         encoder._feature_names = feature_names
@@ -197,9 +195,7 @@ class CategoricalEncoder:
 
         for column_index in range(matrix.shape[1]):
             observed = {
-                label
-                for label in (_normalize_label(cell) for cell in matrix[:, column_index])
-                if label is not None
+                label for label in (_normalize_label(cell) for cell in matrix[:, column_index]) if label is not None
             }
             # Sorted, so the numbering depends on which labels appeared and not on the order the
             # rows arrived in.
@@ -275,10 +271,7 @@ class CategoricalEncoder:
         codes = np.asarray(codes)
         if codes.size == 0:
             return {name: 0.0 for name in self._feature_names}
-        return {
-            name: float((codes[:, index] == OOV_INDEX).mean())
-            for index, name in enumerate(self._feature_names)
-        }
+        return {name: float((codes[:, index] == OOV_INDEX).mean()) for index, name in enumerate(self._feature_names)}
 
     def summary(self) -> str:
         """One line naming each category column and how many labels it has."""
@@ -356,9 +349,7 @@ def resolve_categorical_columns(
     # allowed, unlike the two cases above, but the model will not see the column.
     withheld = [column for column in declared if column not in categorical_columns]
     if withheld:
-        logger.info(
-            f"Declared categorical feature(s) not in the model's feature set: {', '.join(withheld)}"
-        )
+        logger.info(f"Declared categorical feature(s) not in the model's feature set: {', '.join(withheld)}")
 
     return FeatureBlocks(continuous_columns=continuous_columns, categorical_columns=categorical_columns)
 

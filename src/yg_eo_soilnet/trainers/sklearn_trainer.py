@@ -9,7 +9,7 @@ from typing import Optional, List, Dict
 import traceback
 
 from yg_eo_soilnet.logger import ChildRunLogger, TrainingLogger
-from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import (CVSplitter, PipelineBuilder, TargetNanFilter)
+from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import CVSplitter, PipelineBuilder, TargetNanFilter
 from yg_eo_soilnet.targets import split_target_names
 from yg_eo_soilnet.tracking import start_child_run
 from yg_eo_soilnet.uncertainty import (
@@ -31,6 +31,7 @@ from yg_eo_soilnet.utils import LogTransformer
 #: Tag marking a sub-run as one :term:`ensemble` member rather than one target's results. The
 #: leaderboard reads it, or it would list five members in place of the model.
 MEMBER_RUN_KIND = "ensemble_member"
+
 
 class ModelTrainer:
     """Train every scikit-learn model switched on, one :term:`target group` at a time.
@@ -70,11 +71,11 @@ class ModelTrainer:
         config,
         columns_to_transform: Optional[List[str]] = None,
         enable_clustering: bool = False,
-        split_strategy: str = 'kfold',
+        split_strategy: str = "kfold",
         seed: int = 42,
         n_splits: int = 5,
-        logger= None,
-        tuning_verbose: int = 0
+        logger=None,
+        tuning_verbose: int = 0,
     ):
         self.config = config
         self.columns_to_transform = columns_to_transform or []
@@ -86,14 +87,14 @@ class ModelTrainer:
             self.logger = logger
         else:
             self.logger = TrainingLogger(
-                enable_file_logging=getattr(config, 'SKLEARN_FILE_LOGGING_ENABLED', True),
+                enable_file_logging=getattr(config, "SKLEARN_FILE_LOGGING_ENABLED", True),
             ).get_logger()
         self.tuning_verbose = tuning_verbose
         self.pipeline_builder = PipelineBuilder(
             tree_categorical_encoding=getattr(config, "TREE_CATEGORICAL_ENCODING", "ordinal"),
             tree_onehot_max_categories=getattr(config, "TREE_ONEHOT_MAX_CATEGORIES", None),
         )
-        
+
         self.log_transformer = LogTransformer()
 
     def train(
@@ -102,7 +103,7 @@ class ModelTrainer:
         data: Dict,
         model_pipelines: Dict[str, Dict],
         targets: Optional[list] = None,
-        ):
+    ):
         """Train every model in ``model_pipelines`` for one :term:`target group`.
 
         Each model is trained inside a sub-run named ``<target group>_<model>``. A model that fails
@@ -138,15 +139,15 @@ class ModelTrainer:
         # Decided once for every model here, not per model: two models on one leaderboard must
         # have been fitted on the same rows for their scores to be comparable.
         fit_pool, calibration_data = self._resolve_fit_pool(data)
-        X_train = fit_pool['X']
-        X_train = X_train.astype({col: 'float64' for col in X_train.select_dtypes(include=['int64', 'int32']).columns})
+        X_train = fit_pool["X"]
+        X_train = X_train.astype({col: "float64" for col in X_train.select_dtypes(include=["int64", "int32"]).columns})
         # One target stays a single column; several give the table a multi-target model needs.
-        y_train = self._select_targets(fit_pool['y'], target_names)
-        X_test = data['X_test']
+        y_train = self._select_targets(fit_pool["y"], target_names)
+        X_test = data["X_test"]
         # Read from the test table itself: the training one has already been converted.
-        X_test = X_test.astype({col: 'float64' for col in X_test.select_dtypes(include=['int64', 'int32']).columns})
-        y_test = self._select_targets(data['y_test'], target_names)
-        groups_train = data['groups_train'] if self.enable_clustering else None
+        X_test = X_test.astype({col: "float64" for col in X_test.select_dtypes(include=["int64", "int32"]).columns})
+        y_test = self._select_targets(data["y_test"], target_names)
+        groups_train = data["groups_train"] if self.enable_clustering else None
 
         X_train, y_train, groups_train = TargetNanFilter().transform(X_train, y_train, groups_train)
 
@@ -158,12 +159,12 @@ class ModelTrainer:
         # The same filter as the other splits, so the number of calibration rows reported is the
         # number actually used.
         if calibration_data is not None:
-            X_calib = calibration_data['X'].astype(
-                {col: 'float64' for col in calibration_data['X'].select_dtypes(include=['int64', 'int32']).columns}
+            X_calib = calibration_data["X"].astype(
+                {col: "float64" for col in calibration_data["X"].select_dtypes(include=["int64", "int32"]).columns}
             )
-            y_calib = self._select_targets(calibration_data['y'], target_names)
+            y_calib = self._select_targets(calibration_data["y"], target_names)
             X_calib, y_calib, _ = TargetNanFilter().transform(X_calib, y_calib)
-            calibration_data = {'X': X_calib, 'y': y_calib}
+            calibration_data = {"X": X_calib, "y": y_calib}
 
         min_feature_count = int(getattr(self.config, "MIN_FEATURE_COUNT", 10))
         min_valid_rows = max(5, min_feature_count, int(X_train.shape[1]))
@@ -172,7 +173,7 @@ class ModelTrainer:
                 f"Target {target} has only {len(y_train)} valid training rows after NaN filtering; "
                 f"minimum recommended is {min_valid_rows} for {X_train.shape[1]} features."
             )
-        if y_test is not None and hasattr(y_test, 'empty') and not y_test.empty and len(y_test) < min_valid_rows:
+        if y_test is not None and hasattr(y_test, "empty") and not y_test.empty and len(y_test) < min_valid_rows:
             self.logger.warning(
                 f"Target {target} has only {len(y_test)} valid test rows after NaN filtering; "
                 f"minimum recommended is {min_valid_rows} for {X_train.shape[1]} features."
@@ -181,17 +182,14 @@ class ModelTrainer:
         # Every point, for the per-point export. Points whose target was never measured are kept:
         # they can still be predicted, and the export is meant to be complete.
         export_data = None
-        if data.get('X_all') is not None and data.get('point_ids') is not None:
-            X_all = data['X_all']
+        if data.get("X_all") is not None and data.get("point_ids") is not None:
+            X_all = data["X_all"]
             export_data = {
-                'X': X_all.astype(
-                    {col: 'float64' for col in X_all.select_dtypes(include=['int64', 'int32']).columns}
-                ),
-                'point_ids': data['point_ids'],
+                "X": X_all.astype({col: "float64" for col in X_all.select_dtypes(include=["int64", "int32"]).columns}),
+                "point_ids": data["point_ids"],
             }
 
         if not self._should_skip_target(y_train, y_test, target):
-
             # The same for every target in the group; a mixed group was refused above.
             is_log_target = target_names[0] in self.columns_to_transform
             mlflow_logger = ChildRunLogger()
@@ -276,14 +274,8 @@ class ModelTrainer:
         if modeltype == "ml":
             is_tree_model = self.pipeline_builder._is_tree_based_model(model)
             categorical_encoding = "ordinal" if is_tree_model else "onehot"
-            categorical_cols = [
-                col for col in self.config.CATEGORICAL_FEATURES
-                if col in X_train.columns
-            ]
-            numeric_cols = [
-                col for col in X_train.columns
-                if col not in categorical_cols
-            ]
+            categorical_cols = [col for col in self.config.CATEGORICAL_FEATURES if col in X_train.columns]
+            numeric_cols = [col for col in X_train.columns if col not in categorical_cols]
             # Fill gaps, scale, encode categories, then the model - all as one object.
             pipeline = self.pipeline_builder.build(
                 model,
@@ -294,20 +286,18 @@ class ModelTrainer:
 
             # A logged target wraps the model one layer deeper, so the grid's names follow.
             if is_log_target and bool(params):
-                params = {
-                    k.replace("model__", "model__regressor__") : v
-                    for k, v in params.items()
-                }
+                params = {k.replace("model__", "model__regressor__"): v for k, v in params.items()}
             search = GridSearchCV(
                 estimator=clone(pipeline),
-                param_grid= params if params is not None else {},
-                cv=splits, refit=False,
-                scoring= "neg_root_mean_squared_error",
+                param_grid=params if params is not None else {},
+                cv=splits,
+                refit=False,
+                scoring="neg_root_mean_squared_error",
                 # Every processor by default; a model that loads a large file per process
                 # limits this in its entry.
                 n_jobs=int(config.get("search_n_jobs", -1)),
                 return_train_score=True,
-                verbose=self.tuning_verbose
+                verbose=self.tuning_verbose,
             )
 
             search.fit(X_train, y_train)
@@ -339,7 +329,7 @@ class ModelTrainer:
 
             if not any(cv_results.get("params", [])):
                 cv_results["params"] = [best_model.get_params()]
-            #Evaluate model
+            # Evaluate model
             param_names = list(params.keys()) if params else []
             plot_func = {}
             if len(param_names) > 1:
@@ -370,7 +360,7 @@ class ModelTrainer:
                     "categorical_encoding": categorical_encoding,
                 },
                 export_data=export_data,
-                )
+            )
         else:
             raise ValueError(f"Unknown modeltype: {modeltype}")
 
@@ -396,22 +386,20 @@ class ModelTrainer:
         calibration_data : dict or None
             The rows reserved for calibration, if any.
         """
-        default_pool = {'X': data['X_train'], 'y': data['y_train']}
+        default_pool = {"X": data["X_train"], "y": data["y_train"]}
 
         if not bool(getattr(self.config, "UNCERTAINTY_ENABLED", False)):
             return default_pool, None
         # Only the interval methods that need held-out rows pay for them: the others turn the
         # spread into an interval by arithmetic.
-        if not needs_calibration_set(
-            getattr(self.config, "UNCERTAINTY_INTERVAL_METHOD", "conformal")
-        ):
+        if not needs_calibration_set(getattr(self.config, "UNCERTAINTY_INTERVAL_METHOD", "conformal")):
             return default_pool, None
         if str(getattr(self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val")).lower() != "val":
             # cv_oof calibrates on the folds the search already ran, so it keeps every row.
             return default_pool, None
 
-        train_only = data.get('X_train_only')
-        val_features = data.get('X_val')
+        train_only = data.get("X_train_only")
+        val_features = data.get("X_val")
         if train_only is None or val_features is None or len(val_features) == 0:
             self.logger.warning(
                 "uncertainty.calibration.source is 'val' but the split carries no separate val "
@@ -424,8 +412,8 @@ class ModelTrainer:
             f"and calibrating on {len(val_features)}."
         )
         return (
-            {'X': train_only, 'y': data['y_train_only']},
-            {'X': val_features, 'y': data['y_val']},
+            {"X": train_only, "y": data["y_train_only"]},
+            {"X": val_features, "y": data["y_val"]},
         )
 
     def _fit_ensemble(
@@ -458,9 +446,7 @@ class ModelTrainer:
         n_members = int(getattr(self.config, "UNCERTAINTY_N_MEMBERS", 5))
         stride = int(getattr(self.config, "UNCERTAINTY_SEED_STRIDE", 1000))
         seeds = member_seeds(model_seed, n_members, stride)
-        bootstrap = should_bootstrap(
-            model, str(getattr(self.config, "UNCERTAINTY_BOOTSTRAP", "auto"))
-        )
+        bootstrap = should_bootstrap(model, str(getattr(self.config, "UNCERTAINTY_BOOTSTRAP", "auto")))
 
         members = []
         for index, seed in enumerate(seeds):
@@ -501,9 +487,7 @@ class ModelTrainer:
         mlflow.log_params(
             {
                 "uncertainty_fit_pool": "train_only" if calibration_data is not None else "train_val",
-                "uncertainty_calibration_source": getattr(
-                    self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val"
-                ),
+                "uncertainty_calibration_source": getattr(self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val"),
                 "uncertainty_n_train_rows": len(X_train),
             }
         )
@@ -564,10 +548,10 @@ class ModelTrainer:
             )
 
         if calibration_data is not None:
-            prediction = ensemble.predict_uncertainty(calibration_data['X'])
+            prediction = ensemble.predict_uncertainty(calibration_data["X"])
             return fit_calibrators(
                 prediction,
-                calibration_data['y'],
+                calibration_data["y"],
                 target_names,
                 alpha=alpha,
                 logger=self.logger,
@@ -612,9 +596,7 @@ class ModelTrainer:
         if best_params:
             estimator.set_params(**best_params)
 
-        out_of_fold = np.asarray(
-            cross_val_predict(estimator, X_train, y_train, cv=splits, n_jobs=1)
-        )
+        out_of_fold = np.asarray(cross_val_predict(estimator, X_train, y_train, cv=splits, n_jobs=1))
         if out_of_fold.ndim == 1:
             out_of_fold = out_of_fold.reshape(-1, 1)
 
@@ -628,9 +610,7 @@ class ModelTrainer:
             aleatoric_std=np.zeros_like(sigma),
         )
 
-        return fit_calibrators(
-            prediction, y_train, target_names, alpha=alpha, logger=self.logger
-        )
+        return fit_calibrators(prediction, y_train, target_names, alpha=alpha, logger=self.logger)
 
     @staticmethod
     def _seed_member(member, seed: int) -> None:
@@ -701,7 +681,7 @@ class ModelTrainer:
         n_train = len(y_train) if y_train is not None else 0
         n_test = len(y_test) if y_test is not None else 0
         self.logger.info(f"Training for target: {target} — {n_train} train samples, {n_test} test samples.")
-        if y_train is None or y_train.empty or (y_test is not None and hasattr(y_test, 'empty') and y_test.empty):
+        if y_train is None or y_train.empty or (y_test is not None and hasattr(y_test, "empty") and y_test.empty):
             self.logger.warning(f"Skipping {target} — no valid data after filtering NaNs.")
             return True
         return False
@@ -711,4 +691,3 @@ class ModelTrainer:
         for model_name, config in model_pipelines.items():
             if "model" not in config or "params" not in config:
                 raise ValueError(f"Model pipeline '{model_name}' must have 'model' and 'params' keys.")
-

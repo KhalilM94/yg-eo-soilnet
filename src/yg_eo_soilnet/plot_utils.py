@@ -76,9 +76,7 @@ def _resolve_prediction_column(df, target_name=None, target_index=None):
     # also carries prediction_std_<t>, prediction_lower_<t> and friends, and the positional fallback
     # below would happily return one of those - drawing standard deviations on the predicted axis,
     # with a plot that looks plausible and is wrong.
-    prediction_columns = [
-        column_name for column_name in df.columns if is_prediction_column(column_name)
-    ]
+    prediction_columns = [column_name for column_name in df.columns if is_prediction_column(column_name)]
     if target_index is not None and target_index < len(prediction_columns):
         return prediction_columns[target_index]
     if prediction_columns:
@@ -99,7 +97,9 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
         if eval_df is None or eval_df.empty:
             continue
         frame = eval_df.copy()
-        frame_targets = _normalise_target_names(frame["target_name"].dropna().unique()) if "target_name" in frame.columns else []
+        frame_targets = (
+            _normalise_target_names(frame["target_name"].dropna().unique()) if "target_name" in frame.columns else []
+        )
         if not frame_targets:
             frame_targets = [None]
         frame["_resolved_target_name"] = frame["target_name"] if "target_name" in frame.columns else None
@@ -166,7 +166,9 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
             if target_name is not None and frame_targets != [None] and not covers:
                 continue
 
-            resolved_target_name = target_name if target_name is not None else (frame_targets[0] if frame_targets else None)
+            resolved_target_name = (
+                target_name if target_name is not None else (frame_targets[0] if frame_targets else None)
+            )
             prediction_column = _resolve_prediction_column(frame, resolved_target_name, target_index)
             if prediction_column is None:
                 continue
@@ -207,7 +209,11 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
             if not valid_mask.any():
                 continue
 
-            model_name = frame["model_name"].iloc[0] if "model_name" in frame.columns and not frame["model_name"].empty else "model"
+            model_name = (
+                frame["model_name"].iloc[0]
+                if "model_name" in frame.columns and not frame["model_name"].empty
+                else "model"
+            )
             series_color = color_for(model_name)
             # Bars before the points, under them, and in the series' own colour so two models
             # overlaid on one axis stay distinguishable. Thinner and fainter than on the per-run
@@ -256,9 +262,7 @@ def _create_parent_pred_obs_multitarget(eval_dfs):
             # shared range and a 1:1 aspect the identity line is not a 45 degree diagonal and the
             # cloud is stretched along whichever axis spans less.
             low, high = _square_limits(combined, combined)
-            axis.plot(
-                [low, high], [low, high], linestyle="--", color=INK_2, linewidth=0.8, zorder=5
-            )
+            axis.plot([low, high], [low, high], linestyle="--", color=INK_2, linewidth=0.8, zorder=5)
             _frame_square(axis, low, high)
 
     for axis in axes.flatten()[n_targets:]:
@@ -294,9 +298,9 @@ def cv_val_curve(cv_results, scoring: str = "neg_root_mean_squared_error"):
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
 
-    param_key, = [str(col) for col in cv_results.columns if str(col).startswith("param_")]
+    (param_key,) = [str(col) for col in cv_results.columns if str(col).startswith("param_")]
     param_name = param_key.rsplit("__", 1)[-1]
     param_values = np.array(cv_results[param_key], dtype=object)
 
@@ -385,14 +389,14 @@ def cv_parallel_coordinates(cv_results):
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     cv_results = cv_results.copy()
-    cv_results['mean_test_score'] = cv_results['mean_test_score'].abs()
-    best_index = cv_results['mean_test_score'].idxmin()
+    cv_results["mean_test_score"] = cv_results["mean_test_score"].abs()
+    best_index = cv_results["mean_test_score"].idxmin()
 
-    param_cols = [col for col in cv_results.columns if col.startswith('param_')]
-    ynames = [col.rsplit('__', 1)[-1] for col in param_cols] + ['Mean Test Score']
-    ys = cv_results[param_cols + ['mean_test_score']].values
+    param_cols = [col for col in cv_results.columns if col.startswith("param_")]
+    ynames = [col.rsplit("__", 1)[-1] for col in param_cols] + ["Mean Test Score"]
+    ys = cv_results[param_cols + ["mean_test_score"]].values
     parallels = ys.shape[0]
 
     # Scaling
@@ -400,47 +404,47 @@ def cv_parallel_coordinates(cv_results):
     ymaxs = ys.max(axis=0)
     dys = ymaxs - ymins
     dys = np.where(dys == 0, 1, dys)
-    ymins -= dys*0.02
-    ymaxs += dys*0.02
+    ymins -= dys * 0.02
+    ymaxs += dys * 0.02
     dys = ymaxs - ymins
     zs = np.zeros_like(ys)
-    zs[:,0] = ys[:,0]
-    zs[:,1:] = (ys[:,1:] - ymins[1:]) / dys[1:] * dys[0] + ymins[0]
+    zs[:, 0] = ys[:, 0]
+    zs[:, 1:] = (ys[:, 1:] - ymins[1:]) / dys[1:] * dys[0] + ymins[0]
 
     # Main axes
     fig, host = plt.subplots(figsize=(FIG_WIDTH_FULL, 3.6), layout="constrained")
 
-    axes = [host] + [host.twinx() for _ in range(ys.shape[1]-1)]
+    axes = [host] + [host.twinx() for _ in range(ys.shape[1] - 1)]
     for i, ax in enumerate(axes):
         ax.set_ylim(ymins[i], ymaxs[i])
-        ax.spines['top'].set_visible(False)
-        ax.spines['bottom'].set_visible(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["bottom"].set_visible(False)
         if ax != host:
-            ax.spines['left'].set_visible(False)
+            ax.spines["left"].set_visible(False)
             ax.spines["right"].set_visible(True)
             ax.spines["right"].set_color(BASELINE)
-            ax.yaxis.set_ticks_position('right')
-            ax.spines["right"].set_position(("axes", i/(ys.shape[1]-1)))
+            ax.yaxis.set_ticks_position("right")
+            ax.spines["right"].set_position(("axes", i / (ys.shape[1] - 1)))
             ax.tick_params(axis="y", length=3, color=BASELINE, labelsize=8)
 
     # Colormap
-    norm = mcolors.Normalize(vmin=cv_results['mean_test_score'].min(), vmax=cv_results['mean_test_score'].max())
+    norm = mcolors.Normalize(vmin=cv_results["mean_test_score"].min(), vmax=cv_results["mean_test_score"].max())
     cmap = sequential_cmap()
     # Draw other lines
     for j in range(parallels):
-        verts = list(zip(np.linspace(0,len(ys[0])-1,len(ys[0])*3-2),
-                             np.repeat(zs[j,:],3)[1:-1]))
-        codes = [Path.MOVETO]+[Path.CURVE4]*(len(verts)-1)
+        verts = list(zip(np.linspace(0, len(ys[0]) - 1, len(ys[0]) * 3 - 2), np.repeat(zs[j, :], 3)[1:-1]))
+        codes = [Path.MOVETO] + [Path.CURVE4] * (len(verts) - 1)
         path = Path(verts, codes)
-        if j!=best_index:
-            patch = patches.PathPatch(path, facecolor='none', lw=0.5,
-                                      edgecolor=cmap(norm(cv_results['mean_test_score'].iloc[j])))
+        if j != best_index:
+            patch = patches.PathPatch(
+                path, facecolor="none", lw=0.5, edgecolor=cmap(norm(cv_results["mean_test_score"].iloc[j]))
+            )
         else:
             patch = patches.PathPatch(
-                path, facecolor='none', lw=2.5, edgecolor=PROJECT_COLORS["Al Moutmir"], label='best trial'
+                path, facecolor="none", lw=2.5, edgecolor=PROJECT_COLORS["Al Moutmir"], label="best trial"
             )
         host.add_patch(patch)
-    legend_line = Line2D([0], [0], color=PROJECT_COLORS["Al Moutmir"], lw=2.5, label='best trial')
+    legend_line = Line2D([0], [0], color=PROJECT_COLORS["Al Moutmir"], lw=2.5, label="best trial")
     host.legend(handles=[legend_line], loc="lower left", bbox_to_anchor=(1.0, -0.1), fontsize=7.5)
     colorbar = fig.colorbar(cm.ScalarMappable(norm=norm, cmap=cmap), ax=host, anchor=(0.2, 0.5))
     colorbar.outline.set_visible(False)
@@ -449,15 +453,15 @@ def cv_parallel_coordinates(cv_results):
     best_params = cv_results.loc[best_index][param_cols].to_dict()
     best_params_str = ", ".join([f"{str(k).rsplit('__', 1)[-1]}={v}" for k, v in best_params.items()])
 
-    host.set_xlim(0, ys.shape[1]-1)
+    host.set_xlim(0, ys.shape[1] - 1)
     host.set_xticks(range(ys.shape[1]))
-    host.set_xticklabels(ynames, rotation=45, ha='right', fontsize=8)
-    host.tick_params(axis='x', which='major', pad=7)
-    host.grid(True, which='major', axis='y')
-    host.spines['top'].set_visible(True)
-    host.spines['bottom'].set_visible(True)
-    host.spines['top'].set_color(BASELINE)
-    host.spines['bottom'].set_color(BASELINE)
+    host.set_xticklabels(ynames, rotation=45, ha="right", fontsize=8)
+    host.tick_params(axis="x", which="major", pad=7)
+    host.grid(True, which="major", axis="y")
+    host.spines["top"].set_visible(True)
+    host.spines["bottom"].set_visible(True)
+    host.spines["top"].set_color(BASELINE)
+    host.spines["bottom"].set_color(BASELINE)
     host.set_axisbelow(True)
     panel_subtitle(host, best_params_str)
     return fig
@@ -480,7 +484,7 @@ def _error_bar_positions(x_values, cap=MAX_ERROR_BARS):
 
     Spread evenly across the range rather than picked at random, so the bars describe the whole picture
     rather than bunching where the points are dense.
-        """
+    """
     values = np.asarray(x_values, dtype=float)
     if values.size <= cap:
         return np.arange(values.size)
@@ -532,15 +536,13 @@ def _square_limits(observed, predicted, interval=None, percentile=INTERVAL_CLIP_
 
     The panel can only be read when the 1:1 line is a true diagonal, which needs both axes on the same
     range.
-        """
+    """
     candidates = [np.asarray(observed, dtype=float), np.asarray(predicted, dtype=float)]
     finite = np.concatenate([values[np.isfinite(values)] for values in candidates])
     if finite.size == 0:
         return 0.0, 1.0
 
-    low, high = _extend_range(
-        float(finite.min()), float(finite.max()), interval, percentile=percentile
-    )
+    low, high = _extend_range(float(finite.min()), float(finite.max()), interval, percentile=percentile)
     pad = (high - low) * margin or 1.0
     return low - pad, high + pad
 
@@ -627,16 +629,14 @@ def pred_obs_panel(eval_df, *, target_name=None):
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     y_test = eval_df["target"]
     y_pred = eval_df["prediction"]
 
     interval = interval_columns(eval_df)
     sigma = sigma_column(eval_df)
 
-    fig, ax = plt.subplots(
-        figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN + 0.4), layout="constrained"
-    )
+    fig, ax = plt.subplots(figsize=(FIG_WIDTH_COLUMN, FIG_WIDTH_COLUMN + 0.4), layout="constrained")
     square_panel(ax)
 
     bar_positions = _error_bar_positions(y_test) if interval is not None else None
@@ -650,8 +650,15 @@ def pred_obs_panel(eval_df, *, target_name=None):
         # while the colour survives - so "where is this model uncertain?" stays answerable from the
         # picture rather than only from the CSV.
         scatter = ax.scatter(
-            y_test, y_pred, c=sigma, cmap=sequential_cmap(), s=14,
-            edgecolor="white", linewidth=0.3, zorder=4, rasterized=True,
+            y_test,
+            y_pred,
+            c=sigma,
+            cmap=sequential_cmap(),
+            s=14,
+            edgecolor="white",
+            linewidth=0.3,
+            zorder=4,
+            rasterized=True,
         )
         # An INSET axes, not `fig.colorbar(..., ax=ax)`. The `ax=` form makes room for the colorbar
         # by shrinking the axes it is given, which fights the 1:1 aspect set below. inset_axes
@@ -667,9 +674,14 @@ def pred_obs_panel(eval_df, *, target_name=None):
         # chosen to remove. A frame with an interval but no sigma is unusual, since the interval is
         # built from sigma, but it costs one branch to not draw it wrong.
         ax.scatter(
-            y_test, y_pred,
+            y_test,
+            y_pred,
             color=CARBONATE_RAMP[-2] if interval is not None else PROJECT_COLORS["Al Moutmir"],
-            s=14, edgecolor="white", linewidth=0.3, zorder=4, rasterized=True,
+            s=14,
+            edgecolor="white",
+            linewidth=0.3,
+            zorder=4,
+            rasterized=True,
         )
 
     # One shared range for both axes, so the identity line below is a true 45 degree diagonal and
@@ -688,8 +700,11 @@ def pred_obs_panel(eval_df, *, target_name=None):
     if fit is not None:
         slope, intercept = fit
         ax.plot(
-            [low, high], [slope * low + intercept, slope * high + intercept],
-            color=INK, lw=1.4, zorder=5,
+            [low, high],
+            [slope * low + intercept, slope * high + intercept],
+            color=INK,
+            lw=1.4,
+            zorder=5,
         )
 
     ax.set_xlabel("Observed")
@@ -719,10 +734,7 @@ def pred_obs_panel(eval_df, *, target_name=None):
         # claim and the number checks it.
         # Computed over EVERY point even when only a subset is drawn, so the number never describes
         # a different population from the metric of the same name in the run.
-        annotation += (
-            f"\nPICP = {covered:.3f}"
-            f"\nMPIW = {float(np.mean(upper - lower)):.2f}"
-        )
+        annotation += f"\nPICP = {covered:.3f}\nMPIW = {float(np.mean(upper - lower)):.2f}"
         # What KIND of bar this is, when the caller said. The same picture means different things
         # under conformal, gaussian and sigma - a reader cannot tell them apart by looking, and the
         # PICP beside it is only interpretable once you know which claim is being made. Carried on
@@ -751,7 +763,7 @@ def create_parent_pred_obs(eval_dfs):
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     return _create_parent_pred_obs_multitarget(eval_dfs)
 
 
@@ -778,8 +790,9 @@ def _metric_label(metric: str) -> str:
 
 
 @styled
-def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_test",
-                                        label_col="model", hue_col="target"):
+def plot_leaderboard_scatter(
+    leaderboard_df, metric_x="rmse_test", metric_y="r2_test", label_col="model", hue_col="target"
+):
     """The :term:`leaderboard` as a figure: every model's test score, per target.
 
     One panel per target, with the average across models marked, so a model that is well ahead or well
@@ -788,7 +801,7 @@ def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     if leaderboard_df is None or leaderboard_df.empty:
         return message_figure("No leaderboard rows available")
 
@@ -801,20 +814,20 @@ def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_
     # Fallback if expected hue column missing
     if hue_col not in leaderboard_df.columns:
         # Try common alternate names
-        if 'target_name' in leaderboard_df.columns:
-            hue_col = 'target_name'
+        if "target_name" in leaderboard_df.columns:
+            hue_col = "target_name"
         else:
             # Create a pseudo target column
-            hue_col = '_target_tmp_'
+            hue_col = "_target_tmp_"
             leaderboard_df = leaderboard_df.copy()
-            leaderboard_df[hue_col] = 'All'
+            leaderboard_df[hue_col] = "All"
 
     if label_col not in leaderboard_df.columns:
         # Try alternative naming
-        if 'model_name' in leaderboard_df.columns:
-            label_col = 'model_name'
+        if "model_name" in leaderboard_df.columns:
+            label_col = "model_name"
         else:
-            label_col = '_model_tmp_'
+            label_col = "_model_tmp_"
             leaderboard_df = leaderboard_df.copy()
             leaderboard_df[label_col] = range(len(leaderboard_df))
 
@@ -853,9 +866,15 @@ def plot_leaderboard_scatter(leaderboard_df, metric_x="rmse_test", metric_y="r2_
 
         # Annotate points
         for _, row in df_target.iterrows():
-            ax.text(row[metric_x], row[metric_y], f"  {row[label_col]}",
-                    horizontalalignment='left', verticalalignment='center',
-                    fontsize=7, color=INK_2)
+            ax.text(
+                row[metric_x],
+                row[metric_y],
+                f"  {row[label_col]}",
+                horizontalalignment="left",
+                verticalalignment="center",
+                fontsize=7,
+                color=INK_2,
+            )
 
         # Add average lines per target
         ax.axvline(avg_rmse, color=BASELINE, linestyle="--", lw=0.8, zorder=1, label="mean RMSE")

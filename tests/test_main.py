@@ -81,9 +81,7 @@ def _stub_main(
         )
     }
     mocks["active_run"] = MagicMock(return_value=None)
-    mocks["start_run"] = MagicMock(
-        return_value=_FakeRun(run_info or SimpleNamespace(run_id="run-123"))
-    )
+    mocks["start_run"] = MagicMock(return_value=_FakeRun(run_info or SimpleNamespace(run_id="run-123")))
     for name, mock in mocks.items():
         monkeypatch.setattr(main_module.mlflow, name, mock)
     monkeypatch.setattr(
@@ -111,9 +109,7 @@ def test_main_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
     trainer.scikit_datamodule.load_frame.assert_called_once()
     trainer.scikit_datamodule.preprocess.assert_called_once_with("raw")
     # The shared plan is handed to the sklearn family rather than each family splitting for itself.
-    trainer.scikit_datamodule.split.assert_called_once_with(
-        "processed", trainer.split_plan_provider.plan.return_value
-    )
+    trainer.scikit_datamodule.split.assert_called_once_with("processed", trainer.split_plan_provider.plan.return_value)
     trainer.train_models.assert_called_once()
     parent_logger.log_parent_summary.assert_called_once_with("run-123", trainer)
 
@@ -127,9 +123,7 @@ def test_main_survives_a_failing_parent_summary(monkeypatch: pytest.MonkeyPatch)
     turned a finished run into a crash.
     """
     trainer = _stub_trainer(logger_wrapper=SimpleNamespace(log_file="train.log"))
-    parent_logger = SimpleNamespace(
-        log_parent_summary=MagicMock(side_effect=RuntimeError("leaderboard unreadable"))
-    )
+    parent_logger = SimpleNamespace(log_parent_summary=MagicMock(side_effect=RuntimeError("leaderboard unreadable")))
     mocks = _stub_main(monkeypatch, trainer, parent_logger)
 
     main_module.main()
@@ -185,9 +179,7 @@ def test_main_exports_mlflow_experiment_when_enabled(monkeypatch: pytest.MonkeyP
     (run_dir / "meta.yaml").write_text(f"name: {run_name}\n")
     (run_dir / "dummy.txt").write_text("content\n")
 
-    _stub_main(
-        monkeypatch, trainer, run_info=SimpleNamespace(run_id=run_id, experiment_id=experiment_id)
-    )
+    _stub_main(monkeypatch, trainer, run_info=SimpleNamespace(run_id=run_id, experiment_id=experiment_id))
     monkeypatch.setattr(main_module.mlflow, "get_tracking_uri", MagicMock(return_value=f"file://{tracking_root}"))
     monkeypatch.setattr(
         main_module.mlflow,
@@ -228,7 +220,9 @@ def test_train_models_dispatches_sklearn_and_lightning(monkeypatch: pytest.Monke
     trainer.logger = MagicMock()
     trainer.sklearn_logger = MagicMock()
     trainer.model_configs = SimpleNamespace(
-        build_model_configs=MagicMock(return_value={"sklearn_model": {"model": object(), "params": {}, "modeltype": "ml"}})
+        build_model_configs=MagicMock(
+            return_value={"sklearn_model": {"model": object(), "params": {}, "modeltype": "ml"}}
+        )
     )
     trainer.lightning_model_configs = SimpleNamespace(
         build_lightning_configs=MagicMock(return_value={"lightning_model": object()}),
@@ -248,6 +242,7 @@ def test_train_models_dispatches_sklearn_and_lightning(monkeypatch: pytest.Monke
 
     fake_sklearn_trainer.train.assert_called_once()
     fake_lightning_trainer.train.assert_called_once()
+
 
 def _multi_target_trainer(
     monkeypatch: pytest.MonkeyPatch,
@@ -273,7 +268,9 @@ def _multi_target_trainer(
     trainer.logger = MagicMock()
     trainer.sklearn_logger = MagicMock()
     trainer.model_configs = SimpleNamespace(
-        build_model_configs=MagicMock(return_value={"sklearn_model": {"model": object(), "params": {}, "modeltype": "ml"}})
+        build_model_configs=MagicMock(
+            return_value={"sklearn_model": {"model": object(), "params": {}, "modeltype": "ml"}}
+        )
     )
     trainer.lightning_model_configs = SimpleNamespace(
         build_lightning_configs=MagicMock(return_value={"lightning_model": object()}),
@@ -316,9 +313,7 @@ def test_sklearn_joins_targets_only_when_the_estimator_declares_it_can(
     assert undeclared.train.call_count == 2
     assert [call.kwargs["target"] for call in undeclared.train.call_args_list] == ["target_a", "target_b"]
 
-    _, native, _ = _multi_target_trainer(
-        monkeypatch, mode="joint", sklearn_spec={"multi_target": "native"}
-    )
+    _, native, _ = _multi_target_trainer(monkeypatch, mode="joint", sklearn_spec={"multi_target": "native"})
     native.train.assert_called_once()
     assert native.train.call_args.kwargs["target"] == "target_a__target_b"
     assert native.train.call_args.kwargs["targets"] == ["target_a", "target_b"]
@@ -363,8 +358,10 @@ def test_sklearn_entries_that_agree_on_a_grouping_are_trained_together(
     trainer.sklearn_logger = MagicMock()
     trainer.model_configs = SimpleNamespace(
         build_model_configs=MagicMock(
-            return_value={name: {"model": object(), "params": {}, "modeltype": "ml"} for name in
-                          ("Ridge", "PLSRegression", "GradientBoosting")}
+            return_value={
+                name: {"model": object(), "params": {}, "modeltype": "ml"}
+                for name in ("Ridge", "PLSRegression", "GradientBoosting")
+            }
         )
     )
     trainer.lightning_model_configs = SimpleNamespace(build_lightning_configs=MagicMock(return_value={}))
@@ -380,8 +377,10 @@ def test_sklearn_entries_that_agree_on_a_grouping_are_trained_together(
         }
     )
 
-    calls = {call.kwargs["target"]: sorted(call.kwargs["model_pipelines"]) for call in
-             fake_sklearn_trainer.train.call_args_list}
+    calls = {
+        call.kwargs["target"]: sorted(call.kwargs["model_pipelines"])
+        for call in fake_sklearn_trainer.train.call_args_list
+    }
     assert calls == {
         # The two native estimators share the joint group, in ONE call.
         "target_a__target_b": ["PLSRegression", "Ridge"],
@@ -398,9 +397,7 @@ def test_sklearn_entries_that_agree_on_a_grouping_are_trained_together(
         ("per_target", "target_a | target_b"),
     ],
 )
-def test_train_models_records_what_it_decided_to_fit(
-    monkeypatch: pytest.MonkeyPatch, mode, expected_sklearn
-) -> None:
+def test_train_models_records_what_it_decided_to_fit(monkeypatch: pytest.MonkeyPatch, mode, expected_sklearn) -> None:
     """The run logs how it split the data but used to say nothing about what it planned to fit.
 
     That gap is why an OOM-killed multi-target run was mistaken for a bug in the grouping: the
@@ -423,9 +420,7 @@ def test_train_models_records_what_it_decided_to_fit(
     trainer.logger = MagicMock()
     trainer.sklearn_logger = MagicMock()
     trainer.model_configs = SimpleNamespace(
-        build_model_configs=MagicMock(
-            return_value={"Ridge": {"model": object(), "params": {}, "modeltype": "ml"}}
-        )
+        build_model_configs=MagicMock(return_value={"Ridge": {"model": object(), "params": {}, "modeltype": "ml"}})
     )
     trainer.lightning_model_configs = SimpleNamespace(build_lightning_configs=MagicMock(return_value={}))
     trainer.lightning_trainer = SimpleNamespace(train=MagicMock())
@@ -466,9 +461,7 @@ def test_the_target_plan_shows_a_fallback_as_a_mode_group_mismatch(monkeypatch: 
     trainer.logger = MagicMock()
     trainer.sklearn_logger = MagicMock()
     trainer.model_configs = SimpleNamespace(
-        build_model_configs=MagicMock(
-            return_value={"TabICL": {"model": object(), "params": {}, "modeltype": "ml"}}
-        )
+        build_model_configs=MagicMock(return_value={"TabICL": {"model": object(), "params": {}, "modeltype": "ml"}})
     )
     trainer.lightning_model_configs = SimpleNamespace(build_lightning_configs=MagicMock(return_value={}))
     trainer.lightning_trainer = SimpleNamespace(train=MagicMock())

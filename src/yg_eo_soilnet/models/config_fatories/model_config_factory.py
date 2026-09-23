@@ -5,6 +5,7 @@ import importlib
 from dataclasses import dataclass
 from typing import Optional
 
+
 @dataclass
 class ModelConfigFactory:
     """Build the scikit-learn estimators a model list asks for.
@@ -30,9 +31,9 @@ class ModelConfigFactory:
     ('Ridge', {'alpha': [0.1, 1.0]})
     """
 
-    registry:dict
-    random_state:int = 42
-    
+    registry: dict
+    random_state: int = 42
+
     @staticmethod
     def _dynamic_import(import_path):
         """Import a class from its full path, such as ``sklearn.linear_model.Ridge``."""
@@ -56,8 +57,6 @@ class ModelConfigFactory:
             return  # not a sklearn-style estimator, nothing to seed
         if exposes_seed:
             model.set_params(random_state=int(seed))
-
-
 
     def build_model_configs(self, num_features, default_seed: int | None = None):
         """Build every model switched on in the list.
@@ -97,11 +96,11 @@ class ModelConfigFactory:
                 builder_func = self._dynamic_import(custom_model_builder)
                 model_instance = ModelClass(build_fn=lambda: builder_func(num_features))
             else:
-                if 'input_dim' in init_args:
-                    init_args['input_dim'] = num_features
+                if "input_dim" in init_args:
+                    init_args["input_dim"] = num_features
                 model_instance = ModelClass(**init_args)
                 # A seed in the entry wins; otherwise the estimator takes the run's seed.
-                if 'random_state' not in init_args and model_seed is not None:
+                if "random_state" not in init_args and model_seed is not None:
                     self._seed_estimator(model_instance, model_seed)
 
             model_configs[name] = {
@@ -115,7 +114,7 @@ class ModelConfigFactory:
             }
 
         return model_configs
-    
+
     def load_splitter_from_config(self) -> Optional[BaseSpatialClusterStrategy]:
         """Build the spatial clustering strategy named by ``split.group.class_path``.
 

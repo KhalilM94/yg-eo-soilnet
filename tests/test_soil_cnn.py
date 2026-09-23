@@ -145,7 +145,9 @@ def _round_trip(module, cls, tmp_path: Path, hparams=None):
 def test_every_combination_builds_what_it_names_and_nothing_else(fusion, auxiliary, residual) -> None:
     module = _switched(fusion, auxiliary, residual)
 
-    built, other = (AttentionFusion, ConcatGatedFusion) if fusion == "attention" else (ConcatGatedFusion, AttentionFusion)
+    built, other = (
+        (AttentionFusion, ConcatGatedFusion) if fusion == "attention" else (ConcatGatedFusion, AttentionFusion)
+    )
     assert isinstance(module.fusion, built)
     # Built once: no fusion of the other kind survives anywhere in the tree.
     assert not any(isinstance(child, other) for child in module.modules())
@@ -341,10 +343,11 @@ def test_the_shipped_soil_cnn_entry_builds_when_no_lab_columns_are_carried(tmp_p
     from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
     from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningConfigFactory
 
-
     registry = load_lightning_registry("configs/lightning/models/defaults.yml")
     dates = [f"20{year:02d}-{month:02d}-01" for year in range(19, 23) for month in range(1, 13)]
-    bundle = built_sequence_bundle(tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)}, carry_labels=False)
+    bundle = built_sequence_bundle(
+        tmp_path, logger, {point: dates[: 20 + 4 * point] for point in range(1, 9)}, carry_labels=False
+    )
     datamodule = SoilSequenceDataModule(bundle, batch_size=2, val_size=0.4, test_size=0.25, seed=5)
     datamodule.setup("fit")
 
@@ -809,9 +812,7 @@ def test_a_zeroed_head_reproduces_the_base_in_the_targets_own_space() -> None:
     zero_head(module)
     batch = cnn_batch(labels=3)
 
-    assert torch.allclose(
-        module(batch).reshape(-1).double(), expected_base(batch), atol=1e-5
-    )
+    assert torch.allclose(module(batch).reshape(-1).double(), expected_base(batch), atol=1e-5)
 
 
 def test_the_base_passes_through_log1p_and_the_target_standardizer_in_that_order() -> None:
@@ -836,9 +837,7 @@ def test_predict_step_inverts_back_to_the_bases_original_units() -> None:
     batch = cnn_batch(labels=3)
 
     raw = batch["x_labels"][:, 1].double() * LABEL_SCALE[1] + LABEL_MEAN[1]
-    assert torch.allclose(
-        module.predict_step(batch, 0).reshape(-1).double(), raw.clamp_min(0.0), atol=1e-4
-    )
+    assert torch.allclose(module.predict_step(batch, 0).reshape(-1).double(), raw.clamp_min(0.0), atol=1e-4)
 
 
 def test_a_negative_base_is_clipped_the_way_a_measured_target_would_be() -> None:
@@ -1117,9 +1116,7 @@ def test_builder_to_residual_module_end_to_end(tmp_path: Path, logger, fusion, s
         attention_d_model=16,
         attention_nhead=4,
     )
-    assert module.residual_base_index.tolist() == [
-        datamodule.label_feature_names.index("lab_dense")
-    ]
+    assert module.residual_base_index.tolist() == [datamodule.label_feature_names.index("lab_dense")]
 
     trainer = Trainer(
         max_epochs=2,
@@ -1233,10 +1230,7 @@ def test_a_zeroed_head_on_real_data_returns_the_base_in_original_units(tmp_path:
 
     indices = list(range(bundle.num_points))
     batch = datamodule.collate(indices)
-    expected = [
-        float(bundle.label_features[index][bundle.label_feature_names.index("lab_dense")])
-        for index in indices
-    ]
+    expected = [float(bundle.label_features[index][bundle.label_feature_names.index("lab_dense")]) for index in indices]
     with torch.no_grad():
         predicted = module.predict_step(batch, 0).reshape(-1).tolist()
 
@@ -1283,8 +1277,6 @@ def _attention_module(**kwargs) -> SoilResidualAttentionCNNLightningModule:
     defaults.update(kwargs)
     torch.manual_seed(0)
     return SoilResidualAttentionCNNLightningModule(**defaults).eval()
-
-
 
 
 # --- the module: what the swap changed -----------------------------------------
@@ -1499,9 +1491,7 @@ def test_the_split_separates_the_means_from_the_log_variances():
 
 
 def test_a_point_head_reports_no_log_variance():
-    mean, log_variance = _variance_module(predict_variance=False)._split_head_output(
-        torch.tensor([[1.0]])
-    )
+    mean, log_variance = _variance_module(predict_variance=False)._split_head_output(torch.tensor([[1.0]]))
     assert log_variance is None
 
 

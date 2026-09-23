@@ -26,8 +26,7 @@ def test_safe_collapses_characters_that_would_break_an_artifact_path() -> None:
 
 def test_filenames_sanitise_both_identifiers() -> None:
     assert (
-        ArtifactLayout.eval_results_filename("organic matter", "soil cnn")
-        == "eval_results_organic_matter_soil_cnn.csv"
+        ArtifactLayout.eval_results_filename("organic matter", "soil cnn") == "eval_results_organic_matter_soil_cnn.csv"
     )
     assert ArtifactLayout.run_summary_filename("om", "xgb") == "run_summary_om_xgb.json"
     assert ArtifactLayout.cv_results_filename("om", "xgb") == "cv_results_om_xgb.csv"
@@ -149,9 +148,7 @@ def _run(logger, monkeypatch, *, target: str, model_name: str, checkpoint) -> se
         config=SimpleNamespace(EXPLAIN_ENABLED=False),
         target=target,
         model_name=model_name,
-        evaluation_df=pd.DataFrame(
-            {target: [1.0, 2.0, 3.0, 4.0], "prediction": [1.1, 2.2, 2.9, 4.1]}
-        ),
+        evaluation_df=pd.DataFrame({target: [1.0, 2.0, 3.0, 4.0], "prediction": [1.1, 2.2, 2.9, 4.1]}),
         validation_metrics={"val_loss": 0.5},
         test_metrics={"test_loss": 0.4},
         best_model_path=str(checkpoint),
@@ -160,9 +157,7 @@ def _run(logger, monkeypatch, *, target: str, model_name: str, checkpoint) -> se
     return set(destinations)
 
 
-def test_two_runs_with_different_targets_and_models_share_every_artifact_path(
-    monkeypatch, tmp_path
-) -> None:
+def test_two_runs_with_different_targets_and_models_share_every_artifact_path(monkeypatch, tmp_path) -> None:
     """THE regression test for 'no common artifact to display'."""
     logger = ChildRunLogger()
 
@@ -171,12 +166,8 @@ def test_two_runs_with_different_targets_and_models_share_every_artifact_path(
     second_ckpt = tmp_path / "epoch=65-step=3498.ckpt"
     second_ckpt.write_bytes(b"b")
 
-    first = _run(
-        logger, monkeypatch, target="organic_matter_pct", model_name="soil_cnn", checkpoint=first_ckpt
-    )
-    second = _run(
-        logger, monkeypatch, target="clay_pct", model_name="soil_cnn_small", checkpoint=second_ckpt
-    )
+    first = _run(logger, monkeypatch, target="organic_matter_pct", model_name="soil_cnn", checkpoint=first_ckpt)
+    second = _run(logger, monkeypatch, target="clay_pct", model_name="soil_cnn_small", checkpoint=second_ckpt)
 
     assert first, "the first run wrote no artifacts at all"
     assert first == second, (

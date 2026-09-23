@@ -3,6 +3,7 @@
 The score is reported after every epoch, and a trial well behind the ones already finished is
 stopped there - which is what lets a study try many more combinations in the same time.
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -44,7 +45,7 @@ class OptunaPruningCallback(LightningCallback):
         Which score to report, usually ``val_loss``.
     mode : {"min", "max"}
         Whether lower or higher is better.
-        """
+    """
 
     def __init__(self, trial: optuna.Trial, monitor: str, mode: str = "min", *, report: bool = True):
         """Hold the trial, the score to watch and which direction is better."""
