@@ -312,7 +312,7 @@ def scoring_descendants(parent_run_id: str) -> list:
             filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
         )
 
-    runs = []
+    runs: list[Any] = []
     for child in children_of(parent_run_id):
         grandchildren = _scoring_runs(children_of(child.info.run_id))
         runs.extend(grandchildren or [child])

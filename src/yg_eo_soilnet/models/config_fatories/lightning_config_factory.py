@@ -335,7 +335,7 @@ class LightningConfigFactory:
             "fitted_target_names": list(getattr(self.config, "TARGET_COLUMNS", []) or []),
         }
         # An empty list means "this dataset has none", which is not worth offering as a shape.
-        unset = (None, 0, "auto", {}, [])
+        unset: tuple[Any, ...] = (None, 0, "auto", {}, [])
         for key, value in shape_args.items():
             if key in init_args and init_args[key] in (None, 0, "auto", {}):
                 init_args[key] = value

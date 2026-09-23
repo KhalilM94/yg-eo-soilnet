@@ -242,16 +242,16 @@ class SoilModelTraining:
                 logger=self.logger,
                 entry_name=model_name,
             )
-            for target_group in groups:
-                sklearn_groups.setdefault(tuple(target_group), {})[model_name] = pipeline
+            for group in groups:
+                sklearn_groups.setdefault(tuple(group), {})[model_name] = pipeline
 
         # The same decision, model by model, for the deep-learning models.
         lightning_groups: dict[tuple, list[str]] = {}
         for entry_name, spec in self.config.LIGHTNING_MODEL_REGISTRY.items():
             if not spec.get("enabled", False):
                 continue
-            for target_group in resolve_target_groups(self.config, spec):
-                lightning_groups.setdefault(tuple(target_group), []).append(entry_name)
+            for group in resolve_target_groups(self.config, spec):
+                lightning_groups.setdefault(tuple(group), []).append(entry_name)
 
         # Recorded on the main run before training starts, so the run always says what it set out
         # to fit, even if it is stopped part-way.

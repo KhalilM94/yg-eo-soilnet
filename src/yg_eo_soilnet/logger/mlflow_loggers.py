@@ -1878,7 +1878,7 @@ class ParentRunLogger:
         # level deeper than they used to. Searching only direct children left a joint run out of
         # the leaderboard entirely: its model run carried no target tag and its per-target runs
         # were grandchildren.
-        leaf_runs = []
+        leaf_runs: list[Any] = []
         for child in children_of(parent_run_id):
             grandchildren = _scoring_runs(children_of(child.info.run_id))
             # The model run's own metrics are means over its children, so listing it beside them
@@ -1948,7 +1948,7 @@ class ParentRunLogger:
         # Same reason as _collect_leaderboard: a joint run keeps its per-target evaluation frames
         # one level deeper, in the child runs, and its model run holds the joint frame those were
         # split from.
-        child_runs = []
+        child_runs: list[Any] = []
         for child in children_of(parent_run_id):
             grandchildren = _scoring_runs(children_of(child.info.run_id))
             child_runs.extend(grandchildren or [child])
