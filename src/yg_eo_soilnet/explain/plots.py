@@ -41,7 +41,7 @@ def _capture(draw, title: str):
     """Run a SHAP plotting call and hand back the figure it drew.
 
     The library draws into the current figure and returns nothing, so one is made here first.
-        """
+    """
     with style_context():
         figure = plt.figure()
         try:
@@ -69,7 +69,7 @@ def shap_beeswarm(result: ShapResult, max_display: int = 25):
     Returns
     -------
     matplotlib.figure.Figure
-        """
+    """
     import shap
 
     if result.n_samples == 0 or result.n_features == 0:
@@ -101,7 +101,7 @@ def shap_block_bar(result: ShapResult):
     The per-input figures show only the top rows, and with every band of every data source having its
     own row the time series can fill them all. This is the view that says how much each kind of input
     contributes in total.
-        """
+    """
     blocks = result.block_mean_abs()
     if not blocks:
         return _message_figure("No SHAP blocks to plot")
@@ -114,9 +114,7 @@ def shap_block_bar(result: ShapResult):
 
     # Height grows with the bar count: a fixed chrome allowance plus a fixed slice per row, so ten
     # blocks and three blocks both get bars of the same thickness.
-    figure, axes = plt.subplots(
-        figsize=(FIG_WIDTH_COLUMN, 0.9 + 0.2 * len(names)), layout="constrained"
-    )
+    figure, axes = plt.subplots(figsize=(FIG_WIDTH_COLUMN, 0.9 + 0.2 * len(names)), layout="constrained")
     bars = axes.barh(ordered_names, ordered_heights, color=PROJECT_COLORS["Fertimap"])
     # Horizontal bars flip which grid does the work: the value runs along x, so the y grid marks
     # nothing and the y ticks are labels rather than measurements.
@@ -124,8 +122,7 @@ def shap_block_bar(result: ShapResult):
     axes.grid(True, axis="x")
     axes.set_axisbelow(True)
     axes.tick_params(axis="y", length=0)
-    axes.bar_label(bars, labels=[f"{value:,.3g}" for value in ordered_heights],
-                   padding=2, fontsize=7, color=INK_2)
+    axes.bar_label(bars, labels=[f"{value:,.3g}" for value in ordered_heights], padding=2, fontsize=7, color=INK_2)
     axes.set_xlabel(f"mean |sum of SHAP within block| ({result.output_space})")
     panel_subtitle(axes, f"contribution by block - {result.target_name}")
     return figure

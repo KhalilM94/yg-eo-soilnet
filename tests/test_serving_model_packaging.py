@@ -63,9 +63,7 @@ def logged(tmp_path_factory) -> dict:
     model, datamodule = tiny_cnn(bundle)
 
     configure_tracking(
-        SimpleNamespace(
-            MLFLOW_TRACKING_URI=(root / "mlruns").as_uri(), MLFLOW_EXPERIMENT_NAME="Packaging"
-        )
+        SimpleNamespace(MLFLOW_TRACKING_URI=(root / "mlruns").as_uri(), MLFLOW_EXPERIMENT_NAME="Packaging")
     )
     with mlflow.start_run():
         ChildRunLogger().log_lightning_child_run(
@@ -77,9 +75,7 @@ def logged(tmp_path_factory) -> dict:
             ),
             validation_metrics={"val_loss": 0.5},
             test_metrics={"test_loss": 0.4},
-            bundle=SimpleNamespace(
-                datamodule=datamodule, trainer_kwargs={}, registry_entry={"modeltype": "dl"}
-            ),
+            bundle=SimpleNamespace(datamodule=datamodule, trainer_kwargs={}, registry_entry={"modeltype": "dl"}),
             model=model,
         )
 
@@ -260,9 +256,7 @@ def test_the_logged_model_loads_with_the_repo_off_sys_path(logged, tmp_path) -> 
         encoding="utf-8",
     )
 
-    completed = subprocess.run(
-        [sys.executable, str(script)], capture_output=True, text=True, timeout=600
-    )
+    completed = subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=600)
 
     assert completed.returncode == 0, (
         "the logged model could not be loaded without the repo on sys.path, so the shipped code is "

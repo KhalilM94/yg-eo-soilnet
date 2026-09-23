@@ -144,7 +144,11 @@ def toy_config() -> SimpleNamespace:
         TEST_SIZE=0.25,
         POINT_ID_COLUMN="point_id",
         ENABLE_CLUSTERING=False,
-        CLUSTERING_STRATEGY={"enabled": False, "class_path": "yg_eo_soilnet.models.KMeansClusterStrategy", "params": {}},
+        CLUSTERING_STRATEGY={
+            "enabled": False,
+            "class_path": "yg_eo_soilnet.models.KMeansClusterStrategy",
+            "params": {},
+        },
         # The INNER cross-validation strategy, not the holdout.
         SPLIT_STRATEGY="kfold",
         # The shared holdout, decided once for every training family. See datamodules/splitting.py.
@@ -192,9 +196,7 @@ def split_plan_for(toy_config, logger):
             },
             index=pd.Index(ids.to_numpy()),
         )
-        return UnifiedSplitter(toy_config, logger).build_plan(
-            pd.Index(ids.to_numpy()), coordinates=coordinates
-        )
+        return UnifiedSplitter(toy_config, logger).build_plan(pd.Index(ids.to_numpy()), coordinates=coordinates)
 
     return build
 

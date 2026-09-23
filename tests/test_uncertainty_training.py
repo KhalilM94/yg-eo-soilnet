@@ -54,13 +54,9 @@ def _config(**overrides) -> SimpleNamespace:
 def _split(n_rows: int = 200, targets=("target_a",), seed: int = 0) -> dict:
     """A split dict shaped like SklearnDataSplitter's, including the audit-only val keys."""
     rng = np.random.default_rng(seed)
-    features = pd.DataFrame(
-        {"f1": rng.normal(size=n_rows), "f2": rng.normal(size=n_rows)}
-    )
+    features = pd.DataFrame({"f1": rng.normal(size=n_rows), "f2": rng.normal(size=n_rows)})
     signal = 3.0 * features["f1"] - 2.0 * features["f2"]
-    y = pd.DataFrame(
-        {name: signal + rng.normal(scale=1.0, size=n_rows) for name in targets}
-    )
+    y = pd.DataFrame({name: signal + rng.normal(scale=1.0, size=n_rows) for name in targets})
 
     train = slice(0, 120)
     val = slice(120, 160)
@@ -79,9 +75,7 @@ def _split(n_rows: int = 200, targets=("target_a",), seed: int = 0) -> dict:
         # `point_ids` is a Series indexed like X, which is what lets the export reindex rather than
         # pair by position.
         "X_all": features,
-        "point_ids": pd.Series(
-            [f"p{index}" for index in range(n_rows)], index=features.index, name="point_id"
-        ),
+        "point_ids": pd.Series([f"p{index}" for index in range(n_rows)], index=features.index, name="point_id"),
     }
 
 
@@ -104,9 +98,7 @@ def _run_and_collect(config, data, pipelines, target="target_a", targets=None):
     """Train inside a parent run and return (child runs by name, the MlflowClient)."""
     client = mlflow.tracking.MlflowClient()
     with mlflow.start_run(run_name="parent") as parent:
-        _trainer(config).train(
-            target=target, data=data, model_pipelines=pipelines, targets=targets
-        )
+        _trainer(config).train(target=target, data=data, model_pipelines=pipelines, targets=targets)
         parent_id = parent.info.run_id
 
     experiment_id = client.get_run(parent_id).info.experiment_id
@@ -156,7 +148,8 @@ class Scenario:
     def model_run(self, target: str = "target_a"):
         """The model's own run, not one of its ensemble members."""
         return next(
-            run for run in self.runs
+            run
+            for run in self.runs
             if run.data.tags.get("target") == target
             and run.data.tags.get("model_name") == "Ridge"
             and run.data.tags.get("run_kind") != "ensemble_member"
@@ -234,9 +227,7 @@ def test_uncertainty_disabled_keeps_the_full_train_plus_val_fit_pool():
 
 def test_cv_oof_calibration_keeps_every_row_in_the_fit_pool():
     data = _split()
-    fit_pool, calibration = _trainer(
-        _config(UNCERTAINTY_CALIBRATION_SOURCE="cv_oof")
-    )._resolve_fit_pool(data)
+    fit_pool, calibration = _trainer(_config(UNCERTAINTY_CALIBRATION_SOURCE="cv_oof"))._resolve_fit_pool(data)
     assert len(fit_pool["X"]) == 160
     assert calibration is None
 
@@ -323,13 +314,9 @@ def test_the_fit_pool_is_recorded_so_a_smaller_rmse_is_not_read_as_a_regression(
 
 @pytest.mark.slow
 def test_uncertainty_disabled_writes_no_extra_columns(tmp_path):
-    _parent, runs, client = _run_and_collect(
-        _config(UNCERTAINTY_ENABLED=False), _split(), _pipelines()
-    )
+    _parent, runs, client = _run_and_collect(_config(UNCERTAINTY_ENABLED=False), _split(), _pipelines())
     model_run = next(run for run in runs if run.data.tags.get("model_name") == "Ridge")
-    local = client.download_artifacts(
-        model_run.info.run_id, "eval_results/eval_results.csv", str(tmp_path)
-    )
+    local = client.download_artifacts(model_run.info.run_id, "eval_results/eval_results.csv", str(tmp_path))
     frame = pd.read_csv(local)
 
     assert "prediction" in frame.columns
@@ -434,9 +421,7 @@ def test_an_ensemble_needs_at_least_one_member():
 
 @pytest.mark.slow
 def test_the_export_covers_every_point_not_just_the_test_split(exported, tmp_path):
-    child = _download(
-        exported.client, exported.model_run(), "predictions/point_predictions.csv", tmp_path
-    )
+    child = _download(exported.client, exported.model_run(), "predictions/point_predictions.csv", tmp_path)
     # 200 points in the population; the test split is only 40 of them.
     assert len(child) == 200
     assert list(child.columns) == ["uuid", "target_a"]
@@ -465,9 +450,7 @@ def test_the_parent_writes_both_the_wide_and_the_long_file(exported, tmp_path):
     parent_run = exported.client.get_run(exported.parent_id)
 
     wide = _download(exported.client, parent_run, "predictions/point_predictions_wide.csv", tmp_path / "w")
-    long_frame = _download(
-        exported.client, parent_run, "predictions/point_predictions_long.csv", tmp_path / "l"
-    )
+    long_frame = _download(exported.client, parent_run, "predictions/point_predictions_long.csv", tmp_path / "l")
 
     assert list(wide.columns) == ["uuid", "target_a__Ridge"]
     assert wide["uuid"].is_unique
@@ -536,13 +519,9 @@ class FakeDataModule:
         rng = np.random.default_rng(seed)
         self.target_names = list(target_names)
         self.X_test_frame_ = pd.DataFrame({"f": rng.normal(size=N_TEST)})
-        self.y_test_frame_ = pd.DataFrame(
-            {name: rng.normal(size=N_TEST) for name in self.target_names}
-        )
+        self.y_test_frame_ = pd.DataFrame({name: rng.normal(size=N_TEST) for name in self.target_names})
         self.X_val_frame_ = pd.DataFrame({"f": rng.normal(size=N_VAL)})
-        self.y_val_frame_ = pd.DataFrame(
-            {name: rng.normal(size=N_VAL) for name in self.target_names}
-        )
+        self.y_val_frame_ = pd.DataFrame({name: rng.normal(size=N_VAL) for name in self.target_names})
 
     def setup(self, stage=None):
         return None
@@ -623,19 +602,13 @@ def _run(monkeypatch, config, target_names=("target_a",)):
         built.append(seed)
         return {"soil_cnn": _bundle(datamodule)}
 
-    fake_trainers = [
-        FakeTrainer(offset=float(index + 1), n_targets=len(target_names)) for index in range(10)
-    ]
+    fake_trainers = [FakeTrainer(offset=float(index + 1), n_targets=len(target_names)) for index in range(10)]
     handed_out = []
 
     # _log_checkpoint is part of the real ChildRunLogger's interface and _fit_member calls it for
     # every member, so the double carries it too rather than being guarded against in production.
-    fake_mlflow_logger = SimpleNamespace(
-        log_lightning_child_run=MagicMock(), _log_checkpoint=MagicMock()
-    )
-    trainer = LightningTrainer(
-        config=config, logger=MagicMock(), mlflow_logger=fake_mlflow_logger
-    )
+    fake_mlflow_logger = SimpleNamespace(log_lightning_child_run=MagicMock(), _log_checkpoint=MagicMock())
+    trainer = LightningTrainer(config=config, logger=MagicMock(), mlflow_logger=fake_mlflow_logger)
 
     def build_trainer(_bundle):
         fake = fake_trainers[len(handed_out)]
@@ -662,8 +635,7 @@ def _run(monkeypatch, config, target_names=("target_a",)):
         bundle_builder=bundle_builder,
     )
 
-    return (fake_mlflow_logger.log_lightning_child_run.call_args, run_names, built,
-            handed_out, fake_mlflow_logger)
+    return (fake_mlflow_logger.log_lightning_child_run.call_args, run_names, built, handed_out, fake_mlflow_logger)
 
 
 # --- the run tree ----------------------------------------------------------
@@ -690,17 +662,13 @@ def test_the_factory_is_asked_for_a_fresh_bundle_at_each_strided_seed(monkeypatc
 
 
 def test_uncertainty_disabled_takes_the_single_fit_path(monkeypatch):
-    _call, run_names, built, _trainers, _lg = _run(
-        monkeypatch, _lightning_config(UNCERTAINTY_ENABLED=False)
-    )
+    _call, run_names, built, _trainers, _lg = _run(monkeypatch, _lightning_config(UNCERTAINTY_ENABLED=False))
     assert built == []
     assert not any(tags.get("run_kind") == "ensemble_member" for _name, tags in run_names)
 
 
 def test_a_skipped_entry_takes_the_single_fit_path(monkeypatch):
-    _call, run_names, built, _trainers, _lg = _run(
-        monkeypatch, _lightning_config(UNCERTAINTY_SKIP_MODELS=["soil_cnn"])
-    )
+    _call, run_names, built, _trainers, _lg = _run(monkeypatch, _lightning_config(UNCERTAINTY_SKIP_MODELS=["soil_cnn"]))
     assert built == []
     assert not any(tags.get("run_kind") == "ensemble_member" for _name, tags in run_names)
 
@@ -788,9 +756,7 @@ def test_a_missing_validation_split_skips_calibration_rather_than_pairing_wrong_
     datamodule = FakeDataModule()
     datamodule.y_val_frame_ = pd.DataFrame({"target_a": []})
 
-    trainer = LightningTrainer(
-        config=_lightning_config(), logger=MagicMock(), mlflow_logger=SimpleNamespace()
-    )
+    trainer = LightningTrainer(config=_lightning_config(), logger=MagicMock(), mlflow_logger=SimpleNamespace())
     members = [
         {"calibration_predictions": np.zeros((N_VAL, 1))},
     ]
@@ -804,5 +770,5 @@ def test_every_member_logs_its_own_checkpoint(monkeypatch):
     ensemble unrecoverable from MLflow alone."""
     _call, _run_names, _built, _trainers, logger = _run(monkeypatch, _lightning_config())
 
-    assert logger._log_checkpoint.call_count == 3          # one per member
+    assert logger._log_checkpoint.call_count == 3  # one per member
     assert all(call.args[0] == "/tmp/best.ckpt" for call in logger._log_checkpoint.call_args_list)

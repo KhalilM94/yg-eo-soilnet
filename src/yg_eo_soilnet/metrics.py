@@ -137,9 +137,7 @@ def _finite_pairs(y_true: Any, y_pred: Any) -> tuple[np.ndarray, np.ndarray]:
     predicted_values = pd.to_numeric(pd.Series(np.asarray(y_pred).reshape(-1)), errors="coerce").to_numpy(dtype=float)
 
     if true_values.shape != predicted_values.shape:
-        raise ValueError(
-            f"y_true has {true_values.shape[0]} value(s) but y_pred has {predicted_values.shape[0]}"
-        )
+        raise ValueError(f"y_true has {true_values.shape[0]} value(s) but y_pred has {predicted_values.shape[0]}")
 
     keep = np.isfinite(true_values) & np.isfinite(predicted_values)
     return true_values[keep], predicted_values[keep]

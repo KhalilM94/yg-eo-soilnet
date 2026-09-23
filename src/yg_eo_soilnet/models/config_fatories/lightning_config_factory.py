@@ -189,9 +189,7 @@ class LightningConfigFactory:
         """Prepare this model's data, reusing an already prepared one where that is allowed."""
         input_kind = self._input_kind(spec)
         if input_kind != "sequence":
-            raise ValueError(
-                f"Unsupported input_kind {input_kind!r} in the Lightning registry; expected 'sequence'"
-            )
+            raise ValueError(f"Unsupported input_kind {input_kind!r} in the Lightning registry; expected 'sequence'")
 
         datamodule_cls = self._dynamic_import(spec["datamodule_import_path"])
         fallback_seed = int(
@@ -208,9 +206,7 @@ class LightningConfigFactory:
         datamodule_kwargs.setdefault("test_size", getattr(self.config, "SPLIT_TEST_SIZE", 0.2))
         datamodule_kwargs.setdefault("num_workers", getattr(self.config, "LIGHTNING_NUM_WORKERS", 0))
         datamodule_kwargs.setdefault("pin_memory", getattr(self.config, "LIGHTNING_PIN_MEMORY", False))
-        datamodule_kwargs.setdefault(
-            "persistent_workers", getattr(self.config, "LIGHTNING_PERSISTENT_WORKERS", False)
-        )
+        datamodule_kwargs.setdefault("persistent_workers", getattr(self.config, "LIGHTNING_PERSISTENT_WORKERS", False))
         datamodule_kwargs.setdefault("seed", fallback_seed)
 
         # The targets this model predicts, read back from the group name. The data is prepared once
@@ -301,8 +297,7 @@ class LightningConfigFactory:
             name
             for name, parameter in parameters.items()
             if name != "self"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and parameter.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         }
 
     def _build_model(self, spec: Mapping[str, Any], datamodule: Any):

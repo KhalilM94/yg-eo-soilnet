@@ -88,9 +88,7 @@ class HarmonicPositionEncoder(nn.Module):
         exponents = torch.arange(self.num_frequencies, dtype=torch.float32)
         self.register_buffer("frequencies", (2.0**exponents) * math.pi, persistent=False)
 
-        self.embedding_dim = self.num_coordinates * (
-            2 * self.num_frequencies + (1 if self.include_input else 0)
-        )
+        self.embedding_dim = self.num_coordinates * (2 * self.num_frequencies + (1 if self.include_input else 0))
         hidden_dims = [int(width) for width in (hidden_dims or [])]
         self.hidden_dims = hidden_dims
         # No widths makes this a pass-through, so there is one code path either way.
@@ -149,8 +147,7 @@ class HarmonicPositionEncoder(nn.Module):
             raise ValueError(f"coords must be 2-D (batch, coordinates), got {coords.dim()}-D")
         if coords.size(-1) != self.num_coordinates:
             raise ValueError(
-                f"coords has {coords.size(-1)} column(s) but this encoder was built for "
-                f"{self.num_coordinates}"
+                f"coords has {coords.size(-1)} column(s) but this encoder was built for {self.num_coordinates}"
             )
 
         parts: list[torch.Tensor] = [coords] if self.include_input else []

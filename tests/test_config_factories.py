@@ -117,9 +117,7 @@ def test_factory_builds_a_sequence_datamodule_from_a_supplied_bundle() -> None:
 
 def test_factory_resolves_shapes_and_target_stats_from_the_datamodule() -> None:
     factory = _factory({})
-    datamodule = factory._build_datamodule(
-        target="target_a", spec=_sequence_spec(), data={"sequence_bundle": {}}
-    )
+    datamodule = factory._build_datamodule(target="target_a", spec=_sequence_spec(), data={"sequence_bundle": {}})
     model = factory._build_model(_sequence_spec(), datamodule)
 
     assert model.kwargs["static_dim"] == 3
@@ -196,9 +194,7 @@ def test_grid_years_is_injected_only_into_models_that_accept_it() -> None:
     factory = _factory({})
     datamodule = FakeGridDataModule(sequence_bundle={})
 
-    grid_model = factory._build_model(
-        {"import_path": f"{__name__}.FakeGridModel", "init_args": {}}, datamodule
-    )
+    grid_model = factory._build_model({"import_path": f"{__name__}.FakeGridModel", "init_args": {}}, datamodule)
     assert grid_model.kwargs["grid_years"] == 9
 
     grid_free_model = factory._build_model(
@@ -218,9 +214,7 @@ def test_target_covariance_is_injected_only_into_models_that_accept_it() -> None
     factory = _factory({})
     datamodule = FakeGridDataModule(sequence_bundle={})
 
-    model = factory._build_model(
-        {"import_path": f"{__name__}.FakeModel", "init_args": {}}, datamodule
-    )
+    model = factory._build_model({"import_path": f"{__name__}.FakeModel", "init_args": {}}, datamodule)
     covariance = model.kwargs["target_covariance"]
     assert covariance == [[1.0, 0.4], [0.4, 1.0]]
     assert all(isinstance(value, float) for row in covariance for value in row)
@@ -278,9 +272,7 @@ def test_categorical_contract_is_injected_into_a_model_that_declares_it() -> Non
     factory = _factory({})
     datamodule = FakeCategoricalDataModule(sequence_bundle={})
 
-    model = factory._build_model(
-        {"import_path": f"{__name__}.FakeEmbeddingModel", "init_args": {}}, datamodule
-    )
+    model = factory._build_model({"import_path": f"{__name__}.FakeEmbeddingModel", "init_args": {}}, datamodule)
 
     assert model.kwargs["categorical_cardinalities"] == [7, 13]
     assert model.kwargs["categorical_feature_names"] == ["texture_20cm", "landform_class"]
@@ -308,9 +300,7 @@ def test_categorical_contract_is_not_injected_into_a_model_that_ignores_it() -> 
     factory = _factory({})
     datamodule = FakeCategoricalDataModule(sequence_bundle={})
 
-    model = factory._build_model(
-        {"import_path": f"{__name__}.FakeGridFreeModel", "init_args": {}}, datamodule
-    )
+    model = factory._build_model({"import_path": f"{__name__}.FakeGridFreeModel", "init_args": {}}, datamodule)
 
     assert "categorical_cardinalities" not in model.kwargs
     assert model.kwargs["static_dim"] == 3
@@ -324,9 +314,7 @@ def test_an_empty_categorical_list_is_not_offered_as_data() -> None:
     datamodule.categorical_vocabularies = []
     datamodule.categorical_feature_names = []
 
-    model = factory._build_model(
-        {"import_path": f"{__name__}.FakeModel", "init_args": {}}, datamodule
-    )
+    model = factory._build_model({"import_path": f"{__name__}.FakeModel", "init_args": {}}, datamodule)
 
     assert "categorical_cardinalities" not in model.kwargs
     assert "categorical_vocabularies" not in model.kwargs
@@ -454,9 +442,7 @@ def test_estimators_inherit_the_run_seed_instead_of_a_hardcoded_one() -> None:
         "has_no_seed": {"enabled": True, "import_path": "sklearn.cross_decomposition.PLSRegression"},
     }
 
-    configs = ModelConfigFactory(registry=registry).build_model_configs(
-        num_features=4, default_seed=7
-    )
+    configs = ModelConfigFactory(registry=registry).build_model_configs(num_features=4, default_seed=7)
 
     assert configs["inherits"]["model"].get_params()["random_state"] == 7
     assert configs["per_entry_override"]["model"].get_params()["random_state"] == 5
@@ -470,9 +456,7 @@ def test_xgboost_inherits_the_run_seed_despite_kwargs_signature() -> None:
     """XGBRegressor keeps random_state in **kwargs, so signature inspection would miss it."""
     registry = {"XGBoost": {"enabled": True, "import_path": "xgboost.XGBRegressor"}}
 
-    configs = ModelConfigFactory(registry=registry).build_model_configs(
-        num_features=4, default_seed=7
-    )
+    configs = ModelConfigFactory(registry=registry).build_model_configs(num_features=4, default_seed=7)
 
     assert configs["XGBoost"]["model"].get_params()["random_state"] == 7
 
@@ -563,9 +547,7 @@ def test_factory_builds_tabicl_from_shipped_registry() -> None:
     spec = {**_tabicl_spec(), "enabled": True}
 
     # A seed that is not TabICL's own default (42), so inheritance is distinguishable from it.
-    configs = ModelConfigFactory(registry={"TabICL": spec}).build_model_configs(
-        num_features=10, default_seed=7
-    )
+    configs = ModelConfigFactory(registry={"TabICL": spec}).build_model_configs(num_features=10, default_seed=7)
 
     model = configs["TabICL"]["model"]
     assert type(model).__name__ == "TabICLRegressor"

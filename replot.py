@@ -39,9 +39,7 @@ from yg_eo_soilnet.tracking import configure_tracking_uri
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Read the command-line options; ``argv`` defaults to the real command line."""
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument(
         "--run-id",
@@ -63,16 +61,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--only",
         default=None,
-        help=(
-            "Only redraw these kinds of figure, comma-separated (default: all): "
-            + ", ".join(ALL_KINDS)
-        ),
+        help=("Only redraw these kinds of figure, comma-separated (default: all): " + ", ".join(ALL_KINDS)),
     )
     parser.add_argument(
         "--since",
         default=None,
-        help="With --experiment, skip runs that started before this date (YYYY-MM-DD), read in "
-        "local time.",
+        help="With --experiment, skip runs that started before this date (YYYY-MM-DD), read in local time.",
     )
     parser.add_argument(
         "--dry-run",
@@ -89,9 +83,7 @@ def _kinds(only: str | None) -> list[str] | None:
     kinds = [kind.strip() for kind in only.split(",") if kind.strip()]
     unknown = [kind for kind in kinds if kind not in ALL_KINDS]
     if unknown:
-        raise SystemExit(
-            f"Unknown figure kind(s): {', '.join(unknown)}. Choose from: {', '.join(ALL_KINDS)}"
-        )
+        raise SystemExit(f"Unknown figure kind(s): {', '.join(unknown)}. Choose from: {', '.join(ALL_KINDS)}")
     return kinds
 
 
@@ -181,9 +173,7 @@ def main(argv: list[str] | None = None) -> int:
             outcomes.append(regenerate_child_figures(run, only=only, dry_run=args.dry_run))
         else:
             # A main run has no predictions of its own; its figures are the leaderboard pair.
-            outcomes.append(
-                regenerate_parent_figures(args.run_id, only=only, dry_run=args.dry_run)
-            )
+            outcomes.append(regenerate_parent_figures(args.run_id, only=only, dry_run=args.dry_run))
     elif args.parent_run_id:
         parent = client.get_run(args.parent_run_id)
         mlflow.set_experiment(experiment_id=parent.info.experiment_id)
@@ -195,9 +185,7 @@ def main(argv: list[str] | None = None) -> int:
         for parent in parents:
             mlflow.set_experiment(experiment_id=parent.info.experiment_id)
             logger.info(f"Replotting {parent.info.run_name or parent.info.run_id}")
-            outcomes.extend(
-                regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run)
-            )
+            outcomes.extend(regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run))
 
     written = _report(outcomes, logger, args.dry_run)
     verb = "would be refreshed" if args.dry_run else "refreshed"

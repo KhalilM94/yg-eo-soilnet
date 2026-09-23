@@ -277,9 +277,7 @@ class LightningTrainer:
                     "uncertainty_n_members": n_members,
                     "uncertainty_member_seeds": ",".join(str(seed) for seed in seeds),
                     "uncertainty_bootstrapped": False,
-                    "uncertainty_calibration_source": getattr(
-                        self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val"
-                    ),
+                    "uncertainty_calibration_source": getattr(self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val"),
                 }
             )
 
@@ -303,9 +301,7 @@ class LightningTrainer:
                         )
                     )
 
-            return self._log_ensemble(
-                target=target, model_name=model_name, members=members, seeds=seeds
-            )
+            return self._log_ensemble(target=target, model_name=model_name, members=members, seeds=seeds)
 
     def _fit_member(self, *, bundle: LightningModelBundle, index: int, seed: int) -> dict:
         """Train one ensemble member and collect everything the ensemble needs from it.
@@ -326,14 +322,10 @@ class LightningTrainer:
 
         best_model_path = self._resolve_best_checkpoint(trainer)
         validation_metrics = self._normalize_metrics(
-            self._call_trainer_method(
-                trainer, "validate", bundle.model, bundle.datamodule, ckpt_path=best_model_path
-            )
+            self._call_trainer_method(trainer, "validate", bundle.model, bundle.datamodule, ckpt_path=best_model_path)
         )
         test_metrics = self._normalize_metrics(
-            self._call_trainer_method(
-                trainer, "test", bundle.model, bundle.datamodule, ckpt_path=best_model_path
-            )
+            self._call_trainer_method(trainer, "test", bundle.model, bundle.datamodule, ckpt_path=best_model_path)
         )
 
         mlflow.log_params(
@@ -349,12 +341,8 @@ class LightningTrainer:
         if best_model_path:
             self.mlflow_logger._log_checkpoint(best_model_path)
 
-        test_predictions, test_sigmas = self._predict_split(
-            bundle, trainer, best_model_path, "predict"
-        )
-        calibration_predictions, calibration_sigmas = self._predict_split(
-            bundle, trainer, best_model_path, "val"
-        )
+        test_predictions, test_sigmas = self._predict_split(bundle, trainer, best_model_path, "predict")
+        calibration_predictions, calibration_sigmas = self._predict_split(bundle, trainer, best_model_path, "val")
 
         return {
             "full_predictions": self._predict_full_population(bundle),
@@ -418,13 +406,9 @@ class LightningTrainer:
                 dataloader = bundle.datamodule.val_dataloader()
                 if dataloader is None:
                     return None, None
-                predictions = predict_method(
-                    bundle.model, dataloaders=dataloader, ckpt_path=ckpt_path
-                )
+                predictions = predict_method(bundle.model, dataloaders=dataloader, ckpt_path=ckpt_path)
             else:
-                predictions = predict_method(
-                    bundle.model, datamodule=bundle.datamodule, ckpt_path=ckpt_path
-                )
+                predictions = predict_method(bundle.model, datamodule=bundle.datamodule, ckpt_path=ckpt_path)
         except (TypeError, RuntimeError, ValueError):
             return None, None
 
@@ -533,11 +517,7 @@ class LightningTrainer:
         All or nothing: averaging over the members that happened to work would export a number that
         is neither one member's prediction nor the ensemble's.
         """
-        full = [
-            member["full_predictions"]
-            for member in members
-            if member.get("full_predictions") is not None
-        ]
+        full = [member["full_predictions"] for member in members if member.get("full_predictions") is not None]
         if not full or len(full) != len(members):
             return None
         return aggregate(full).mean
@@ -549,16 +529,8 @@ class LightningTrainer:
         The spreads are returned only if every member reported one: averaging over some of them
         would treat the rest as certain and understate the uncertainty.
         """
-        means = [
-            member[f"{split}_predictions"]
-            for member in members
-            if member.get(f"{split}_predictions") is not None
-        ]
-        sigmas = [
-            member[f"{split}_sigmas"]
-            for member in members
-            if member.get(f"{split}_sigmas") is not None
-        ]
+        means = [member[f"{split}_predictions"] for member in members if member.get(f"{split}_predictions") is not None]
+        sigmas = [member[f"{split}_sigmas"] for member in members if member.get(f"{split}_sigmas") is not None]
         return means, (sigmas if means and len(sigmas) == len(means) else None)
 
     @staticmethod
@@ -578,9 +550,7 @@ class LightningTrainer:
         shared = set(metric_dicts[0])
         for metrics in metric_dicts[1:]:
             shared &= set(metrics)
-        return {
-            key: float(np.mean([metrics[key] for metrics in metric_dicts])) for key in sorted(shared)
-        }
+        return {key: float(np.mean([metrics[key] for metrics in metric_dicts])) for key in sorted(shared)}
 
     @staticmethod
     def _attach_preprocessing_state(bundle: LightningModelBundle) -> None:
@@ -624,9 +594,7 @@ class LightningTrainer:
         try:
             return importlib.import_module("lightning.pytorch")
         except ImportError as exc:  # pragma: no cover - exercised only when lightning is absent
-            raise ImportError(
-                "lightning.pytorch is required to execute LightningTrainer.train()."
-            ) from exc
+            raise ImportError("lightning.pytorch is required to execute LightningTrainer.train().") from exc
 
     def _call_trainer_method(self, trainer, method_name: str, model, datamodule, ckpt_path: str | None = None):
         """Call ``validate`` or ``test`` on the trainer, whichever arguments its version takes."""
@@ -729,9 +697,7 @@ class LightningTrainer:
         """The predictions alone, for callers that do not need the spread."""
         return self._flatten_predictions_with_sigma(predictions)[0]
 
-    def _flatten_predictions_with_sigma(
-        self, predictions
-    ) -> tuple[np.ndarray | None, np.ndarray | None]:
+    def _flatten_predictions_with_sigma(self, predictions) -> tuple[np.ndarray | None, np.ndarray | None]:
         """Join a list of per-batch predictions into one array, with the spreads when there are any.
 
         Returns
@@ -759,9 +725,7 @@ class LightningTrainer:
         stacked_means = np.concatenate(means, axis=0)
         # All or nothing: a partial set would pair some points' uncertainty with other points'
         # predictions.
-        stacked_sigmas = (
-            np.concatenate(sigmas, axis=0) if len(sigmas) == len(means) else None
-        )
+        stacked_sigmas = np.concatenate(sigmas, axis=0) if len(sigmas) == len(means) else None
         return stacked_means, stacked_sigmas
 
     @staticmethod

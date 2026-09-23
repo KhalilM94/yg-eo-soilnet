@@ -53,7 +53,7 @@ def default_study_name(entry: str, space: SearchSpace) -> str:
     Returns
     -------
     str
-        """
+    """
     return f"{entry}-{space.fingerprint()}"
 
 
@@ -146,6 +146,7 @@ def _log_params(params: dict[str, Any]) -> None:
 
 def _mlflow_trial_callback() -> Callable[[optuna.Study, optuna.trial.FrozenTrial], None]:
     """Build the callback that records each trial's score on the study's run."""
+
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         """Record one finished trial's score."""
         if trial.value is not None:
@@ -213,7 +214,7 @@ def run_study(
     Returns
     -------
     optuna.Study
-        """
+    """
     study = create_or_load_study(space, study_name, storage)
     # Read before optimize() adds any: n_trials is an increment on whatever is already stored, and
     # a resumed study's sparkline and counts include that history.
@@ -262,9 +263,7 @@ def run_study(
                     _log_params({f"best.{key}": value for key, value in study.best_trial.params.items()})
                     mlflow.log_metric(f"best_{space.objective.metric}", best_value)
             if artifact_dir is not None and tracker is not None:
-                write_study_artifacts(
-                    study, tracker, artifact_dir, log_to_mlflow=use_mlflow, logger=logger
-                )
+                write_study_artifacts(study, tracker, artifact_dir, log_to_mlflow=use_mlflow, logger=logger)
             if logger is not None:
                 logger.info(f"Study summary: {summary}")
     return study

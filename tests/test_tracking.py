@@ -248,9 +248,7 @@ def test_a_run_abandoned_by_a_dead_process_is_marked_killed(monkeypatch) -> None
     host = socket.gethostname()
     terminated: list = []
     runs = [_run("abandoned", {HOST_NAME_TAG: host, HOST_PID_TAG: str(_dead_pid())})]
-    monkeypatch.setattr(
-        loggers_module.mlflow.tracking, "MlflowClient", lambda: _fake_client(runs, terminated)
-    )
+    monkeypatch.setattr(loggers_module.mlflow.tracking, "MlflowClient", lambda: _fake_client(runs, terminated))
 
     assert close_stale_runs("exp") == ["abandoned"]
     assert terminated == [("abandoned", "KILLED")]
@@ -274,9 +272,7 @@ def test_the_sweep_never_touches_a_run_that_could_still_be_writing(monkeypatch) 
         # Written before runs carried ownership tags: left alone rather than guessed at.
         _run("untagged", {}),
     ]
-    monkeypatch.setattr(
-        loggers_module.mlflow.tracking, "MlflowClient", lambda: _fake_client(runs, terminated)
-    )
+    monkeypatch.setattr(loggers_module.mlflow.tracking, "MlflowClient", lambda: _fake_client(runs, terminated))
 
     assert close_stale_runs("exp") == []
     assert terminated == []
@@ -356,9 +352,7 @@ def test_a_run_whose_meta_was_truncated_is_rebuilt_as_killed(tmp_path) -> None:
     assert runs[0].info.run_name == "Run_20260906_155825"
     assert runs[0].data.tags["mlflow.user"] == "kmisbah"
     # The start is carried by the run name, to the second: 2026-09-06 15:58:25 local.
-    assert runs[0].info.start_time == int(
-        datetime.datetime(2026, 9, 6, 15, 58, 25).timestamp() * 1000
-    )
+    assert runs[0].info.start_time == int(datetime.datetime(2026, 9, 6, 15, 58, 25).timestamp() * 1000)
     assert runs[0].info.end_time >= runs[0].info.start_time
 
 
@@ -374,9 +368,7 @@ def test_a_repair_never_touches_a_run_a_live_process_could_still_be_writing(tmp_
     """Same rule as the sweep: an empty file may simply be mid-write on this host."""
     import socket
 
-    run_dir = _store_with_a_run(
-        tmp_path, tags={HOST_NAME_TAG: socket.gethostname(), HOST_PID_TAG: str(os.getpid())}
-    )
+    run_dir = _store_with_a_run(tmp_path, tags={HOST_NAME_TAG: socket.gethostname(), HOST_PID_TAG: str(os.getpid())})
     (run_dir / "meta.yaml").write_text("")
     logger = MagicMock()
 
@@ -388,9 +380,7 @@ def test_a_repair_never_touches_a_run_a_live_process_could_still_be_writing(tmp_
 def test_a_repair_reclaims_a_run_whose_process_is_gone(tmp_path) -> None:
     import socket
 
-    run_dir = _store_with_a_run(
-        tmp_path, tags={HOST_NAME_TAG: socket.gethostname(), HOST_PID_TAG: str(_dead_pid())}
-    )
+    run_dir = _store_with_a_run(tmp_path, tags={HOST_NAME_TAG: socket.gethostname(), HOST_PID_TAG: str(_dead_pid())})
     (run_dir / "meta.yaml").write_text("")
 
     assert repair_corrupt_runs("exp") == [run_dir.name]
@@ -455,9 +445,7 @@ def test_a_child_that_fails_to_tag_does_not_strand_its_parent(monkeypatch) -> No
     import mlflow
 
     with mlflow.start_run(run_name="parent") as parent:
-        monkeypatch.setattr(
-            mlflow, "set_tags", MagicMock(side_effect=RuntimeError("tracking store down"))
-        )
+        monkeypatch.setattr(mlflow, "set_tags", MagicMock(side_effect=RuntimeError("tracking store down")))
         with pytest.raises(RuntimeError):
             start_child_run("doomed")
         monkeypatch.undo()
@@ -488,9 +476,7 @@ class _CountingEstimator:
 def test_mlflow_evaluate_scores_the_predictions_already_computed(monkeypatch) -> None:
     """Static-dataset evaluation: no model, so no reload and no second inference pass."""
     captured = {}
-    monkeypatch.setattr(
-        loggers_module.mlflow.models, "evaluate", lambda **kwargs: captured.update(kwargs)
-    )
+    monkeypatch.setattr(loggers_module.mlflow.models, "evaluate", lambda **kwargs: captured.update(kwargs))
 
     frame = pd.DataFrame({"target_a": [1.0, 2.0, 3.0], "prediction": [1.1, 1.9, 3.2]})
     ChildRunLogger()._evaluate_sklearn_target(frame, "target_a")
@@ -536,9 +522,17 @@ def test_the_train_fit_diagnostic_is_switchable(enabled, monkeypatch) -> None:
     y_test = pd.Series(np.arange(10, dtype=float), name="target_a")
 
     logger = ChildRunLogger()
-    for name in ("_log_cv_results", "_log_table_artifact", "_log_metric_dict", "_promote_champion",
-                 "_log_plots", "_log_shap_slice", "_write_split_summary", "_write_json_artifact",
-                 "_evaluate_sklearn_target"):
+    for name in (
+        "_log_cv_results",
+        "_log_table_artifact",
+        "_log_metric_dict",
+        "_promote_champion",
+        "_log_plots",
+        "_log_shap_slice",
+        "_write_split_summary",
+        "_write_json_artifact",
+        "_evaluate_sklearn_target",
+    ):
         setattr(logger, name, MagicMock())
     # The explanation is built once, on the model run, and sliced per target. (None, {}) is "nothing
     # to explain"; a bare MagicMock would fail the tuple unpack at the call site.
@@ -591,9 +585,16 @@ def test_the_train_fit_diagnostic_can_be_declined_per_model(monkeypatch) -> None
 
     estimator = _CountingEstimator()
     logger = ChildRunLogger()
-    for name in ("_log_cv_results", "_log_table_artifact", "_promote_champion", "_log_plots",
-                 "_log_shap_slice", "_write_split_summary", "_write_json_artifact",
-                 "_evaluate_sklearn_target"):
+    for name in (
+        "_log_cv_results",
+        "_log_table_artifact",
+        "_promote_champion",
+        "_log_plots",
+        "_log_shap_slice",
+        "_write_split_summary",
+        "_write_json_artifact",
+        "_evaluate_sklearn_target",
+    ):
         setattr(logger, name, MagicMock())
     logger._build_shap_results = MagicMock(return_value=(None, {}))
     logged: dict = {}
@@ -655,8 +656,15 @@ def test_a_model_enters_the_registry_only_after_its_metrics_exist(monkeypatch) -
     )
 
     logger = ChildRunLogger()
-    for name in ("_log_cv_results", "_log_table_artifact", "_log_plots", "_log_shap_slice",
-                 "_write_split_summary", "_write_json_artifact", "_evaluate_sklearn_target"):
+    for name in (
+        "_log_cv_results",
+        "_log_table_artifact",
+        "_log_plots",
+        "_log_shap_slice",
+        "_write_split_summary",
+        "_write_json_artifact",
+        "_evaluate_sklearn_target",
+    ):
         setattr(logger, name, MagicMock())
     logger._build_shap_results = MagicMock(return_value=(None, {}))
     logger._log_metric_dict = lambda metrics: order.append("metrics")
@@ -788,11 +796,13 @@ def test_the_target_plan_and_the_parent_summary_can_share_one_run() -> None:
     with mlflow.start_run() as run:
         trainer._log_target_plan({("clay_pct",): {}, ("sand_pct",): {}}, {})
         # The payload log_parent_summary writes at the end of a run.
-        loggers_module.log_params_once({
-            "RANDOM_SEED": 42,
-            "COLUMNS_TO_TRANSFORM": [],
-            "SPLIT_TEST_SIZE": 0.2,
-        })
+        loggers_module.log_params_once(
+            {
+                "RANDOM_SEED": 42,
+                "COLUMNS_TO_TRANSFORM": [],
+                "SPLIT_TEST_SIZE": 0.2,
+            }
+        )
         params = _params_of(run.info.run_id)
 
     assert params["TARGET_COLUMNS"] == "clay_pct,sand_pct,total_silt_pct"
@@ -812,9 +822,14 @@ def test_the_parent_summary_no_longer_writes_target_columns(monkeypatch) -> None
     monkeypatch.setattr(parent, "_collect_leaderboard", lambda run_id: pd.DataFrame())
 
     config = SimpleNamespace(
-        DATA_FOLDER="d", DATA_FILE="f.csv", RANDOM_SEED=42,
-        TARGET_COLUMNS=["clay_pct"], COLUMNS_TO_TRANSFORM=[],
-        ENABLE_CLUSTERING=False, CLUSTERING_STRATEGY={}, SPLIT_STRATEGY="kfold",
+        DATA_FOLDER="d",
+        DATA_FILE="f.csv",
+        RANDOM_SEED=42,
+        TARGET_COLUMNS=["clay_pct"],
+        COLUMNS_TO_TRANSFORM=[],
+        ENABLE_CLUSTERING=False,
+        CLUSTERING_STRATEGY={},
+        SPLIT_STRATEGY="kfold",
     )
     try:
         parent.log_parent_summary("run-1", SimpleNamespace(config=config))
@@ -983,9 +998,7 @@ def test_the_logger_records_the_decision_without_raising() -> None:
 def test_the_registered_name_matches_the_logged_model_name() -> None:
     """Both families register under the same convention, so a target's versions accumulate in one
     place regardless of which family produced them."""
-    assert ArtifactLayout.logged_model_name("organic_matter_g_kg", "soil_cnn") == (
-        "organic_matter_g_kg_soil_cnn"
-    )
+    assert ArtifactLayout.logged_model_name("organic_matter_g_kg", "soil_cnn") == ("organic_matter_g_kg_soil_cnn")
 
 
 # --- registration wiring ----------------------------------------------------

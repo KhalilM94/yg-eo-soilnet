@@ -195,7 +195,7 @@ def test_predict_accepts_a_plain_dict_of_columns(cnn) -> None:
 # The shape every test above misses: with auxiliary_label_columns=[], _select_auxiliary returns
 # before the roster-width check, so the path that broke in production is never executed here.
 
-AUXILIARY = ["ph_lab", "clay_lab"]          # a strict subset of LAB_ROSTER, like soil_cnn-58e689
+AUXILIARY = ["ph_lab", "clay_lab"]  # a strict subset of LAB_ROSTER, like soil_cnn-58e689
 
 
 @pytest.fixture
@@ -278,9 +278,7 @@ COORD_NAMES = ["lat", "lon"]
 @pytest.fixture
 def cnn_with_coords():
     """A model with the harmonic coordinate branch, as USE_HARMONIC_COORDS produces."""
-    bundle = sequence_bundle(
-        n_points=N_POINTS, static=STATIC, modalities={"s2": BANDS}, coord_names=COORD_NAMES
-    )
+    bundle = sequence_bundle(n_points=N_POINTS, static=STATIC, modalities={"s2": BANDS}, coord_names=COORD_NAMES)
     model, datamodule = tiny_cnn(bundle)
     return model, bundle, datamodule
 
@@ -337,9 +335,7 @@ def test_a_round_tripped_point_normalizes_exactly_as_it_did_in_training(
     )
     served.apply_preprocessing_state(state)
 
-    torch.testing.assert_close(
-        served.collate(np.arange(4))["x_coords"], datamodule.collate(np.arange(4))["x_coords"]
-    )
+    torch.testing.assert_close(served.collate(np.arange(4))["x_coords"], datamodule.collate(np.arange(4))["x_coords"])
 
 
 def test_a_missing_coordinate_column_is_refused_by_name(cnn_with_coords) -> None:
@@ -391,9 +387,7 @@ def test_a_model_without_coordinates_asks_for_none(cnn) -> None:
 
 @pytest.fixture
 def cnn_with_datamodule() -> tuple[SoilCNNLightningModule, SoilSequenceDataModule, SoilSequenceBundle]:
-    bundle = sequence_bundle(
-        n_points=24, static=STATIC, modalities={"s2": BANDS}, observations=(3, 8)
-    )
+    bundle = sequence_bundle(n_points=24, static=STATIC, modalities={"s2": BANDS}, observations=(3, 8))
     model, datamodule = tiny_cnn(bundle)
     return model, datamodule, bundle
 
@@ -524,9 +518,7 @@ def test_an_unseen_category_lands_on_the_reserved_index_rather_than_shifting_the
     model, _datamodule, bundle = cnn_with_datamodule
     predictor = SoilSequencePredictor(model)
 
-    unseen = SoilSequenceBundle.from_mapping(
-        {**{field: getattr(bundle, field) for field in bundle.keys()}}
-    )
+    unseen = SoilSequenceBundle.from_mapping({**{field: getattr(bundle, field) for field in bundle.keys()}})
     unseen.static_categoricals = np.asarray([["volcanic"]] * bundle.num_points, dtype=object)
 
     predictions = predictor.predict(unseen)

@@ -284,9 +284,7 @@ def numeric_frame():
 def _pipeline(model, features, target):
     from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import PipelineBuilder
 
-    pipeline = PipelineBuilder().build(
-        model, False, categorical_cols=[], numeric_cols=list(features.columns)
-    )
+    pipeline = PipelineBuilder().build(model, False, categorical_cols=[], numeric_cols=list(features.columns))
     return pipeline.fit(features, target)
 
 
@@ -308,9 +306,7 @@ def test_a_model_the_fast_explainer_cannot_parse_still_gets_explained(monkeypatc
 
     def exploding_tree_explainer(*args, **kwargs):
         explainer = MagicMock()
-        explainer.shap_values.side_effect = ValueError(
-            "could not convert string to float: '[2.7789434E1]'"
-        )
+        explainer.shap_values.side_effect = ValueError("could not convert string to float: '[2.7789434E1]'")
         return explainer
 
     monkeypatch.setattr(shap, "TreeExplainer", exploding_tree_explainer)

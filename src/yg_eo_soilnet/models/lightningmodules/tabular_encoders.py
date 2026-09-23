@@ -169,16 +169,14 @@ class EntityEmbeddingBlock(nn.Module):
         )
         if len(self.feature_names) != len(self.cardinalities):
             raise ValueError(
-                f"Got {len(self.feature_names)} feature name(s) but "
-                f"{len(self.cardinalities)} cardinality/ies"
+                f"Got {len(self.feature_names)} feature name(s) but {len(self.cardinalities)} cardinality/ies"
             )
 
         self.embedding_dims = resolve_embedding_dims(
             self.cardinalities, embedding_dims, max_dim=max_dim, feature_names=self.feature_names
         )
         self.embeddings = nn.ModuleList(
-            nn.Embedding(cardinality, dim)
-            for cardinality, dim in zip(self.cardinalities, self.embedding_dims)
+            nn.Embedding(cardinality, dim) for cardinality, dim in zip(self.cardinalities, self.embedding_dims)
         )
         # On the joined vector, not inside one table: dropping parts of the whole categorical
         # representation regularizes, while dropping inside one lookup only adds noise to it.
@@ -211,9 +209,7 @@ class EntityEmbeddingBlock(nn.Module):
             return x_categorical.new_zeros((x_categorical.size(0), 0), dtype=torch.float32)
 
         if x_categorical.dim() != 2:
-            raise ValueError(
-                f"x_categorical must be 2-D (batch, features), got {x_categorical.dim()}-D"
-            )
+            raise ValueError(f"x_categorical must be 2-D (batch, features), got {x_categorical.dim()}-D")
         if x_categorical.size(1) != self.num_features:
             raise ValueError(
                 f"x_categorical has {x_categorical.size(1)} column(s) but this block embeds "
@@ -223,9 +219,7 @@ class EntityEmbeddingBlock(nn.Module):
         # The codes are in range by construction, so they are not checked again here: doing so
         # would cost time on every batch.
         indices = x_categorical.long()
-        embedded = [
-            embedding(indices[:, column]) for column, embedding in enumerate(self.embeddings)
-        ]
+        embedded = [embedding(indices[:, column]) for column, embedding in enumerate(self.embeddings)]
         return self.dropout(torch.cat(embedded, dim=-1))
 
 
@@ -332,9 +326,7 @@ class TabularStaticEncoder(nn.Module):
         # The numeric columns only. They are already standardized from the training points, so
         # none is the default.
         self.continuous_norm = (
-            _build_continuous_norm(continuous_norm, self.num_continuous)
-            if self.num_continuous > 0
-            else nn.Identity()
+            _build_continuous_norm(continuous_norm, self.num_continuous) if self.num_continuous > 0 else nn.Identity()
         )
 
         if self.mlp:
@@ -362,9 +354,7 @@ class TabularStaticEncoder(nn.Module):
         """The width of each category column's embedding."""
         return list(self.embeddings.embedding_dims)
 
-    def forward(
-        self, x_static: torch.Tensor, x_categorical: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
+    def forward(self, x_static: torch.Tensor, x_categorical: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Summarize one batch of covariates.
 
         Parameters
@@ -393,9 +383,7 @@ class TabularStaticEncoder(nn.Module):
         embedded = self.embeddings(x_categorical) if self.embeddings.num_features else None
         return self.forward_with_embedding(x_static, embedded)
 
-    def forward_with_embedding(
-        self, x_static: torch.Tensor, embedded: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def forward_with_embedding(self, x_static: torch.Tensor, embedded: Optional[torch.Tensor]) -> torch.Tensor:
         """Like :meth:`forward`, but given the category vectors instead of their codes.
 
         Used by the SHAP explanations: a code is looked up, not computed, so contributions cannot be

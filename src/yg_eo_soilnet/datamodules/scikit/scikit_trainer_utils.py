@@ -32,7 +32,7 @@ class CVSplitter:
         Shuffle the rows before making the folds.
     """
 
-    cv_strategy: str = 'kfold'
+    cv_strategy: str = "kfold"
     n_splits: int = 5
     random_state: int = 42
     shuffle: bool = True
@@ -59,10 +59,10 @@ class CVSplitter:
             If ``groupkfold`` is asked for without groups, or the strategy is unknown.
         """
         strategy = self.cv_strategy.lower()
-        if strategy == 'kfold':
+        if strategy == "kfold":
             cv = KFold(n_splits=self.n_splits, shuffle=self.shuffle, random_state=self.random_state)
             return list(cv.split(X))
-        if strategy == 'groupkfold':
+        if strategy == "groupkfold":
             if groups is None:
                 raise ValueError("Groups must be provided for GroupKFold CV strategy.")
             cv = GroupKFold(n_splits=self.n_splits)
@@ -128,7 +128,9 @@ class PipelineBuilder:
         tree_markers = ("tree", "forest", "boost", "xgb", "lightgbm", "catboost")
         return any(marker in model_name or marker in model_module for marker in tree_markers)
 
-    def _build_preprocessor(self, model: BaseEstimator, categorical_cols: List[str], numeric_cols: List[str]) -> ColumnTransformer:
+    def _build_preprocessor(
+        self, model: BaseEstimator, categorical_cols: List[str], numeric_cols: List[str]
+    ) -> ColumnTransformer:
         """Build the input-preparation step: fill gaps, scale numbers, encode categories."""
         is_tree_model = self._is_tree_based_model(model)
 
@@ -136,42 +138,46 @@ class PipelineBuilder:
         # model can tell a filled-in value from a measured one - as the deep-learning side does.
         # Trees are not scaled; they split on values and do not care about their range.
         numeric_steps: List[Tuple[str, BaseEstimator]] = [
-            ('imputer', SimpleImputer(strategy='median', add_indicator=True))
+            ("imputer", SimpleImputer(strategy="median", add_indicator=True))
         ]
         if not is_tree_model:
-            numeric_steps.append(('scaler', RobustScaler()))
+            numeric_steps.append(("scaler", RobustScaler()))
 
         use_ordinal = is_tree_model and str(self.tree_categorical_encoding).lower() == "ordinal"
         if use_ordinal:
             categorical_encoder: BaseEstimator = OrdinalEncoder(
-                handle_unknown='use_encoded_value',
+                handle_unknown="use_encoded_value",
                 unknown_value=-1,
                 encoded_missing_value=-1,
             )
         elif is_tree_model and self.tree_onehot_max_categories:
             categorical_encoder = OneHotEncoder(
-                handle_unknown='infrequent_if_exist',
+                handle_unknown="infrequent_if_exist",
                 max_categories=int(self.tree_onehot_max_categories),
             )
         else:
-            categorical_encoder = OneHotEncoder(handle_unknown='ignore')
+            categorical_encoder = OneHotEncoder(handle_unknown="ignore")
 
         transformers: List[Tuple[str, BaseEstimator, List[str]]] = []
         if numeric_cols:
-            transformers.append(('num', Pipeline(numeric_steps), numeric_cols))
+            transformers.append(("num", Pipeline(numeric_steps), numeric_cols))
         if categorical_cols:
-            transformers.append((
-                'cat',
-                Pipeline([
-                    # No flag here: a missing category already gets a code, or a column, of its
-                    # own, so the flag would say the same thing twice.
-                    ('imputer', SimpleImputer(strategy='most_frequent')),
-                    ('encoder', categorical_encoder),
-                ]),
-                categorical_cols,
-            ))
+            transformers.append(
+                (
+                    "cat",
+                    Pipeline(
+                        [
+                            # No flag here: a missing category already gets a code, or a column, of its
+                            # own, so the flag would say the same thing twice.
+                            ("imputer", SimpleImputer(strategy="most_frequent")),
+                            ("encoder", categorical_encoder),
+                        ]
+                    ),
+                    categorical_cols,
+                )
+            )
 
-        return ColumnTransformer(transformers=transformers, remainder='drop')
+        return ColumnTransformer(transformers=transformers, remainder="drop")
 
     def build(
         self,
@@ -204,17 +210,19 @@ class PipelineBuilder:
 
         from sklearn.compose import TransformedTargetRegressor
 
-        steps: List[Tuple[str, BaseEstimator]] = [('preprocessor', preprocessor)]
+        steps: List[Tuple[str, BaseEstimator]] = [("preprocessor", preprocessor)]
         if is_log_target:
-            steps.append((
-                'model',
-                TransformedTargetRegressor(
-                    regressor=model,
-                    func=LogTransformer().transform,
-                    inverse_func=LogTransformer().inverse_transform,
-                    check_inverse=False,
-                ),
-            ))
+            steps.append(
+                (
+                    "model",
+                    TransformedTargetRegressor(
+                        regressor=model,
+                        func=LogTransformer().transform,
+                        inverse_func=LogTransformer().inverse_transform,
+                        check_inverse=False,
+                    ),
+                )
+            )
         else:
-            steps.append(('model', model))
+            steps.append(("model", model))
         return Pipeline(steps)

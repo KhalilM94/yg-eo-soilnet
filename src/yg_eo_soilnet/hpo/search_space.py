@@ -67,7 +67,7 @@ class Objective:
         The score, usually ``val_loss``.
     direction : str
         ``"minimize"`` or ``"maximize"``.
-        """
+    """
 
     metric: str = DEFAULT_OBJECTIVE_METRIC
     direction: str = DEFAULT_OBJECTIVE_DIRECTION
@@ -124,7 +124,7 @@ class Distribution:
         Draw across orders of magnitude rather than evenly - right for a learning rate.
     when : dict, optional
         Draw it only in trials where the named settings took these values.
-        """
+    """
 
     dotted: str
     kind: str
@@ -169,7 +169,7 @@ class Distribution:
         """Whether this setting is drawn in this trial, given what has been drawn already.
 
         A condition on a setting that was itself not drawn counts as not applying, rather than as an error.
-                """
+        """
         return all(dotted in chosen and chosen[dotted] == expected for dotted, expected in self.when.items())
 
     def suggest(self, trial: optuna.Trial) -> Any:
@@ -211,7 +211,7 @@ def load_search_spaces_document(path: str) -> dict:
     -------
     dict
         Model name to its search space, as read from the YAML.
-        """
+    """
     document: dict = {}
     if os.path.isdir(path):
         split_dir = path
@@ -262,7 +262,7 @@ class SearchSpace:
     constraints : list
         Named hooks for settings that depend on one another; see
         :mod:`yg_eo_soilnet.hpo.constraints`.
-        """
+    """
 
     entry: str
     objective: Objective
@@ -383,7 +383,7 @@ class SearchSpace:
 
         The study's name ends with it, so editing a limit, the objective or a pinned value starts a new
         study rather than mixing trials that were not run under the same rules.
-                """
+        """
         payload = {
             "metric": self.objective.metric,
             "direction": self.objective.direction,

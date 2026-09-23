@@ -53,9 +53,9 @@ def test_a_single_target_is_one_group_whatever_the_mode() -> None:
 
 def test_an_entry_overrides_the_global_mode() -> None:
     assert resolve_target_groups(_config(), {"multi_target": "per_target"}) == [["target_a"], ["target_b"]]
-    assert resolve_target_groups(
-        _config(MULTI_TARGET_MODE="per_target"), {"multi_target": "joint"}
-    ) == [["target_a", "target_b"]]
+    assert resolve_target_groups(_config(MULTI_TARGET_MODE="per_target"), {"multi_target": "joint"}) == [
+        ["target_a", "target_b"]
+    ]
 
 
 def test_native_declares_capability_and_leaves_the_mode_alone() -> None:
@@ -159,9 +159,7 @@ def test_narrowing_to_a_column_the_bundle_does_not_carry_is_refused() -> None:
 def test_the_target_covariance_is_the_correlation_matrix_of_the_train_split() -> None:
     """Fitted on STANDARDIZED targets, which is the space the loss runs in - so the diagonal is 1
     and the off-diagonal is the correlation the losses compare predictions against."""
-    datamodule = SoilSequenceDataModule(
-        correlated_bundle(0.8), batch_size=16, val_size=0.25, test_size=0.25, seed=0
-    )
+    datamodule = SoilSequenceDataModule(correlated_bundle(0.8), batch_size=16, val_size=0.25, test_size=0.25, seed=0)
     datamodule.setup("fit")
 
     covariance = datamodule.target_covariance_
@@ -175,16 +173,12 @@ def test_the_target_covariance_never_sees_validation_or_test() -> None:
     """Same rule as the scaler, for the same reason: a statistic fitted across the whole population
     leaks the test split into the training objective."""
     bundle = correlated_bundle(0.8)
-    datamodule = SoilSequenceDataModule(
-        bundle, batch_size=16, val_size=0.25, test_size=0.25, seed=0
-    )
+    datamodule = SoilSequenceDataModule(bundle, batch_size=16, val_size=0.25, test_size=0.25, seed=0)
     datamodule.setup("fit")
 
     train_targets = np.asarray(bundle.targets)[datamodule.train_idx_]
     standardized = (train_targets - train_targets.mean(axis=0)) / train_targets.std(axis=0)
-    np.testing.assert_allclose(
-        datamodule.target_covariance_, np.cov(standardized, rowvar=False, ddof=0), rtol=1e-4
-    )
+    np.testing.assert_allclose(datamodule.target_covariance_, np.cov(standardized, rowvar=False, ddof=0), rtol=1e-4)
 
 
 def test_a_narrowed_datamodule_has_no_target_covariance() -> None:
@@ -399,9 +393,7 @@ def test_a_collapsed_target_is_visible_instead_of_averaged_away() -> None:
     assert logged["val_r2_target_b"] < 0.01
     # The unsuffixed value is the MEAN of the two, which is what makes it comparable with a
     # per-target run's single number.
-    assert logged["val_r2"] == pytest.approx(
-        (logged["val_r2_target_a"] + logged["val_r2_target_b"]) / 2
-    )
+    assert logged["val_r2"] == pytest.approx((logged["val_r2_target_a"] + logged["val_r2_target_b"]) / 2)
     # And the collapse shows in the spread ratio too.
     assert logged["val_pred_std_ratio_target_b"] == pytest.approx(0.0)
 
@@ -420,9 +412,19 @@ def _quiet_logger(monkeypatch, logger):
     for name in ("set_tags", "log_params", "log_metric", "log_artifact", "log_metrics"):
         monkeypatch.setattr(module.mlflow, name, MagicMock())
     monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", MagicMock())
-    for name in ("_log_plots", "_log_shap_slice", "_write_json_artifact", "_log_table_artifact",
-                 "_write_split_summary", "_log_split_summary", "_promote_champion", "_log_cv_results",
-                 "_log_checkpoint", "_tag_model_logging", "_log_pred_obs_artifact"):
+    for name in (
+        "_log_plots",
+        "_log_shap_slice",
+        "_write_json_artifact",
+        "_log_table_artifact",
+        "_write_split_summary",
+        "_log_split_summary",
+        "_promote_champion",
+        "_log_cv_results",
+        "_log_checkpoint",
+        "_tag_model_logging",
+        "_log_pred_obs_artifact",
+    ):
         monkeypatch.setattr(logger, name, MagicMock())
     # The explanation is built once, on the model run, and sliced per target. (None, {}) is "nothing
     # to explain"; a bare MagicMock would fail the tuple unpack at the call site.
@@ -544,12 +546,8 @@ def test_a_joint_run_still_reports_a_scalar_rmse_test(monkeypatch) -> None:
     metrics = logger._per_target_metrics(frame, "target_a__target_b", "soil_cnn")
 
     assert "rmse_test_target_a" in metrics and "rmse_test_target_b" in metrics
-    assert metrics["rmse_test"] == pytest.approx(
-        (metrics["rmse_test_target_a"] + metrics["rmse_test_target_b"]) / 2
-    )
-    assert metrics["r2_test"] == pytest.approx(
-        (metrics["r2_test_target_a"] + metrics["r2_test_target_b"]) / 2
-    )
+    assert metrics["rmse_test"] == pytest.approx((metrics["rmse_test_target_a"] + metrics["rmse_test_target_b"]) / 2)
+    assert metrics["r2_test"] == pytest.approx((metrics["r2_test_target_a"] + metrics["r2_test_target_b"]) / 2)
 
 
 def test_the_leaderboard_reaches_a_joint_run_s_per_target_rows(monkeypatch) -> None:
@@ -577,9 +575,7 @@ def test_the_leaderboard_reaches_a_joint_run_s_per_target_rows(monkeypatch) -> N
 
     client = SimpleNamespace(
         get_run=lambda run_id: run("parent"),
-        search_runs=lambda experiment_ids, filter_string: tree.get(
-            filter_string.split("'")[1], []
-        ),
+        search_runs=lambda experiment_ids, filter_string: tree.get(filter_string.split("'")[1], []),
     )
     monkeypatch.setattr(module.mlflow.tracking, "MlflowClient", lambda: client)
 

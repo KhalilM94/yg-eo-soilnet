@@ -91,9 +91,7 @@ def test_from_vocabularies_reproduces_a_fitted_encoder():
 
     restored = CategoricalEncoder.from_vocabularies(fitted.feature_names, fitted.vocabularies)
 
-    probe = pd.DataFrame(
-        {"texture_20cm": ["lo", "unseen"], "landform_class": ["valley", "unseen"]}
-    )
+    probe = pd.DataFrame({"texture_20cm": ["lo", "unseen"], "landform_class": ["valley", "unseen"]})
     assert restored.cardinalities == fitted.cardinalities
     assert restored.transform(probe).tolist() == fitted.transform(probe).tolist()
 

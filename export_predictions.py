@@ -49,9 +49,7 @@ BACKFILL_SUMMARY_FILE = "backfill_summary.json"
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Read the command-line options; ``argv`` defaults to the real command line."""
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--parent-run-id", required=True, help="Id of the finished main (parent) run to add the predictions to."
     )
@@ -64,14 +62,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--models",
         default=None,
-        help="Only export these models, comma-separated (e.g. Ridge,soil_cnn). Default: every model "
-        "the run trained.",
+        help="Only export these models, comma-separated (e.g. Ridge,soil_cnn). Default: every model the run trained.",
     )
     parser.add_argument(
         "--skip-models",
         default=None,
-        help="Models to leave out, comma-separated. Default: export_point_predictions.skip_models "
-        "from the config.",
+        help="Models to leave out, comma-separated. Default: export_point_predictions.skip_models from the config.",
     )
     parser.add_argument(
         "--allow-population-drift",
@@ -133,9 +129,7 @@ def rebuild_features(config, logger) -> tuple[pd.DataFrame, pd.Series]:
     features = features.astype(
         {column: "float64" for column in features.select_dtypes(include=["int64", "int32"]).columns}
     )
-    point_ids = pd.Series(
-        np.asarray(processed["point_ids"]), index=features.index, name="point_id"
-    )
+    point_ids = pd.Series(np.asarray(processed["point_ids"]), index=features.index, name="point_id")
     logger.info(f"Rebuilt {len(features)} points x {features.shape[1]} features from source.")
     return features, point_ids
 
@@ -194,9 +188,7 @@ def check_for_drift(
             "X_test.parquet), so the rebuilt data cannot be checked against what it trained on."
         )
         if not allow_population_drift:
-            raise SystemExit(
-                message + "\nPass --allow-population-drift to export anyway, unverified."
-            )
+            raise SystemExit(message + "\nPass --allow-population-drift to export anyway, unverified.")
         logger.warning(message + " Continuing unverified because --allow-population-drift was passed.")
         return report
 
@@ -230,10 +222,7 @@ def check_for_drift(
         )
 
     if added or removed:
-        message = (
-            f"The rebuilt population differs from the run's: {len(added)} point(s) added, "
-            f"{len(removed)} removed."
-        )
+        message = f"The rebuilt population differs from the run's: {len(added)} point(s) added, {len(removed)} removed."
         if added and not removed:
             # Extra points with none missing usually just mean the run's population_policy was
             # `intersect`, which recorded only the points every model family could use.
@@ -268,9 +257,7 @@ def _export_config(config, args: argparse.Namespace):
     if args.models is not None:
         proxy.EXPORT_POINT_PREDICTIONS_MODELS = [n.strip() for n in args.models.split(",") if n.strip()]
     if args.skip_models is not None:
-        proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS = [
-            n.strip() for n in args.skip_models.split(",") if n.strip()
-        ]
+        proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS = [n.strip() for n in args.skip_models.split(",") if n.strip()]
     return proxy
 
 
@@ -389,9 +376,7 @@ def match_member_checkpoints(client, child_run, checkpoint_dir: str, target_name
 
     for member in members:
         # Recent runs save each copy's checkpoint in MLflow.
-        logged = _download(
-            member.info.run_id, f"{ArtifactLayout.CHECKPOINTS}/{ArtifactLayout.CHECKPOINT_FILE}"
-        )
+        logged = _download(member.info.run_id, f"{ArtifactLayout.CHECKPOINTS}/{ArtifactLayout.CHECKPOINT_FILE}")
         index = int(member.data.params.get("ensemble_member", len(matched)))
         record = {
             "ensemble_member": index,
@@ -464,10 +449,7 @@ def sklearn_predictor(run, features: pd.DataFrame):
         except Exception as exc:
             errors.append(f"{uri}: {type(exc).__name__}: {exc}")
 
-    raise SystemExit(
-        f"Could not reload the fitted model for run {run.info.run_id}. Tried:\n  "
-        + "\n  ".join(errors)
-    )
+    raise SystemExit(f"Could not reload the fitted model for run {run.info.run_id}. Tried:\n  " + "\n  ".join(errors))
 
 
 # Sequence bundles already built in this invocation, by model name.
@@ -486,9 +468,9 @@ def sequence_bundle_for(model_name: str, config, logger):
 
         entry = (getattr(config, "LIGHTNING_MODEL_REGISTRY", None) or {}).get(model_name, {})
         logger.info(f"Building the sequence bundle for {model_name} (once, then reused).")
-        _BUNDLE_CACHE[model_name] = SoilSequenceBuilder(
-            config, logger, DataManager(config, logger)
-        ).build(sequence_data_args=dict(entry.get("sequence_data_args", {}) or {}))
+        _BUNDLE_CACHE[model_name] = SoilSequenceBuilder(config, logger, DataManager(config, logger)).build(
+            sequence_data_args=dict(entry.get("sequence_data_args", {}) or {})
+        )
     return _BUNDLE_CACHE[model_name]
 
 
@@ -522,8 +504,7 @@ def lightning_predictor(run, config, logger):
     checkpoint = _download(run.info.run_id, f"{ArtifactLayout.CHECKPOINTS}/{ArtifactLayout.CHECKPOINT_FILE}")
     if checkpoint is None:
         raise SystemExit(
-            f"Run {run.info.run_id} logged no {ArtifactLayout.CHECKPOINT_FILE}, so its weights "
-            "cannot be restored."
+            f"Run {run.info.run_id} logged no {ArtifactLayout.CHECKPOINT_FILE}, so its weights cannot be restored."
         )
 
     predictor = SoilSequencePredictor(_restore_lightning_model(checkpoint, model_name, config))
@@ -545,8 +526,7 @@ def lightning_ensemble_predictor(run, config, logger, matched: list[dict]):
     model_name = run.data.tags.get("model_name") or ""
     bundle = sequence_bundle_for(model_name, config, logger)
     predictors = [
-        SoilSequencePredictor(_restore_lightning_model(record["checkpoint"], model_name, config))
-        for record in matched
+        SoilSequencePredictor(_restore_lightning_model(record["checkpoint"], model_name, config)) for record in matched
     ]
     target_names = list(predictors[0].preprocessing_state.get("target_names") or [])
 
@@ -582,14 +562,10 @@ def backfill_child(
     if framework == "lightning" and n_members:
         # Every copy is needed: the average of some copies is not the ensemble's prediction.
         if not checkpoint_dir:
-            outcome["skipped"] = (
-                f"trained as an ensemble of {n_members} members and member recovery is disabled"
-            )
+            outcome["skipped"] = f"trained as an ensemble of {n_members} members and member recovery is disabled"
             return outcome
 
-        matched = match_member_checkpoints(
-            client, run, checkpoint_dir, split_target_names(target) or [target]
-        )
+        matched = match_member_checkpoints(client, run, checkpoint_dir, split_target_names(target) or [target])
         found = [record for record in matched if record.get("checkpoint")]
         outcome["members"] = matched
         if len(found) != int(n_members):
@@ -605,9 +581,7 @@ def backfill_child(
             f"({sum(r.get('source') == 'mlflow' for r in found)} from MLflow, "
             f"{sum(r.get('source') == 'lightning_logs' for r in found)} from {checkpoint_dir})"
         )
-        predict, child_point_ids, target_names = lightning_ensemble_predictor(
-            run, config, logger, found
-        )
+        predict, child_point_ids, target_names = lightning_ensemble_predictor(run, config, logger, found)
         n_expected = len(child_point_ids)
     elif framework == "lightning":
         predict, child_point_ids, target_names = lightning_predictor(run, config, logger)

@@ -66,16 +66,20 @@ def test_every_logged_metric_is_accepted(metric):
     "key, spec, message",
     [
         pytest.param(
-            "model.lr", {"type": "float", "low": 1e-4, "high": 1e-2, "log": True, "step": 0.1},
-            "rejects 'log' and 'step' together", id="log-and-step",
+            "model.lr",
+            {"type": "float", "low": 1e-4, "high": 1e-2, "log": True, "step": 0.1},
+            "rejects 'log' and 'step' together",
+            id="log-and-step",
         ),
         pytest.param("model.lr", {"type": "float", "low": 1.0, "high": 0.1}, "is above high", id="inverted-bounds"),
         pytest.param("model.lr", {"type": "float"}, "needs low and high", id="missing-bounds"),
         pytest.param("model.lr", {"type": "uniform", "low": 0, "high": 1}, "unknown type 'uniform'", id="unknown-type"),
         # Optuna stores choices in the study DB; structured values belong in a derive hook.
         pytest.param(
-            "model.head_hidden_dims", {"type": "categorical", "choices": [[64, 32], [32]]},
-            "Use a 'derive' hook", id="list-valued-choice",
+            "model.head_hidden_dims",
+            {"type": "categorical", "choices": [[64, 32], [32]]},
+            "Use a 'derive' hook",
+            id="list-valued-choice",
         ),
         pytest.param(
             "model.activation", {"type": "categorical", "choices": []}, "non-empty 'choices'", id="empty-choices"
@@ -98,21 +102,31 @@ def test_a_malformed_distribution_is_refused(key, spec, message):
         # Guarded keys are caught at load time, not mid-study.
         pytest.param(
             {"params": {"model.target_dim": {"type": "int", "low": 1, "high": 4}}},
-            "resolved from the datamodule", id="factory-resolved-key",
+            "resolved from the datamodule",
+            id="factory-resolved-key",
         ),
         # Draw order is declaration order, so a forward guard would silently never match.
         pytest.param(
             {
                 "params": {
-                    "model.attention_nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.fusion": "attention"}},
+                    "model.attention_nhead": {
+                        "type": "categorical",
+                        "choices": [2, 4],
+                        "when": {"model.fusion": "attention"},
+                    },
                     "model.fusion": {"type": "categorical", "choices": ["attention", "gated"]},
                 }
             },
-            "not\\s+declared before it", id="forward-when-reference",
+            "not\\s+declared before it",
+            id="forward-when-reference",
         ),
         pytest.param(
-            {"params": {"model.learning_rate": {"type": "float", "low": 1e-4, "high": 1e-2}}, "derive": ["no_such_hook"]},
-            "Unknown constraint hook", id="unknown-derive-hook",
+            {
+                "params": {"model.learning_rate": {"type": "float", "low": 1e-4, "high": 1e-2}},
+                "derive": ["no_such_hook"],
+            },
+            "Unknown constraint hook",
+            id="unknown-derive-hook",
         ),
     ],
 )
@@ -157,7 +171,10 @@ def test_a_when_guard_may_name_a_pinned_value():
             params={
                 "model.learning_rate": {"type": "float", "low": 1e-4, "high": 1e-2, "log": True},
                 "model.residual_base_dropout": {
-                    "type": "float", "low": 0.1, "high": 0.5, "when": {"model.residual_enabled": True}
+                    "type": "float",
+                    "low": 0.1,
+                    "high": 0.5,
+                    "when": {"model.residual_enabled": True},
                 },
             },
         )
@@ -172,7 +189,11 @@ def test_a_when_guard_may_name_a_pinned_value():
 def _guarded_pyramid(**options):
     return {
         "dims_pyramid": {
-            "key": "model.residual_base_hidden_dims", "min_depth": 1, "max_depth": 1, "widths": [16], **options
+            "key": "model.residual_base_hidden_dims",
+            "min_depth": 1,
+            "max_depth": 1,
+            "widths": [16],
+            **options,
         }
     }
 
@@ -257,7 +278,9 @@ def test_the_bare_divisibility_hook_leaves_other_pairs_alone():
 def test_derive_hook_builds_a_head_pyramid_of_plain_ints():
     space = _space(derive=["dims_pyramid"])
     chosen = space.suggest(
-        optuna.trial.FixedTrial({"model.learning_rate": 0.001, "head_hidden_dims_depth": 3, "head_hidden_dims_width": 128})
+        optuna.trial.FixedTrial(
+            {"model.learning_rate": 0.001, "head_hidden_dims_depth": 3, "head_hidden_dims_width": 128}
+        )
     )
 
     dims = chosen["model.head_hidden_dims"]
@@ -421,9 +444,7 @@ def test_split_entries_merge_alongside_inline_entries(tmp_path):
 def test_a_path_with_no_sibling_folder_is_unaffected(tmp_path):
     """No search_spaces/ folder next to the file (the common case) is not an error."""
     main_path = tmp_path / "search_spaces.yml"
-    main_path.write_text(
-        "solo:\n  params:\n    model.learning_rate: {type: float, low: 1.0e-4, high: 1.0e-2}\n"
-    )
+    main_path.write_text("solo:\n  params:\n    model.learning_rate: {type: float, low: 1.0e-4, high: 1.0e-2}\n")
 
     document = load_search_spaces_document(str(main_path))
 
@@ -433,9 +454,7 @@ def test_a_path_with_no_sibling_folder_is_unaffected(tmp_path):
 def test_duplicate_entry_across_main_file_and_split_folder_raises(tmp_path):
     """The same entry name declared both inline and in the split folder is a config mistake."""
     main_path = tmp_path / "search_spaces.yml"
-    main_path.write_text(
-        "toy_model:\n  params:\n    model.learning_rate: {type: float, low: 1.0e-4, high: 1.0e-2}\n"
-    )
+    main_path.write_text("toy_model:\n  params:\n    model.learning_rate: {type: float, low: 1.0e-4, high: 1.0e-2}\n")
     split_dir = tmp_path / "search_spaces"
     split_dir.mkdir()
     (split_dir / "toy_model.yml").write_text(
@@ -453,7 +472,9 @@ def test_a_derive_hook_takes_options_from_the_mapping_form():
     """One hook, different floors per model - the sequence head floors at 16, the CNN's at 8."""
     space = _space(derive=[{"dims_pyramid": {"widths": [64], "floor": 16, "max_depth": 4}}])
     chosen = space.suggest(
-        optuna.trial.FixedTrial({"model.learning_rate": 0.001, "head_hidden_dims_depth": 4, "head_hidden_dims_width": 64})
+        optuna.trial.FixedTrial(
+            {"model.learning_rate": 0.001, "head_hidden_dims_depth": 4, "head_hidden_dims_width": 64}
+        )
     )
 
     assert chosen["model.head_hidden_dims"] == [64, 32, 16, 16]  # unfloored this would end 16 -> 8
@@ -472,9 +493,7 @@ def test_the_bare_name_and_the_mapping_form_are_both_accepted():
     mapped = _space(derive=[{"dims_pyramid": {}}])
     params = {"model.learning_rate": 0.001, "head_hidden_dims_depth": 2, "head_hidden_dims_width": 64}
 
-    assert bare.suggest(optuna.trial.FixedTrial(dict(params))) == mapped.suggest(
-        optuna.trial.FixedTrial(dict(params))
-    )
+    assert bare.suggest(optuna.trial.FixedTrial(dict(params))) == mapped.suggest(optuna.trial.FixedTrial(dict(params)))
 
 
 @pytest.mark.parametrize("entry", [["a", "b"], [{"one": {}, "two": {}}], [42], [None]])
@@ -535,9 +554,7 @@ def test_the_sampler_and_the_pruner_are_not_part_of_the_fingerprint(overrides):
 def test_the_pyramid_writes_the_key_it_is_given():
     space = _space(derive=[{"dims_pyramid": {"key": "model.cnn_hidden_dims", "widths": [64]}}])
     chosen = space.suggest(
-        optuna.trial.FixedTrial(
-            {"model.learning_rate": 0.001, "cnn_hidden_dims_depth": 2, "cnn_hidden_dims_width": 64}
-        )
+        optuna.trial.FixedTrial({"model.learning_rate": 0.001, "cnn_hidden_dims_depth": 2, "cnn_hidden_dims_width": 64})
     )
 
     assert chosen["model.cnn_hidden_dims"] == [64, 32]

@@ -35,7 +35,7 @@ def best_overrides(study: optuna.Study) -> dict[str, Any]:
 
     Read back from the trial rather than drawn again: a conditional setting cannot be reproduced
     outside a live trial.
-        """
+    """
     trial = study.best_trial
     overrides = trial.user_attrs.get(OVERRIDES_ATTR)
     if overrides is None:
@@ -163,7 +163,7 @@ def export_best_config(
     -------
     dict
         ``{model name: its settings}``, as written.
-        """
+    """
     if rerank is None:
         overrides, trial_number, headline = best_overrides(study), None, None
     else:

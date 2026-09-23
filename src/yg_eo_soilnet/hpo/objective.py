@@ -43,7 +43,7 @@ class ObjectiveContext:
 
     The data, the model-list entry, the shared split and the search space. Preparing the data per trial
     would cost more than the training it feeds.
-        """
+    """
 
     entry: str
     registry_entry: dict[str, Any]
@@ -77,10 +77,7 @@ class ObjectiveContext:
 
         if target is not None:
             if target not in labels:
-                raise ValueError(
-                    f"--target {target!r} is not one of the groups this entry fits: "
-                    f"{', '.join(labels)}."
-                )
+                raise ValueError(f"--target {target!r} is not one of the groups this entry fits: {', '.join(labels)}.")
             label = target
         elif len(labels) > 1:
             # Picking one silently would tune a single target and export the result as though it
@@ -93,7 +90,9 @@ class ObjectiveContext:
         else:
             label = labels[0]
 
-        return cls(entry=entry, registry_entry=deepcopy(registry[entry]), config=config, target=label, data=data, **kwargs)
+        return cls(
+            entry=entry, registry_entry=deepcopy(registry[entry]), config=config, target=label, data=data, **kwargs
+        )
 
 
 class TrialObjective:
@@ -105,7 +104,7 @@ class TrialObjective:
         The data and settings shared by every trial.
     runner : TrialRunner
         What actually trains a trial.
-        """
+    """
 
     def __init__(
         self,
@@ -134,7 +133,7 @@ class TrialObjective:
 
         Also used when exporting a winner, so the exported file is checked by the same code that ran the
         trial - the two cannot drift apart.
-                """
+        """
         spec = apply_overrides(deepcopy(self.context.registry_entry), overrides)
         # A single-entry registry: build_lightning_configs skips anything not enabled, and the
         # study tunes one entry at a time regardless of what the file-level registry has switched on.

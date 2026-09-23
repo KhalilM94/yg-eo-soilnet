@@ -79,9 +79,7 @@ def test_a_model_rebuilt_from_the_checkpoint_alone_predicts(checkpointed) -> Non
     state = restored.get_preprocessing_state()
 
     example = example_from_state(state, auxiliary_columns=AUXILIARY, n_rows=3)
-    predictions = restored.predict_step(
-        _collate(bundle_from_frame(example, state), state), 0
-    )
+    predictions = restored.predict_step(_collate(bundle_from_frame(example, state), state), 0)
 
     assert predictions.shape[0] == 3
     assert torch.isfinite(predictions).all()
@@ -142,8 +140,8 @@ def test_the_example_asks_only_for_the_auxiliary_columns_the_model_reads(checkpo
     columns = set(example_from_state(state, auxiliary_columns=AUXILIARY).columns)
 
     assert set(AUXILIARY) <= columns
-    assert "c_e_c_meq_100g" not in columns          # in the roster, not read by this model
-    assert "organic_matter_g_kg" not in columns     # the target is never an input
+    assert "c_e_c_meq_100g" not in columns  # in the roster, not read by this model
+    assert "organic_matter_g_kg" not in columns  # the target is never an input
 
 
 def test_categoricals_use_a_real_vocabulary_entry(checkpointed) -> None:
@@ -168,24 +166,32 @@ def _relog(tmp_path, checkpoint, *, register=True):
     from yg_eo_soilnet.tracking import configure_tracking
 
     configure_tracking(
-        type("_C", (), {
-            "MLFLOW_TRACKING_URI": (tmp_path / "mlruns").as_uri(),
-            "MLFLOW_EXPERIMENT_NAME": "Relog",
-        })()
+        type(
+            "_C",
+            (),
+            {
+                "MLFLOW_TRACKING_URI": (tmp_path / "mlruns").as_uri(),
+                "MLFLOW_EXPERIMENT_NAME": "Relog",
+            },
+        )()
     )
     with mlflow.start_run() as run:
         mlflow.set_tags({"model_name": "soil_cnn", "target": "organic_matter_g_kg"})
         mlflow.log_metric("rmse_test", 7.66)
         run_id = run.info.run_id
 
-    args = type("_A", (), {
-        "checkpoint": str(checkpoint),
-        "run_id": run_id,
-        "model_class": "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule",
-        "config_path": "configs/main_config.yml",
-        "no_register": not register,
-        "rows": 3,
-    })()
+    args = type(
+        "_A",
+        (),
+        {
+            "checkpoint": str(checkpoint),
+            "run_id": run_id,
+            "model_class": "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule",
+            "config_path": "configs/main_config.yml",
+            "no_register": not register,
+            "rows": 3,
+        },
+    )()
     return run_relog(args), run_id
 
 

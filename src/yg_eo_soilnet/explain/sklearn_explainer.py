@@ -38,14 +38,14 @@ class ExplainBudgetExceeded(RuntimeError):
 
     Raised rather than quietly doing something cheaper, so the estimate and the limit are recorded and
     the skip is visible in the run.
-        """
+    """
 
 
 def _looks_like(estimator: Any, markers: tuple[str, ...]) -> bool:
     """Whether an estimator is of a given kind, judged by its class name.
 
     By name rather than by type, so XGBoost and CatBoost are recognised without importing them.
-        """
+    """
     name = estimator.__class__.__name__.lower()
     module = estimator.__class__.__module__.lower()
     return any(marker in name or marker in module for marker in markers)
@@ -94,7 +94,7 @@ def _as_values(raw: Any) -> np.ndarray:
     """The contributions as an array, keeping the per-target axis when the model has one.
 
     Kept, because a model predicting several targets has one set of contributions per target.
-        """
+    """
     return np.asarray(getattr(raw, "values", raw), dtype=np.float64)
 
 
@@ -116,7 +116,7 @@ def _agnostic(shap, estimator, background_matrix, explain_matrix, max_evals):
 
     Used for anything that is neither a tree nor a linear model. Refuses to start when the cost would
     exceed ``explain.max_evaluations``.
-        """
+    """
     n_rows, n_features = explain_matrix.shape
     evals_per_row = _AGNOSTIC_EVALS_PER_ROW(n_features)
     estimated = n_rows * evals_per_row
@@ -152,7 +152,7 @@ def _explain(shap, *, estimator, explain_matrix, background_matrix, max_evals):
     values : numpy.ndarray
     base_value : float or numpy.ndarray
     explainer_name : str
-        """
+    """
     fast = None
     if _looks_like(estimator, _TREE_MARKERS):
         fast = ("TreeExplainer", lambda: shap.TreeExplainer(estimator))
@@ -226,7 +226,7 @@ def sklearn_shap_results(
     ------
     ExplainBudgetExceeded
         If the model would cost more predictions than allowed.
-        """
+    """
     import shap
 
     preprocessor, estimator, output_space = _unwrap(fitted_estimator)
@@ -242,9 +242,7 @@ def sklearn_shap_results(
 
     seed = int(getattr(config, "RANDOM_SEED", 42) or 42)
     explain_matrix = _subsample(explain_matrix, int(getattr(config, "EXPLAIN_MAX_SAMPLES", 500)), seed)
-    background_matrix = _subsample(
-        background_matrix, int(getattr(config, "EXPLAIN_BACKGROUND_SAMPLES", 100)), seed
-    )
+    background_matrix = _subsample(background_matrix, int(getattr(config, "EXPLAIN_BACKGROUND_SAMPLES", 100)), seed)
 
     if explain_matrix.size == 0 or not feature_names:
         return []

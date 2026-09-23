@@ -235,9 +235,7 @@ class SoilSequenceBundle:
         validity = np.asarray(self.static_validity)
         if validity.ndim == 2 and validity.shape[1]:
             if validity.shape[0] != num_points:
-                raise ValueError(
-                    f"static_validity has {validity.shape[0]} row(s) but there are {num_points} point(s)"
-                )
+                raise ValueError(f"static_validity has {validity.shape[0]} row(s) but there are {num_points} point(s)")
             if validity.shape[1] != len(self.static_validity_names):
                 raise ValueError(
                     f"static_validity has {validity.shape[1]} column(s) but "
@@ -245,9 +243,7 @@ class SoilSequenceBundle:
                 )
             unknown = [name for name in self.static_validity_names if name not in self.static_feature_names]
             if unknown:
-                raise ValueError(
-                    f"static_validity_names must be a subset of static_feature_names; unknown: {unknown}"
-                )
+                raise ValueError(f"static_validity_names must be a subset of static_feature_names; unknown: {unknown}")
 
         # Categories are still raw labels, and a missing one gets the reserved code later, so only
         # the shapes matter here.
@@ -255,8 +251,7 @@ class SoilSequenceBundle:
         if categoricals.ndim == 2 and categoricals.shape[1]:
             if categoricals.shape[0] != num_points:
                 raise ValueError(
-                    f"static_categoricals has {categoricals.shape[0]} row(s) but there are "
-                    f"{num_points} point(s)"
+                    f"static_categoricals has {categoricals.shape[0]} row(s) but there are {num_points} point(s)"
                 )
             if categoricals.shape[1] != len(self.categorical_feature_names):
                 raise ValueError(
@@ -271,32 +266,24 @@ class SoilSequenceBundle:
         coords = np.asarray(self.coords)
         if coords.ndim == 2 and coords.shape[1]:
             if coords.shape[0] != num_points:
-                raise ValueError(
-                    f"coords has {coords.shape[0]} row(s) but there are {num_points} point(s)"
-                )
+                raise ValueError(f"coords has {coords.shape[0]} row(s) but there are {num_points} point(s)")
             if coords.shape[1] != len(self.coord_names):
                 raise ValueError(
-                    f"coords has {coords.shape[1]} column(s) but {len(self.coord_names)} "
-                    f"coordinate name(s)"
+                    f"coords has {coords.shape[1]} column(s) but {len(self.coord_names)} coordinate name(s)"
                 )
             self._validate_numeric_array("coords", coords, list(self.coord_names))
 
-        unknown_context = [
-            name for name in self.context_feature_names if name not in self.static_feature_names
-        ]
+        unknown_context = [name for name in self.context_feature_names if name not in self.static_feature_names]
         if unknown_context:
             raise ValueError(
-                f"context_feature_names must be a subset of static_feature_names; unknown: "
-                f"{unknown_context}"
+                f"context_feature_names must be a subset of static_feature_names; unknown: {unknown_context}"
             )
 
         # A missing lab value is allowed and is filled in later, so only the shapes matter.
         labels = np.asarray(self.label_features)
         if labels.ndim == 2 and labels.shape[1]:
             if labels.shape[0] != num_points:
-                raise ValueError(
-                    f"label_features has {labels.shape[0]} row(s) but there are {num_points} point(s)"
-                )
+                raise ValueError(f"label_features has {labels.shape[0]} row(s) but there are {num_points} point(s)")
             if labels.shape[1] != len(self.label_feature_names):
                 raise ValueError(
                     f"label_features has {labels.shape[1]} column(s) but "

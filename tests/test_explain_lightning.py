@@ -185,9 +185,7 @@ def test_channel_layout_accounts_for_every_output_channel() -> None:
     rasterizer = model.rasterizers["s2"]
     layout = rasterizer.channel_layout()
 
-    covered = sorted(
-        layout["values"] + layout["validity"] + layout["cell_observed"] + layout["month_positional"]
-    )
+    covered = sorted(layout["values"] + layout["validity"] + layout["cell_observed"] + layout["month_positional"])
     assert covered == list(range(rasterizer.output_channels))
 
 
@@ -265,8 +263,7 @@ def test_lightning_shap_values_are_additive(explained) -> None:
                 torch.cat([batches[0][key], batches[1][key]], dim=0)
                 if torch.is_tensor(batches[0][key])
                 else {
-                    name: torch.cat([batches[0][key][name], batches[1][key][name]], dim=0)
-                    for name in batches[0][key]
+                    name: torch.cat([batches[0][key][name], batches[1][key][name]], dim=0) for name in batches[0][key]
                 }
             )
             for key in batches[0]

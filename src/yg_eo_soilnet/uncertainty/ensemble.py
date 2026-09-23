@@ -41,7 +41,7 @@ def member_seeds(base_seed: int, n_members: int, stride: int = 1000) -> list[int
     --------
     >>> member_seeds(42, 3)
     [42, 1042, 2042]
-        """
+    """
     if n_members < 1:
         raise ValueError(f"n_members must be at least 1; got {n_members}")
     return [int(base_seed) + index * int(stride) for index in range(int(n_members))]
@@ -63,7 +63,7 @@ def should_bootstrap(estimator: Any, mode: str = BOOTSTRAP_AUTO) -> bool:
     Returns
     -------
     bool
-        """
+    """
     normalized = str(mode).lower()
     if normalized not in BOOTSTRAP_MODES:
         raise ValueError(f"bootstrap must be one of {BOOTSTRAP_MODES}; got {mode!r}")
@@ -79,7 +79,7 @@ def bootstrap_indices(n_rows: int, seed: int) -> np.ndarray:
     --------
     >>> len(bootstrap_indices(10, seed=42))
     10
-        """
+    """
     generator = np.random.default_rng(int(seed))
     return generator.integers(0, int(n_rows), size=int(n_rows))
 
@@ -97,7 +97,7 @@ class EnsemblePrediction:
     aleatoric_std : numpy.ndarray
         Noise the members agree about; see :term:`aleatoric uncertainty`. Only a model with a
         :term:`variance head` predicts it, and more data does not reduce it.
-        """
+    """
 
     mean: np.ndarray
     epistemic_std: np.ndarray
@@ -109,7 +109,7 @@ class EnsemblePrediction:
 
         The two kinds are combined as variances - added under a square root - because adding the spreads
         themselves would overstate the width by up to 41%.
-                """
+        """
         return np.sqrt(self.epistemic_std**2 + self.aleatoric_std**2)
 
 
@@ -129,7 +129,7 @@ def aggregate(
     Returns
     -------
     EnsemblePrediction
-        """
+    """
     if not len(member_predictions):
         raise ValueError("aggregate needs at least one member prediction")
 
@@ -147,10 +147,7 @@ def aggregate(
             )
         sigmas = np.stack([_as_2d(values) for values in member_sigmas], axis=0)
         if sigmas.shape != stacked.shape:
-            raise ValueError(
-                f"member_sigmas shape {sigmas.shape} does not match member predictions "
-                f"{stacked.shape}."
-            )
+            raise ValueError(f"member_sigmas shape {sigmas.shape} does not match member predictions {stacked.shape}.")
         aleatoric_std = np.sqrt((sigmas**2).mean(axis=0))
 
     return EnsemblePrediction(

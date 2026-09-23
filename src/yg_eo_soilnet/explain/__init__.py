@@ -46,7 +46,7 @@ def build_shap_results(*, config, backend: str, **payload) -> list[ShapResult]:
     -------
     list of ShapResult
         One per target the model predicts, in order. A model predicting several is explained once.
-        """
+    """
     if backend == "sklearn":
         from yg_eo_soilnet.explain.sklearn_explainer import sklearn_shap_results
 
@@ -70,7 +70,7 @@ def log_shap_artifacts(results: list[ShapResult], *, max_display: int = 25) -> d
     -------
     dict
         What went into the run summary.
-        """
+    """
     from yg_eo_soilnet.explain.plots import shap_bar, shap_beeswarm, shap_block_bar
 
     written: dict = {"targets": [], "artifacts": []}
@@ -104,9 +104,7 @@ def log_shap_artifacts(results: list[ShapResult], *, max_display: int = 25) -> d
                 "output_space": result.output_space,
                 "n_samples": result.n_samples,
                 "n_features": result.n_features,
-                "top_features": [
-                    result.feature_names[index] for index in result.ranking()[:10]
-                ],
+                "top_features": [result.feature_names[index] for index in result.ranking()[:10]],
                 "blocks": result.block_mean_abs(),
             }
         )

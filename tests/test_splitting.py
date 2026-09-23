@@ -254,9 +254,7 @@ def test_intersect_splits_only_the_points_every_family_can_use(toy_config, logge
     assert plan.describe()["split_n_excluded_sequence"] == 0
 
 
-def test_assign_all_labels_every_point_including_the_ones_only_sklearn_can_use(
-    toy_config, logger, tmp_path
-):
+def test_assign_all_labels_every_point_including_the_ones_only_sklearn_can_use(toy_config, logger, tmp_path):
     config = _configure(toy_config, tmp_path, "assign_all")
     provider = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence"))
 
@@ -297,9 +295,7 @@ def test_the_two_families_hold_out_the_same_points(toy_config, logger, tmp_path,
     `rmse_test` from soil_cnn are measured on the same data and belong on the same axis.
     """
     config = _configure(toy_config, tmp_path, "intersect")
-    plan = SplitPlanProvider(
-        config, logger, DataManager(config, logger), families=("sklearn", "sequence")
-    ).plan()
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
 
     sklearn_test = _sklearn_test_ids(config, logger, plan, monkeypatch)
     sequence_test = _sequence_test_ids(config, logger, plan)
@@ -311,9 +307,7 @@ def test_the_two_families_hold_out_the_same_points(toy_config, logger, tmp_path,
 def test_under_assign_all_the_sklearn_test_set_is_a_superset(toy_config, logger, tmp_path, monkeypatch):
     """The documented trade-off: shared membership, but not the identical rows."""
     config = _configure(toy_config, tmp_path, "assign_all")
-    plan = SplitPlanProvider(
-        config, logger, DataManager(config, logger), families=("sklearn", "sequence")
-    ).plan()
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
 
     sklearn_test = _sklearn_test_ids(config, logger, plan, monkeypatch)
     sequence_test = _sequence_test_ids(config, logger, plan)
@@ -324,9 +318,7 @@ def test_under_assign_all_the_sklearn_test_set_is_a_superset(toy_config, logger,
 def test_the_sklearn_fit_pool_never_touches_the_shared_test_set(toy_config, logger, tmp_path, monkeypatch):
     """X_train is train ∪ val, and neither may leak a test point into GridSearchCV."""
     config = _configure(toy_config, tmp_path, "intersect")
-    plan = SplitPlanProvider(
-        config, logger, DataManager(config, logger), families=("sklearn", "sequence")
-    ).plan()
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
 
     monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda self, path, index=False: Path(path).write_text("f"))
     monkeypatch.setattr(f"{SPLITTER_MODULE}.mlflow.log_artifacts", lambda *args, **kwargs: None)
@@ -391,15 +383,13 @@ def test_the_guard_can_be_disabled(toy_config, logger, tmp_path):
     config = _configure(toy_config, tmp_path, "intersect", n=200, unusable=180)
     config.SPLIT_MIN_POPULATION_RATIO = 0.0
 
-    plan = SplitPlanProvider(
-        config, logger, DataManager(config, logger), families=("sklearn", "sequence")
-    ).plan()
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
 
     assert len(plan.assignments) == 20
 
 
 def test_a_mass_drop_names_the_columns_that_caused_it(logger, caplog):
-    """"the bundle has 17 points" is not actionable; "these columns are 99% empty" is."""
+    """ "the bundle has 17 points" is not actionable; "these columns are 99% empty" is."""
     from yg_eo_soilnet.datamodules.frame_cleaning import drop_non_finite_rows
 
     frame = pd.DataFrame(
@@ -430,7 +420,9 @@ def datamodule(toy_config, logger) -> ScikitDataModule:
 
 def _stub_artifact_logging(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pd.DataFrame, "to_parquet", lambda self, path, index=False: Path(path).write_text("frame"))
-    monkeypatch.setattr(pd.Series, "to_parquet", lambda self, path, index=False: Path(path).write_text("series"), raising=False)
+    monkeypatch.setattr(
+        pd.Series, "to_parquet", lambda self, path, index=False: Path(path).write_text("series"), raising=False
+    )
     monkeypatch.setattr(f"{SPLITTER_MODULE}.mlflow.log_artifacts", lambda *args, **kwargs: None)
 
 
@@ -457,7 +449,13 @@ def test_preprocess_excludes_metadata_columns_even_if_present(datamodule, toy_da
 def test_preprocess_warns_when_too_many_features_are_dropped(toy_config, logger, caplog) -> None:
     toy_config.MIN_FEATURE_COUNT = 3
     toy_config.MAX_FEATURE_DROP_RATIO_WARNING = 0.2
-    toy_config.EXISTING_HS_FEATURES = {"enabled": True, "ignore": True, "prefix": "S2_", "band_count": 1, "band_names": []}
+    toy_config.EXISTING_HS_FEATURES = {
+        "enabled": True,
+        "ignore": True,
+        "prefix": "S2_",
+        "band_count": 1,
+        "band_names": [],
+    }
 
     data = pd.DataFrame(
         {
@@ -589,7 +587,9 @@ def test_split_with_clustering(
     assert frame.groupby("cluster")["split"].nunique().max() == 1
 
 
-def test_split_sanitizes_features_with_the_full_schema_filter(monkeypatch: pytest.MonkeyPatch, toy_config, logger) -> None:
+def test_split_sanitizes_features_with_the_full_schema_filter(
+    monkeypatch: pytest.MonkeyPatch, toy_config, logger
+) -> None:
     """The splitter must receive DataManager.filter_schema, not a metadata-only variant."""
     toy_config.ELIMINATED_FEATURES = ["eliminated"]
 
@@ -615,9 +615,7 @@ def test_load_frame_joins_targets_when_static_frame_lacks_them(tmp_path: Path, t
     pd.DataFrame({"point_id": [1], "lat": [0.0], "lon": [0.0], "feature": [10.0]}).to_csv(
         tmp_path / "static.csv", index=False
     )
-    pd.DataFrame({"point_id": [1], "target_a": [1.0], "target_b": [2.0]}).to_csv(
-        tmp_path / "targets.csv", index=False
-    )
+    pd.DataFrame({"point_id": [1], "target_a": [1.0], "target_b": [2.0]}).to_csv(tmp_path / "targets.csv", index=False)
 
     toy_config.DATA_FOLDER = str(tmp_path)
     toy_config.DATA_FILE = "static.csv"
@@ -656,6 +654,4 @@ def test_clustering_with_a_non_strategy_raises_instead_of_returning_empty_splits
         index=pd.Index(range(len(toy_dataframe))),
     )
     with pytest.raises(TypeError, match="did not resolve to a BaseSpatialClusterStrategy"):
-        UnifiedSplitter(toy_config, logger).build_plan(
-            pd.Index(range(len(toy_dataframe))), coordinates=coordinates
-        )
+        UnifiedSplitter(toy_config, logger).build_plan(pd.Index(range(len(toy_dataframe))), coordinates=coordinates)

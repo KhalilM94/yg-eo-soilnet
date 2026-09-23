@@ -108,9 +108,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_STORAGE,
         help=f"Where studies are stored, as an Optuna storage URL (default: {DEFAULT_STORAGE}).",
     )
-    parser.add_argument(
-        "--reset", action="store_true", help="Delete the study, and all its trials, before running."
-    )
+    parser.add_argument("--reset", action="store_true", help="Delete the study, and all its trials, before running.")
     parser.add_argument(
         "--seed", type=int, default=None, help="Random seed for the trials (default: RANDOM_SEED from the config)."
     )
@@ -148,9 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--top-n", type=int, default=10, help="How many of the best trials to list at the end (default 10)."
     )
-    parser.add_argument(
-        "--verbose", action="store_true", help="Show Lightning's own training output for every trial."
-    )
+    parser.add_argument("--verbose", action="store_true", help="Show Lightning's own training output for every trial.")
     parser.add_argument(
         "--no-mlflow",
         action="store_true",

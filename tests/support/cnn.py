@@ -18,9 +18,7 @@ from tests.support.builders import sequence_builder_config
 LABEL_NAMES = ["lab_a", "lab_b", "lab_c"]
 
 
-def cnn_batch(
-    batch_size=4, length=24, channels=3, seed=0, start="2019-01-01", months_step=1, year_offset=0, labels=3
-):
+def cnn_batch(batch_size=4, length=24, channels=3, seed=0, start="2019-01-01", months_step=1, year_offset=0, labels=3):
     generator = torch.Generator().manual_seed(seed)
     dates = pd.date_range(start, periods=length, freq=f"{months_step}MS")
     if year_offset:
@@ -84,9 +82,7 @@ def write_sequence_csvs(tmp_path: Path, dates_by_point, split: bool = False):
             # Measured lab values: named in LABEL_COLUMNS so they are never features, but carried
             # on the bundle so a model may opt into them. lab_sparse is deliberately incomplete.
             "lab_dense": [100.0 + 10.0 * index for index in range(len(point_ids))],
-            "lab_sparse": [
-                np.nan if index % 2 else 5.0 + index for index in range(len(point_ids))
-            ],
+            "lab_sparse": [np.nan if index % 2 else 5.0 + index for index in range(len(point_ids))],
         }
     )
     targets_df = static_df

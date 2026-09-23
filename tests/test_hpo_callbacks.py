@@ -201,9 +201,7 @@ def test_plain_mode_logs_one_line_per_trial():
 
 def test_plain_mode_marks_a_pruned_trial():
     logger, log_stream = _logger("plain_pruned")
-    progress = StudyProgress(
-        n_trials=3, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO()
-    )
+    progress = StudyProgress(n_trials=3, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO())
     study = optuna.create_study(direction="maximize")
 
     with progress:
@@ -218,9 +216,7 @@ def test_a_pruned_trial_that_reported_a_value_still_reads_as_pruned():
     """Optuna keeps the last intermediate value on a PRUNED trial, so `value is None` is not the
     test for completion - such a trial used to print as if it had finished."""
     logger, log_stream = _logger("plain_pruned_valued")
-    progress = StudyProgress(
-        n_trials=3, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO()
-    )
+    progress = StudyProgress(n_trials=3, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO())
     study = optuna.create_study(direction="maximize")
 
     def objective(trial):
@@ -243,9 +239,7 @@ def test_a_pruned_trial_that_reported_a_value_still_reads_as_pruned():
 
 def test_plain_mode_emits_an_epoch_heartbeat():
     logger, log_stream = _logger("plain_epochs")
-    progress = StudyProgress(
-        n_trials=1, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO()
-    )
+    progress = StudyProgress(n_trials=1, objective=MAXIMIZE, mode="plain", logger=logger, stream=StringIO())
 
     with progress:
         progress.start_trial(20)  # heartbeat every 20 // 10 == 2 epochs

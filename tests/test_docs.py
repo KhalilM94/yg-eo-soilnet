@@ -53,11 +53,7 @@ def test_pages_do_not_document_options_that_are_gone(page):
 
     text = (CLI_DOCS / page).read_text()
     # Only the options tables are checked, where a flag is written as `--name` in a cell.
-    documented = {
-        line.split("`")[1]
-        for line in text.splitlines()
-        if line.startswith("| `--")
-    }
+    documented = {line.split("`")[1] for line in text.splitlines() if line.startswith("| `--")}
     stale = sorted(documented - flags)
     assert not stale, f"docs/cli/{page} documents {stale}, which {script} no longer accepts."
 

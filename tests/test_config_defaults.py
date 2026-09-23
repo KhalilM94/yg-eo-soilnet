@@ -76,16 +76,13 @@ INTENTIONAL_DIVERGENCES = {
         "The fallback is only reached when the whole split: block is absent, which the shipped "
         "file never does. 0.2 is the conventional value; 0.15 is this dataset's choice."
     ),
-    "SPLIT_VAL_SIZE": (
-        "As SPLIT_TEST_SIZE: only reached with no split: block at all."
-    ),
+    "SPLIT_VAL_SIZE": ("As SPLIT_TEST_SIZE: only reached with no split: block at all."),
     "TEMPORAL_FEATURES_ENABLED": (
         "Off unless a time series is configured. A dataset of static covariates alone is a "
         "legitimate run, and it has no dates to build sequences from."
     ),
     "UNCERTAINTY_ENABLED": (
-        "Opt-in: training an ensemble multiplies the cost of every model. The shipped file asks "
-        "for it explicitly."
+        "Opt-in: training an ensemble multiplies the cost of every model. The shipped file asks for it explicitly."
     ),
     "UNCERTAINTY_N_MEMBERS": (
         "Cost scales linearly with it. The fallback of 5 is the YAML's own 'for a report' value; "
@@ -183,9 +180,7 @@ def _comparable_settings(config: Config) -> dict:
     }
 
 
-def test_every_disagreement_with_the_shipped_configuration_is_written_down(
-    shipped_config, minimal_config
-):
+def test_every_disagreement_with_the_shipped_configuration_is_written_down(shipped_config, minimal_config):
     """The guard itself: a fallback that disagrees with the shipped file must be listed as such."""
     shipped = _comparable_settings(shipped_config)
     fallbacks = _comparable_settings(minimal_config)
@@ -193,9 +188,7 @@ def test_every_disagreement_with_the_shipped_configuration_is_written_down(
     unexplained = {
         name: (value, fallbacks.get(name))
         for name, value in shipped.items()
-        if name in fallbacks
-        and value != fallbacks[name]
-        and name not in INTENTIONAL_DIVERGENCES
+        if name in fallbacks and value != fallbacks[name] and name not in INTENTIONAL_DIVERGENCES
     }
     assert not unexplained, (
         "These settings fall back to a value the shipped configuration disagrees with, so "
@@ -220,8 +213,7 @@ def test_the_divergence_table_has_no_stale_entries(shipped_config, minimal_confi
         if name in shipped and name in fallbacks and shipped[name] == fallbacks[name]
     ]
     assert not stale, (
-        f"These settings now agree with their fallback: {sorted(stale)}. Remove them from "
-        "INTENTIONAL_DIVERGENCES."
+        f"These settings now agree with their fallback: {sorted(stale)}. Remove them from INTENTIONAL_DIVERGENCES."
     )
 
 
@@ -278,8 +270,7 @@ def test_the_model_list_divergence_table_has_no_stale_entries(minimal_config):
     stale = [
         setting
         for path, setting in LIGHTNING_DEFAULT_SETTINGS.items()
-        if setting in LIGHTNING_INTENTIONAL_DIVERGENCES
-        and _at(defaults, path) == getattr(minimal_config, setting)
+        if setting in LIGHTNING_INTENTIONAL_DIVERGENCES and _at(defaults, path) == getattr(minimal_config, setting)
     ]
     assert not stale, (
         f"These settings now agree with their fallback: {sorted(stale)}. Remove them from "

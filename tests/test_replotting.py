@@ -107,9 +107,7 @@ def test_a_run_missing_its_tags_is_skipped():
 
 def test_a_joint_model_run_defers_to_its_per_target_children():
     """It holds the fitted model and the joint frame, but draws no pred-vs-obs of its own."""
-    outcome = regenerate_child_figures(
-        _run(target="clay_pct__sand_pct", model_name="soil_cnn")
-    )
+    outcome = regenerate_child_figures(_run(target="clay_pct__sand_pct", model_name="soil_cnn"))
     assert "per-target children" in outcome["skipped"]
 
 
@@ -138,7 +136,7 @@ def test_the_cv_figure_matches_what_training_would_have_drawn(param_columns, exp
 
 
 def test_the_bar_label_is_recovered_from_the_params_that_recorded_it():
-    """"bar: ±1σ" against "bar: conformal 95%" is what makes the PICP beside it interpretable."""
+    """ "bar: ±1σ" against "bar: conformal 95%" is what makes the PICP beside it interpretable."""
     sigma_run = _run(
         target="clay_pct",
         model_name="soil_cnn",

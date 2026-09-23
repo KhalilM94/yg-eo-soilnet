@@ -80,7 +80,9 @@ class TabularPreprocessor:
 
         X = data[valid_feature_columns]
         categorical_cols = [
-            col for col in self.config.CATEGORICAL_FEATURES if col in X.columns and col not in self.config.EXCLUDE_CATEGORICAL
+            col
+            for col in self.config.CATEGORICAL_FEATURES
+            if col in X.columns and col not in self.config.EXCLUDE_CATEGORICAL
         ]
         # The same check the deep-learning side makes, so a column too empty to fill in stops both
         # families. Numeric columns only: a missing category is a code of its own, not a filled gap.

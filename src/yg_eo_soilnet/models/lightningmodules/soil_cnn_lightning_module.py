@@ -381,8 +381,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         attention_static_tokens = str(attention_static_tokens).lower()
         if fusion == "attention" and attention_static_tokens not in STATIC_TOKEN_MODES:
             raise ValueError(
-                f"attention_static_tokens must be one of {list(STATIC_TOKEN_MODES)}, "
-                f"got {attention_static_tokens!r}"
+                f"attention_static_tokens must be one of {list(STATIC_TOKEN_MODES)}, got {attention_static_tokens!r}"
             )
         attention_d_model = int(attention_d_model)
         attention_nhead = int(attention_nhead)
@@ -442,9 +441,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         ]
         self.temporal_encoder_name = str(temporal_encoder).lower()
         if self.temporal_encoder_name not in {"dilated_tempcnn", "annual_grid2d"}:
-            raise ValueError(
-                f"temporal_encoder must be 'dilated_tempcnn' or 'annual_grid2d', got {temporal_encoder!r}"
-            )
+            raise ValueError(f"temporal_encoder must be 'dilated_tempcnn' or 'annual_grid2d', got {temporal_encoder!r}")
         # None lets each batch use its own span. Harmless, because empty years contribute nothing,
         # but a fixed span keeps every batch's grid the same shape.
         self.grid_years = None if grid_years in (None, 0) else max(1, int(grid_years))
@@ -481,16 +478,12 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
                 )
                 self.rasterizers[modality_name] = rasterizer
                 encoder_cls = (
-                    DilatedTempCNNEncoder
-                    if self.temporal_encoder_name == "dilated_tempcnn"
-                    else AnnualGrid2DEncoder
+                    DilatedTempCNNEncoder if self.temporal_encoder_name == "dilated_tempcnn" else AnnualGrid2DEncoder
                 )
                 self.temporal_encoders[modality_name] = encoder_cls(
                     num_channels=rasterizer.output_channels,
                     output_dim=int(
-                        self._per_modality_value(
-                            self._modality_embed_dim, modality_name, "modality_embed_dim"
-                        )
+                        self._per_modality_value(self._modality_embed_dim, modality_name, "modality_embed_dim")
                     ),
                     hidden_dims=_as_width_list(
                         self._per_modality_value(self._cnn_hidden_dims, modality_name, "cnn_hidden_dims")
@@ -590,9 +583,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         # The data sources in the order the branches are joined.
         temporal_dims = [encoder.output_dim for encoder in self.temporal_encoders.values()]
         if self.fusion_type == "attention":
-            return AttentionFusion(
-                self._static_token_dims(), temporal_dims, self.coordinate_output_dim, **attention
-            )
+            return AttentionFusion(self._static_token_dims(), temporal_dims, self.coordinate_output_dim, **attention)
         # The covariate branch keeps its width even with no covariates, so the fused vector always
         # has the same shape.
         return ConcatGatedFusion(self.static_hidden_dim, sum(temporal_dims), self.coordinate_output_dim)
@@ -781,12 +772,8 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
         # In the order of the targets, so each base lines up with the value it corrects.
         indices = [available.index(selected[name]) for name in self.target_names]
         self.residual_base_index = torch.as_tensor(indices, dtype=torch.long)
-        self.residual_base_label_mean = torch.as_tensor(
-            [label_mean[index] for index in indices], dtype=torch.float32
-        )
-        self.residual_base_label_scale = torch.as_tensor(
-            [label_scale[index] for index in indices], dtype=torch.float32
-        )
+        self.residual_base_label_mean = torch.as_tensor([label_mean[index] for index in indices], dtype=torch.float32)
+        self.residual_base_label_scale = torch.as_tensor([label_scale[index] for index in indices], dtype=torch.float32)
 
         logger.warning(
             "%s anchors on %s. These must be OUT-OF-FOLD predictions for the split this run uses: "
@@ -938,14 +925,10 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
 
     # --- forward -----------------------------------------------------------
 
-    def _encode_static(
-        self, x_static: torch.Tensor, x_categorical: Optional[torch.Tensor]
-    ) -> torch.Tensor:
+    def _encode_static(self, x_static: torch.Tensor, x_categorical: Optional[torch.Tensor]) -> torch.Tensor:
         """Summarize the covariates, or return zeros when the model has none."""
         if not self.has_static_features:
-            return torch.zeros(
-                (x_static.size(0), self.static_hidden_dim), device=x_static.device, dtype=x_static.dtype
-            )
+            return torch.zeros((x_static.size(0), self.static_hidden_dim), device=x_static.device, dtype=x_static.dtype)
         return self.static_encoder(x_static, x_categorical)
 
     def _select_coordinates(self, batch: Any, device, dtype) -> Optional[torch.Tensor]:
@@ -969,8 +952,7 @@ class SoilCNNLightningModule(SoilRegressionLightningBase):
             # At the wrong width the branch would read longitude out of the latitude column and
             # still return something well shaped.
             raise ValueError(
-                f"Batch carries {coords.size(-1)} coordinate column(s) but this model was built "
-                f"for {self.coord_dim}."
+                f"Batch carries {coords.size(-1)} coordinate column(s) but this model was built for {self.coord_dim}."
             )
         return coords
 

@@ -161,8 +161,7 @@ def assert_columns_are_dense_enough(
         return []
 
     listed = "\n".join(
-        f"  {column}: blank on {missing} of {len(frame)} rows ({ratio:.1%})"
-        for column, missing, ratio in offenders
+        f"  {column}: blank on {missing} of {len(frame)} rows ({ratio:.1%})" for column, missing, ratio in offenders
     )
     message = (
         f"{len(offenders)} covariate(s) in {label} are blank on more than "

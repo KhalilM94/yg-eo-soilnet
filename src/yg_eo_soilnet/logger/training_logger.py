@@ -6,6 +6,7 @@ import sys
 import tempfile
 from typing import Optional
 
+
 class TrainingLogger:
     """Set up where a run's messages go: the terminal, and a log file.
 
@@ -32,7 +33,7 @@ class TrainingLogger:
 
     def __init__(
         self,
-        name: str = 'ML',
+        name: str = "ML",
         log_dir: Optional[str] = None,
         log_filename: str = "logger",
         enable_file_logging: bool = True,
@@ -61,9 +62,7 @@ class TrainingLogger:
             self.log_file = os.path.join(self.log_dir, f"{self.log_filename}_training.log")
             os.makedirs(self.log_dir, exist_ok=True)
 
-        formatter: logging.Formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
+        formatter: logging.Formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
         stream_handler: logging.StreamHandler = logging.StreamHandler(sys.stdout)
         stream_handler.setFormatter(formatter)

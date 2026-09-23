@@ -146,9 +146,7 @@ def test_the_two_components_sum_to_the_total_variance():
     members = [rng.normal(size=(20, 3)) for _ in range(5)]
     sigmas = [np.abs(rng.normal(size=(20, 3))) for _ in range(5)]
     result = aggregate(members, sigmas)
-    assert np.allclose(
-        result.total_std**2, result.epistemic_std**2 + result.aleatoric_std**2
-    )
+    assert np.allclose(result.total_std**2, result.epistemic_std**2 + result.aleatoric_std**2)
 
 
 def test_aggregate_widens_a_single_target_member_to_two_dimensions():
@@ -362,9 +360,7 @@ def test_a_sigma_interval_is_k_standard_deviations():
 
 
 def test_a_conformal_interval_scales_sigma_by_its_fitted_q():
-    lower, upper = ConformalCalibrator(q=3.0, alpha=0.05, n_calib=100).intervals(
-        np.array([10.0]), np.array([0.5])
-    )
+    lower, upper = ConformalCalibrator(q=3.0, alpha=0.05, n_calib=100).intervals(np.array([10.0]), np.array([0.5]))
     assert lower[0] == pytest.approx(8.5) and upper[0] == pytest.approx(11.5)
 
 
@@ -413,9 +409,7 @@ def test_grading_a_sigma_band_against_alpha_would_have_been_wrong():
     lower, upper = SigmaInterval(k=1.0).intervals(predicted, sigma)
 
     naive = uncertainty_metrics(observed, predicted, sigma, lower, upper, alpha=0.05)
-    correct = uncertainty_metrics(
-        observed, predicted, sigma, lower, upper, alpha=effective_alpha("sigma", k=1.0)
-    )
+    correct = uncertainty_metrics(observed, predicted, sigma, lower, upper, alpha=effective_alpha("sigma", k=1.0))
     assert naive["coverage_error_test"] == pytest.approx(-0.27, abs=0.02)
     assert correct["coverage_error_test"] == pytest.approx(0.0, abs=0.02)
 
@@ -476,15 +470,15 @@ def test_the_bar_label_names_the_claim_being_made():
 def test_picp_is_the_fraction_of_observations_inside_the_interval():
     observed = np.array([0.0, 1.0, 2.0, 30.0])
     predicted = np.zeros(4)
-    metrics = uncertainty_metrics(
-        observed, predicted, np.ones(4), lower=np.full(4, -5.0), upper=np.full(4, 5.0)
-    )
+    metrics = uncertainty_metrics(observed, predicted, np.ones(4), lower=np.full(4, -5.0), upper=np.full(4, 5.0))
     assert metrics["picp_test"] == pytest.approx(0.75)
 
 
 def test_mpiw_is_the_mean_interval_width():
     metrics = uncertainty_metrics(
-        np.zeros(4), np.zeros(4), np.ones(4),
+        np.zeros(4),
+        np.zeros(4),
+        np.ones(4),
         lower=np.array([-1.0, -2.0, -3.0, -4.0]),
         upper=np.array([1.0, 2.0, 3.0, 4.0]),
     )
@@ -494,14 +488,22 @@ def test_mpiw_is_the_mean_interval_width():
 def test_coverage_error_is_signed_so_over_and_under_confidence_are_distinguishable():
     # 100% coverage at a nominal 95% is over-cautious: positive.
     over = uncertainty_metrics(
-        np.zeros(4), np.zeros(4), np.ones(4), lower=np.full(4, -9.0), upper=np.full(4, 9.0),
+        np.zeros(4),
+        np.zeros(4),
+        np.ones(4),
+        lower=np.full(4, -9.0),
+        upper=np.full(4, 9.0),
         alpha=0.05,
     )
     assert over["coverage_error_test"] == pytest.approx(0.05)
 
     # 0% coverage is over-confident: negative.
     under = uncertainty_metrics(
-        np.ones(4), np.zeros(4), np.ones(4), lower=np.full(4, -0.1), upper=np.full(4, 0.1),
+        np.ones(4),
+        np.zeros(4),
+        np.ones(4),
+        lower=np.full(4, -0.1),
+        upper=np.full(4, 0.1),
         alpha=0.05,
     )
     assert under["coverage_error_test"] == pytest.approx(-0.95)
@@ -510,14 +512,22 @@ def test_coverage_error_is_signed_so_over_and_under_confidence_are_distinguishab
 def test_the_interval_score_charges_for_width_and_for_misses():
     # One point inside a width-2 band: score is the width alone.
     inside = uncertainty_metrics(
-        np.zeros(2), np.zeros(2), np.ones(2), lower=np.full(2, -1.0), upper=np.full(2, 1.0),
+        np.zeros(2),
+        np.zeros(2),
+        np.ones(2),
+        lower=np.full(2, -1.0),
+        upper=np.full(2, 1.0),
         alpha=0.1,
     )
     assert inside["interval_score_test"] == pytest.approx(2.0)
 
     # Same band, observations 1.0 outside it: width 2 plus (2/alpha) * 1.0 = 2 + 20.
     outside = uncertainty_metrics(
-        np.full(2, 2.0), np.zeros(2), np.ones(2), lower=np.full(2, -1.0), upper=np.full(2, 1.0),
+        np.full(2, 2.0),
+        np.zeros(2),
+        np.ones(2),
+        lower=np.full(2, -1.0),
+        upper=np.full(2, 1.0),
         alpha=0.1,
     )
     assert outside["interval_score_test"] == pytest.approx(22.0)
@@ -526,12 +536,18 @@ def test_the_interval_score_charges_for_width_and_for_misses():
 def test_the_interval_score_prefers_a_narrow_covering_band_over_a_vacuous_one():
     # The property that makes it the one rankable number: coverage alone would tie these at 100%.
     narrow = uncertainty_metrics(
-        np.zeros(10), np.zeros(10), np.ones(10),
-        lower=np.full(10, -1.0), upper=np.full(10, 1.0),
+        np.zeros(10),
+        np.zeros(10),
+        np.ones(10),
+        lower=np.full(10, -1.0),
+        upper=np.full(10, 1.0),
     )
     vacuous = uncertainty_metrics(
-        np.zeros(10), np.zeros(10), np.ones(10),
-        lower=np.full(10, -1000.0), upper=np.full(10, 1000.0),
+        np.zeros(10),
+        np.zeros(10),
+        np.ones(10),
+        lower=np.full(10, -1000.0),
+        upper=np.full(10, 1000.0),
     )
     assert narrow["picp_test"] == vacuous["picp_test"] == 1.0
     assert narrow["interval_score_test"] < vacuous["interval_score_test"]
@@ -608,8 +624,11 @@ def test_omitting_the_interval_skips_the_interval_metrics_only():
 
 def test_a_degenerate_sigma_omits_the_distributional_metrics_only():
     metrics = uncertainty_metrics(
-        np.arange(100.0), np.zeros(100), np.zeros(100),
-        lower=np.full(100, -200.0), upper=np.full(100, 200.0),
+        np.arange(100.0),
+        np.zeros(100),
+        np.zeros(100),
+        lower=np.full(100, -200.0),
+        upper=np.full(100, 200.0),
     )
     assert metrics["picp_test"] == 1.0
     assert "nll_test" not in metrics
@@ -618,8 +637,11 @@ def test_a_degenerate_sigma_omits_the_distributional_metrics_only():
 
 def test_suffixed_keys_are_produced_for_a_multi_target_run():
     metrics = uncertainty_metrics(
-        np.zeros(10), np.zeros(10), np.ones(10),
-        lower=np.full(10, -1.0), upper=np.full(10, 1.0),
+        np.zeros(10),
+        np.zeros(10),
+        np.ones(10),
+        lower=np.full(10, -1.0),
+        upper=np.full(10, 1.0),
         suffix="_clay_pct",
     )
     assert "picp_test_clay_pct" in metrics
@@ -636,8 +658,11 @@ def test_rows_non_finite_in_any_column_are_dropped_together():
     observed = np.array([0.0, 0.0, 0.0, 0.0])
     sigma = np.array([1.0, np.nan, 1.0, 1.0])
     metrics = uncertainty_metrics(
-        observed, np.zeros(4), sigma,
-        lower=np.full(4, -1.0), upper=np.full(4, 1.0),
+        observed,
+        np.zeros(4),
+        sigma,
+        lower=np.full(4, -1.0),
+        upper=np.full(4, 1.0),
     )
     assert metrics["picp_test"] == 1.0
     assert metrics["mean_sigma_test"] == pytest.approx(1.0)
@@ -647,7 +672,9 @@ def test_a_negative_sigma_is_dropped_rather_than_taken_as_its_absolute_value():
     # A negative sigma means a variance was handed over where a standard deviation was expected.
     # Dropping keeps the mistake visible instead of quietly halving the reported uncertainty.
     metrics = uncertainty_metrics(
-        np.zeros(4), np.zeros(4), np.array([1.0, -1.0, 1.0, 1.0]),
+        np.zeros(4),
+        np.zeros(4),
+        np.array([1.0, -1.0, 1.0, 1.0]),
     )
     assert metrics["mean_sigma_test"] == pytest.approx(1.0)
 
@@ -792,9 +819,7 @@ def test_a_single_target_frame_with_uncertainty_still_reads_as_single_target():
     frame = eval_frame()
     frame["clay_pct"] = frame["target"]
 
-    frames = list(
-        ChildRunLogger()._iter_target_eval_frames(frame, target="clay_pct", model_name="Ridge")
-    )
+    frames = list(ChildRunLogger()._iter_target_eval_frames(frame, target="clay_pct", model_name="Ridge"))
     assert len(frames) == 1
     _yielded, target_name, prediction_column = frames[0]
     assert target_name == "clay_pct"
@@ -848,10 +873,6 @@ def test_a_joint_frame_with_uncertainty_still_fans_out_per_target():
             "target_names": ["clay_pct__sand_pct"] * 2,
         }
     )
-    frames = list(
-        ChildRunLogger()._iter_target_eval_frames(
-            frame, target="clay_pct__sand_pct", model_name="Ridge"
-        )
-    )
+    frames = list(ChildRunLogger()._iter_target_eval_frames(frame, target="clay_pct__sand_pct", model_name="Ridge"))
     assert [name for _f, name, _c in frames] == ["clay_pct", "sand_pct"]
     assert [col for _f, _n, col in frames] == ["prediction_clay_pct", "prediction_sand_pct"]

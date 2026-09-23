@@ -109,9 +109,7 @@ def base_config_paths(tmp_path: Path):
     }
 
 
-def test_config_reads_env_overrides(
-    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict
-) -> None:
+def test_config_reads_env_overrides(monkeypatch: pytest.MonkeyPatch, base_config_paths: dict) -> None:
     monkeypatch.setenv("DATA_FOLDER", "override_folder")
     monkeypatch.setenv("RANDOM_SEED", "7")
     monkeypatch.setenv("TEST_SIZE", "0.25")
@@ -386,6 +384,7 @@ common:
             lightning_registry_path=str(lightning_registry_path),
         )
 
+
 # --- unified data: block ---------------------------------------------------
 
 
@@ -446,7 +445,8 @@ def test_legacy_flat_keys_still_resolve_without_a_data_block(base_config_paths: 
 def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths: dict) -> None:
     """config.py used to reassign DATA_FILE = STATIC_FEATURES_FILE after deriving STATIC_CSV_PATH."""
     content = BASE_CONFIG_CONTENT.replace(
-        "    STATIC_FEATURES_FILE: base_static.csv", "    DATA_FILE: base_data.csv\n    STATIC_FEATURES_FILE: base_static.csv"
+        "    STATIC_FEATURES_FILE: base_static.csv",
+        "    DATA_FILE: base_data.csv\n    STATIC_FEATURES_FILE: base_static.csv",
     )
     config = Config(**_write_config(base_config_paths, content))
 
@@ -506,9 +506,7 @@ def test_registry_defaults_are_merged_into_every_entry(base_config_paths: dict) 
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
     assert registry["inheritor"]["modeltype"] == "dl"
-    assert registry["inheritor"]["trainer_args"] == {
-        "max_epochs": 500, "accelerator": "cuda", "deterministic": True
-    }
+    assert registry["inheritor"]["trainer_args"] == {"max_epochs": 500, "accelerator": "cuda", "deterministic": True}
     assert registry["inheritor"]["callbacks"]["checkpoint"]["save_top_k"] == 1
 
 
@@ -516,11 +514,11 @@ def test_an_entry_overriding_one_key_keeps_the_rest_of_the_block(base_config_pat
     """The whole point of merging per key: `max_epochs: 150` must not drop the accelerator."""
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
-    assert registry["overrider"]["trainer_args"] == {
-        "max_epochs": 150, "accelerator": "cuda", "deterministic": True
-    }
+    assert registry["overrider"]["trainer_args"] == {"max_epochs": 150, "accelerator": "cuda", "deterministic": True}
     assert registry["overrider"]["datamodule_init_args"] == {
-        "batch_size": 64, "num_workers": 11, "max_sequence_length": None
+        "batch_size": 64,
+        "num_workers": 11,
+        "max_sequence_length": None,
     }
 
 
@@ -528,9 +526,7 @@ def test_merging_recurses_into_a_callback_group(base_config_paths: dict) -> None
     """`early_stopping: {patience: 3}` keeps monitor and mode rather than replacing the group."""
     registry = _registry(base_config_paths, REGISTRY_WITH_DEFAULTS).LIGHTNING_MODEL_REGISTRY
 
-    assert registry["overrider"]["callbacks"]["early_stopping"] == {
-        "monitor": "val_loss", "mode": "min", "patience": 3
-    }
+    assert registry["overrider"]["callbacks"]["early_stopping"] == {"monitor": "val_loss", "mode": "min", "patience": 3}
 
 
 def test_defaults_is_not_itself_a_registry_entry(base_config_paths: dict) -> None:
@@ -644,9 +640,7 @@ def test_explain_switch_defaults_to_off(base_config_paths: dict) -> None:
     assert config.EXPLAIN_FAIL_ON_ERROR is False
 
 
-def test_explain_switch_honours_an_env_override(
-    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict
-) -> None:
+def test_explain_switch_honours_an_env_override(monkeypatch: pytest.MonkeyPatch, base_config_paths: dict) -> None:
     """_get_config coerces an env override to the type of the DEFAULT.
 
     Declaring EXPLAIN_ENABLED with a bool default is what makes `EXPLAIN_ENABLED=false python
@@ -737,9 +731,6 @@ def test_active_targets_are_declared_as_labels() -> None:
 # --- module paths -----------------------------------------------------------------------------
 
 
-
-
-
 # --- uncertainty interval block ---------------------------------------------------------------
 # The uncertainty interval block: read from the config, legacy spellings included.
 
@@ -768,8 +759,7 @@ def _config_with(tmp_path, uncertainty_yaml: str, *, data_spec: str = BASE_DATA_
         "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
         "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
         "    SKLEARN_REGISTRY_PATH: registry.yml\n"
-        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
-        + uncertainty_yaml
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n" + uncertainty_yaml
     )
     return Config(
         config_path=str(config_path),
@@ -779,41 +769,53 @@ def _config_with(tmp_path, uncertainty_yaml: str, *, data_spec: str = BASE_DATA_
 
 
 def test_the_interval_block_is_read_from_the_config(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         interval:
             method: sigma
             k: 2.0
-""")
+""",
+    )
     assert config.UNCERTAINTY_INTERVAL_METHOD == "sigma"
     assert config.UNCERTAINTY_INTERVAL_K == 2.0
 
 
 def test_a_config_predating_the_interval_block_still_works(tmp_path):
     """`calibration.method` is what configs in the wild set; it must keep resolving."""
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         calibration:
             method: split_conformal
             alpha: 0.10
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
     assert config.UNCERTAINTY_ALPHA == pytest.approx(0.10)
 
 
 def test_the_legacy_none_still_means_none(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         calibration:
             method: none
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "none"
 
 
 def test_the_interval_block_wins_over_the_legacy_key(tmp_path):
-    config = _config_with(tmp_path, """    uncertainty:
+    config = _config_with(
+        tmp_path,
+        """    uncertainty:
         interval:
             method: gaussian
         calibration:
             method: split_conformal
-""")
+""",
+    )
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "gaussian"
 
 

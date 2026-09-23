@@ -122,12 +122,12 @@ def test_load_tabular_data_discovers_csv_and_parquet_shards_one_level_deep(tmp_p
     static_nested.mkdir(parents=True)
     targets_nested.mkdir(parents=True)
 
-    pd.DataFrame(
-        {"point_id": [1, 2], "lat": [0.0, 0.1], "lon": [0.0, 0.1], "feature": [10.0, 20.0]}
-    ).to_csv(static_root / "part_1.csv", index=False)
-    pd.DataFrame(
-        {"point_id": [3], "lat": [0.2], "lon": [0.2], "feature": [30.0]}
-    ).to_parquet(static_nested / "part_2.parquet", index=False)
+    pd.DataFrame({"point_id": [1, 2], "lat": [0.0, 0.1], "lon": [0.0, 0.1], "feature": [10.0, 20.0]}).to_csv(
+        static_root / "part_1.csv", index=False
+    )
+    pd.DataFrame({"point_id": [3], "lat": [0.2], "lon": [0.2], "feature": [30.0]}).to_parquet(
+        static_nested / "part_2.parquet", index=False
+    )
     pd.DataFrame({"point_id": [1, 2], "target_a": [11.0, 22.0]}).to_csv(targets_root / "targets_1.csv", index=False)
     pd.DataFrame({"point_id": [3], "target_a": [33.0]}).to_parquet(targets_nested / "targets_2.parquet", index=False)
 
@@ -154,12 +154,12 @@ def test_load_tabular_data_uses_manifest_relative_to_data_folder(tmp_path: Path,
     static_nested.mkdir(parents=True)
     targets_root.mkdir(parents=True)
 
-    pd.DataFrame(
-        {"point_id": [1], "lat": [0.0], "lon": [0.0], "feature": [10.0]}
-    ).to_csv(static_root / "part_1.csv", index=False)
-    pd.DataFrame(
-        {"point_id": [2], "lat": [0.1], "lon": [0.1], "feature": [20.0]}
-    ).to_parquet(static_nested / "part_2.parquet", index=False)
+    pd.DataFrame({"point_id": [1], "lat": [0.0], "lon": [0.0], "feature": [10.0]}).to_csv(
+        static_root / "part_1.csv", index=False
+    )
+    pd.DataFrame({"point_id": [2], "lat": [0.1], "lon": [0.1], "feature": [20.0]}).to_parquet(
+        static_nested / "part_2.parquet", index=False
+    )
     pd.DataFrame({"point_id": [1], "target_a": [100.0]}).to_csv(targets_root / "targets.csv", index=False)
     pd.DataFrame({"point_id": [99], "target_a": [999.0]}).to_csv(targets_root / "ignored.csv", index=False)
 
@@ -197,15 +197,15 @@ def test_load_timeseries_data_discovers_modality_folders_one_level_deep(tmp_path
     radar_nested.mkdir(parents=True)
     optical_root.mkdir(parents=True)
 
-    pd.DataFrame(
-        {"point_id": [1], "date": ["2020-01-01"], "RADAR_VV": [0.1], "RADAR_VH": [0.2]}
-    ).to_csv(radar_root / "radar_a.csv", index=False)
-    pd.DataFrame(
-        {"point_id": [2], "date": ["2020-01-02"], "RADAR_VV": [0.3], "RADAR_VH": [0.4]}
-    ).to_parquet(radar_nested / "radar_b.parquet", index=False)
-    pd.DataFrame(
-        {"point_id": [1], "date": ["2020-01-01"], "OPT_RED": [0.3], "OPT_NIR": [0.4]}
-    ).to_csv(optical_root / "optical_a.csv", index=False)
+    pd.DataFrame({"point_id": [1], "date": ["2020-01-01"], "RADAR_VV": [0.1], "RADAR_VH": [0.2]}).to_csv(
+        radar_root / "radar_a.csv", index=False
+    )
+    pd.DataFrame({"point_id": [2], "date": ["2020-01-02"], "RADAR_VV": [0.3], "RADAR_VH": [0.4]}).to_parquet(
+        radar_nested / "radar_b.parquet", index=False
+    )
+    pd.DataFrame({"point_id": [1], "date": ["2020-01-01"], "OPT_RED": [0.3], "OPT_NIR": [0.4]}).to_csv(
+        optical_root / "optical_a.csv", index=False
+    )
 
     toy_config.DATA_FOLDER = str(tmp_path)
     toy_config.TIMESERIES_FOLDER = "timeseries"
@@ -283,9 +283,9 @@ def _write_static_and_targets(tmp_path: Path) -> None:
     pd.DataFrame(
         {"point_id": [1, 2, 3], "lat": [0.0, 0.1, 0.2], "lon": [0.0, 0.1, 0.2], "feature": [10.0, 20.0, 30.0]}
     ).to_csv(tmp_path / "static.csv", index=False)
-    pd.DataFrame(
-        {"point_id": [1, 2, 3], "target_a": [1.0, 2.0, 3.0], "target_b": [4.0, 5.0, 6.0]}
-    ).to_csv(tmp_path / "targets.csv", index=False)
+    pd.DataFrame({"point_id": [1, 2, 3], "target_a": [1.0, 2.0, 3.0], "target_b": [4.0, 5.0, 6.0]}).to_csv(
+        tmp_path / "targets.csv", index=False
+    )
 
 
 def test_load_dataset_from_joint_file_never_opens_a_targets_source(
@@ -370,9 +370,9 @@ def test_load_dataset_does_not_read_timeseries_until_accessed(
 ) -> None:
     """Time-series is lazy: a sklearn-only run must never open the large file."""
     _write_static_and_targets(tmp_path)
-    pd.DataFrame(
-        {"point_id": [1, 1], "date": ["2020-01-01", "2020-02-01"], "RADAR_VV": [0.1, 0.2]}
-    ).to_csv(tmp_path / "ts.csv", index=False)
+    pd.DataFrame({"point_id": [1, 1], "date": ["2020-01-01", "2020-02-01"], "RADAR_VV": [0.1, 0.2]}).to_csv(
+        tmp_path / "ts.csv", index=False
+    )
 
     toy_config.DATA_FOLDER = str(tmp_path)
     toy_config.DATA_FILE = "static.csv"
@@ -384,7 +384,9 @@ def test_load_dataset_does_not_read_timeseries_until_accessed(
     manager = DataManager(toy_config, logger)
     reads: list[str] = []
     original = manager._read_tabular_file
-    monkeypatch.setattr(manager, "_read_tabular_file", lambda p, **kw: (reads.append(Path(p).name), original(p, **kw))[1])
+    monkeypatch.setattr(
+        manager, "_read_tabular_file", lambda p, **kw: (reads.append(Path(p).name), original(p, **kw))[1]
+    )
 
     dataset = manager.load_dataset()
     assert dataset.has_timeseries is True
@@ -410,7 +412,9 @@ def test_load_dataset_caches_sources_until_reload(
     manager = DataManager(toy_config, logger)
     reads: list[str] = []
     original = manager._read_tabular_file
-    monkeypatch.setattr(manager, "_read_tabular_file", lambda p, **kw: (reads.append(Path(p).name), original(p, **kw))[1])
+    monkeypatch.setattr(
+        manager, "_read_tabular_file", lambda p, **kw: (reads.append(Path(p).name), original(p, **kw))[1]
+    )
 
     manager.load_dataset()
     manager.load_dataset()
@@ -457,9 +461,9 @@ def test_label_columns_are_excluded_even_when_not_being_fitted(toy_config, logge
             "point_id": [1, 2],
             "lat": [0.0, 1.0],
             "lon": [0.0, 1.0],
-            "target_a": [1.0, 2.0],   # active target
-            "target_b": [3.0, 4.0],   # a label we are not fitting
-            "ph_water": [7.0, 8.0],   # co-measured lab value
+            "target_a": [1.0, 2.0],  # active target
+            "target_b": [3.0, 4.0],  # a label we are not fitting
+            "ph_water": [7.0, 8.0],  # co-measured lab value
             "sand_pct": [30.0, 40.0],
             "elevation": [100.0, 200.0],
         }
@@ -511,9 +515,7 @@ def test_a_list_of_prefixes_drops_every_matching_column(toy_config, logger) -> N
 
 
 def test_a_single_prefix_still_works(toy_config, logger) -> None:
-    toy_config.EXISTING_HS_FEATURES = {
-        "enabled": True, "ignore": True, "band_names": [], "prefix": "S2_"
-    }
+    toy_config.EXISTING_HS_FEATURES = {"enabled": True, "ignore": True, "band_names": [], "prefix": "S2_"}
 
     dropped = DataManager(toy_config, logger).hyperspectral_drop_columns(["S2_B4", "CLIM_precip"])
 
@@ -521,8 +523,6 @@ def test_a_single_prefix_still_works(toy_config, logger) -> None:
 
 
 def test_nothing_is_dropped_while_the_block_is_switched_off(toy_config, logger) -> None:
-    toy_config.EXISTING_HS_FEATURES = {
-        "enabled": False, "ignore": True, "band_names": [], "prefix": ["S2_"]
-    }
+    toy_config.EXISTING_HS_FEATURES = {"enabled": False, "ignore": True, "band_names": [], "prefix": ["S2_"]}
 
     assert DataManager(toy_config, logger).hyperspectral_drop_columns(["S2_B4"]) == set()

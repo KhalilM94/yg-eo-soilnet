@@ -63,17 +63,13 @@ def test_the_id_column_comes_from_the_runs_own_config():
 
 
 def test_the_child_frame_pairs_each_id_with_its_own_prediction():
-    frame = point_prediction_frame(
-        ["a", "b", "c"], np.array([1.0, 2.0, 3.0]), ["clay_pct"], id_column="uuid"
-    )
+    frame = point_prediction_frame(["a", "b", "c"], np.array([1.0, 2.0, 3.0]), ["clay_pct"], id_column="uuid")
     assert list(frame.columns) == ["uuid", "clay_pct"]
     assert frame.loc[frame["uuid"] == "b", "clay_pct"].iloc[0] == 2.0
 
 
 def test_a_joint_model_contributes_one_column_per_target():
-    frame = point_prediction_frame(
-        ["a", "b"], np.array([[1.0, 10.0], [2.0, 20.0]]), ["clay_pct", "sand_pct"], "uuid"
-    )
+    frame = point_prediction_frame(["a", "b"], np.array([[1.0, 10.0], [2.0, 20.0]]), ["clay_pct", "sand_pct"], "uuid")
     assert list(frame.columns) == ["uuid", "clay_pct", "sand_pct"]
 
 

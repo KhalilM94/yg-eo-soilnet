@@ -550,11 +550,7 @@ class ConcatGatedFusion(nn.Module):
         coordinate_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Combine the branch summaries into one vector of width ``output_dim``."""
-        parts = [
-            part
-            for part in (static_features, temporal_features, coordinate_features)
-            if part is not None
-        ]
+        parts = [part for part in (static_features, temporal_features, coordinate_features) if part is not None]
         joined = parts[0] if len(parts) == 1 else torch.cat(parts, dim=-1)
         return joined * torch.sigmoid(self.gate(joined))
 
@@ -617,8 +613,7 @@ class AttentionFusion(nn.Module):
         d_model, nhead = int(d_model), int(nhead)
         if d_model % nhead != 0:
             raise ValueError(
-                f"d_model must be divisible by nhead for multi-head attention; got d_model={d_model} "
-                f"and nhead={nhead}"
+                f"d_model must be divisible by nhead for multi-head attention; got d_model={d_model} and nhead={nhead}"
             )
         if int(ff_multiplier) < 1:
             raise ValueError(f"ff_multiplier must be at least 1, got {ff_multiplier}")
@@ -694,9 +689,10 @@ class AttentionFusion(nn.Module):
         if self.coordinate_dim > 0:
             chunks += self._split(coordinate_features, [self.coordinate_dim], "coordinate")
 
-        tokens = torch.stack(
-            [tokenizer(chunk) for tokenizer, chunk in zip(self.tokenizers, chunks)], dim=1
-        ) + self.token_type
+        tokens = (
+            torch.stack([tokenizer(chunk) for tokenizer, chunk in zip(self.tokenizers, chunks)], dim=1)
+            + self.token_type
+        )
         if self.readout == "cls":
             tokens = torch.cat([self.cls_token.expand(tokens.size(0), -1, -1), tokens], dim=1)
 

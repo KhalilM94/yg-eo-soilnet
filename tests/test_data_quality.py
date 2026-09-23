@@ -184,9 +184,7 @@ def test_sklearn_and_the_sequence_family_keep_the_same_rows(toy_config, logger, 
     config = _configure(toy_config, tmp_path, _frame(n=100, missing=10))
     manager = DataManager(config, logger)
 
-    sklearn_ids = set(
-        TabularPreprocessor(config, logger, manager).usable_point_ids(manager.load_dataset().tabular)
-    )
+    sklearn_ids = set(TabularPreprocessor(config, logger, manager).usable_point_ids(manager.load_dataset().tabular))
     sequence_ids = set(SoilSequenceBuilder(config, logger, manager).usable_point_ids())
 
     assert sklearn_ids == sequence_ids

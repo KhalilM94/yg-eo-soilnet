@@ -328,7 +328,9 @@ class DataManager:
         frames = [self._read_tabular_file(path) for path in paths]
         return pd.concat(frames, ignore_index=True, sort=False)
 
-    def _load_folder_or_file(self, source_path: Optional[str], manifest_paths: Optional[list[str]] = None) -> pd.DataFrame:
+    def _load_folder_or_file(
+        self, source_path: Optional[str], manifest_paths: Optional[list[str]] = None
+    ) -> pd.DataFrame:
         """Read a source given as a list of files from the manifest, one file, or a folder."""
         if manifest_paths:
             absolute_paths = [self._resolve_data_path(path) for path in manifest_paths]
@@ -451,9 +453,7 @@ class DataManager:
         deep-learning model then sees the static covariates only.
         """
         temporal_config = self.temporal_config()
-        enabled = bool(
-            temporal_config.get("enabled", getattr(self.config, "TEMPORAL_FEATURES_ENABLED", False))
-        )
+        enabled = bool(temporal_config.get("enabled", getattr(self.config, "TEMPORAL_FEATURES_ENABLED", False)))
         return enabled and bool(self._timeseries_source())
 
     def _load_static(self) -> pd.DataFrame:
@@ -580,7 +580,9 @@ class DataManager:
         modality_frames: list[pd.DataFrame] = []
         if isinstance(manifest_timeseries, dict) and manifest_timeseries:
             for modality_name, modality_paths in manifest_timeseries.items():
-                resolved_paths = [self._resolve_data_path(path) for path in self._normalize_manifest_paths(modality_paths)]
+                resolved_paths = [
+                    self._resolve_data_path(path) for path in self._normalize_manifest_paths(modality_paths)
+                ]
                 frame_paths = [path for path in resolved_paths if path]
                 if not frame_paths:
                     continue
