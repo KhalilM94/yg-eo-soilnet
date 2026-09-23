@@ -25,6 +25,7 @@ have their own flat environment-variable names, listed in the configuration guid
 """
 
 import os
+import warnings
 import yaml
 import json
 from copy import deepcopy
@@ -647,16 +648,29 @@ class Config:
         The groups the scikit-learn folds need are written only by ``split.strategy:
         spatial_group``; with any other strategy the training used to stop on a missing key, after
         the data had been loaded.
+
+        A second, milder case only warns: the groups are built, but ``SPLIT_STRATEGY: kfold`` folds
+        without them, so the run is fine and the clustering does nothing.
         """
-        if not self.ENABLE_CLUSTERING or self.SPLIT_HOLDOUT_STRATEGY == 'spatial_group':
+        if not self.ENABLE_CLUSTERING:
             return
-        raise ValueError(
-            f"CLUSTERING_STRATEGY is enabled in {self.sklearn_config_path}, but split.strategy is "
-            f"{self.SPLIT_HOLDOUT_STRATEGY!r} in {self.config_path}. The clusters the folds group "
-            "by are only built by a spatial split, so training would stop on a missing key part "
-            "way through. Set split.strategy: spatial_group with a split.group block to hold out "
-            "whole areas, or switch CLUSTERING_STRATEGY off."
-        )
+        if self.SPLIT_HOLDOUT_STRATEGY != 'spatial_group':
+            raise ValueError(
+                f"CLUSTERING_STRATEGY is enabled in {self.sklearn_config_path}, but split.strategy "
+                f"is {self.SPLIT_HOLDOUT_STRATEGY!r} in {self.config_path}. The clusters the folds "
+                "group by are only built by a spatial split, so training would stop on a missing "
+                "key part way through. Set split.strategy: spatial_group with a split.group block "
+                "to hold out whole areas, or switch CLUSTERING_STRATEGY off."
+            )
+        if self.SPLIT_STRATEGY != 'groupkfold':
+            warnings.warn(
+                f"CLUSTERING_STRATEGY is enabled in {self.sklearn_config_path}, but SPLIT_STRATEGY "
+                f"is {self.SPLIT_STRATEGY!r} there, which folds without the groups. The clusters "
+                "are built and then ignored, so nearby points can still be split across a fold's "
+                "training and validation halves. Set SPLIT_STRATEGY: groupkfold to use them.",
+                UserWarning,
+                stacklevel=2,
+            )
 
     def _get_config(self, key: str, default: Any) -> Any:
         """Return a setting: environment variable, then each config file, then ``default``.

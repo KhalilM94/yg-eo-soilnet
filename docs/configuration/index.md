@@ -157,6 +157,12 @@ Settings shared by every deep-learning model - the processor, the epochs, early 
 `configs/lightning/models/defaults.yml`. The processor is `auto`, which means the graphics card
 when the machine has one; set `accelerator: cpu` there to insist on the CPU.
 
+The two model lists are the one part of the configuration that is **not** in the lookup chain above.
+They are not searched for a setting; each model entry is built by merging `defaults.yml` into it, and
+whatever neither names falls straight through to the code default. So a `trainer_args` key deleted
+from both files is not inherited from `main_config.yml` - it comes from `config.py`. This is why the
+two are kept in step by a test.
+
 The full meaning of every `soil_cnn` setting is in
 {class}`~yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule`,
 and the files themselves are commented throughout.

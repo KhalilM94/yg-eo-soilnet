@@ -121,6 +121,9 @@ def test_config_reads_env_overrides(
         "CLUSTERING_STRATEGY",
         '{"enabled": true, "class_path": "yg_eo_soilnet.clustering_utils.KMeansClusterStrategy", "params": {"n_clusters": 2}}',
     )
+    # Clustering that the folds actually group by, so this test is about the overrides alone and
+    # not about the warning an ignored clustering raises.
+    monkeypatch.setenv("SPLIT_STRATEGY", "groupkfold")
 
     config = Config(**base_config_paths)
 
@@ -895,6 +898,7 @@ def test_clustering_with_a_spatial_split_is_fine(tmp_path):
         tmp_path,
         """    split:
         strategy: spatial_group
+    SPLIT_STRATEGY: groupkfold
     CLUSTERING_STRATEGY:
         enabled: true
         class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
@@ -903,6 +907,26 @@ def test_clustering_with_a_spatial_split_is_fine(tmp_path):
     )
     assert config.ENABLE_CLUSTERING is True
     assert config.SPLIT_HOLDOUT_STRATEGY == "spatial_group"
+
+
+def test_clustering_that_the_folds_ignore_warns_rather_than_stopping(tmp_path):
+    """The milder half: the clusters are built, but plain kfold never groups by them.
+
+    The run works, which is why this warns instead of raising - but the near-duplicate points the
+    clustering exists to keep apart can still land on both sides of a fold.
+    """
+    with pytest.warns(UserWarning, match="SPLIT_STRATEGY"):
+        config = _config_with(
+            tmp_path,
+            """    split:
+        strategy: spatial_group
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+        )
+    assert config.SPLIT_STRATEGY == "kfold"
 
 
 def test_a_random_split_without_clustering_is_fine(tmp_path):
