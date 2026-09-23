@@ -248,12 +248,19 @@ class Config:
             self.TEMPORAL_FEATURES = self._normalize_mapping(self._get_config('TEMPORAL_FEATURES', {}))
 
         # --- data sources ----------------------------------------------------------------------
-        self.DATA_FOLDER = self._get_data_config('root', 'DATA_FOLDER', 'doukkala_ssl_datasets')
+        # These name YOUR data, so there is nothing sensible to invent when one is missing: the
+        # placeholders that used to stand here were a retired dataset's, and a run that fell back on
+        # them looked for a folder that has not existed for a long time. See _require.
+        self.DATA_FOLDER = self._require(
+            self._get_data_config('root', 'DATA_FOLDER', None),
+            'common.data.root',
+            'the folder your data files live in',
+        )
         self.DATA_ROOT = self.DATA_FOLDER
         self.DATA_INDEX_MANIFEST = self._get_data_config('manifest', 'DATA_INDEX_MANIFEST', None)
         self.DATA_INDEX_MANIFEST_PATH = self._resolve_data_path(self.DATA_INDEX_MANIFEST)
         self.DATA_MANIFEST_PATH = self.DATA_INDEX_MANIFEST_PATH
-        self.DATA_FILE = self._get_data_config('static', 'DATA_FILE', 'data.csv')
+        self.DATA_FILE = self._get_data_config('static', 'DATA_FILE', None)
         self.STATIC_FEATURES_FILE = self._get_config('STATIC_FEATURES_FILE', self.DATA_FILE)
         self.TARGETS_FILE = self._get_data_config('targets', 'TARGETS_FILE', self.DATA_FILE)
         self.STATIC_FEATURES_FOLDER = self._resolve_data_path(self._get_config('STATIC_FEATURES_FOLDER', None))
@@ -273,10 +280,21 @@ class Config:
         self.STATIC_SOURCE = self.STATIC_FEATURES_FOLDER or self.STATIC_CSV_PATH
         self.TARGETS_SOURCE = self.TARGETS_FOLDER or self._explicit_targets_path()
         self.TIMESERIES_SOURCE = self.TIMESERIES_FOLDER or self.TIMESERIES_CSV_PATH
-        self.POINT_ID_COLUMN = self._get_config('POINT_ID_COLUMN', 'point_id')
+        self.POINT_ID_COLUMN = self._require(
+            self._get_config('POINT_ID_COLUMN', None),
+            'POINT_ID_COLUMN',
+            'the column identifying each point, which the shared split is keyed on',
+        )
         self.LAT_COLUMN = self._get_config('LAT_COLUMN', 'lat')
         self.LON_COLUMN = self._get_config('LON_COLUMN', 'lon')
-        self.TIME_COLUMN = self._get_temporal_config('time_column', 'TIME_COLUMN', 'date')
+        # Only meaningful with a time series: a covariates-only run has no date column to name.
+        self.TIME_COLUMN = self._get_temporal_config('time_column', 'TIME_COLUMN', None)
+        if self.TIMESERIES_SOURCE:
+            self.TIME_COLUMN = self._require(
+                self.TIME_COLUMN,
+                'temporal.time_column',
+                'the column holding each reading\'s date',
+            )
         self.TEMPORAL_FEATURES_ENABLED = self._get_temporal_config('enabled', 'TEMPORAL_FEATURES_ENABLED', False)
         self.MODALITY_PREFIX_MAP = self._normalize_mapping(
             self._get_temporal_config('modality_prefix_map', 'MODALITY_PREFIX_MAP', {})
@@ -549,6 +567,33 @@ class Config:
 
     # --- checks -------------------------------------------------------------
 
+    def _require(self, value: Any, setting: str, describes: str) -> Any:
+        """Return a setting that names your own data, or say which one is missing.
+
+        These have no sensible fallback: a guess would send the run at a file, folder or column
+        that does not exist, and the failure would surface far from the setting that caused it.
+
+        Parameters
+        ----------
+        value : object
+            What was read, or None when nothing was.
+        setting : str
+            The setting's name, as it is written in the file.
+        describes : str
+            What it names, so the message says what to write rather than only what is missing.
+
+        Raises
+        ------
+        ValueError
+            If the setting is absent or empty.
+        """
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValueError(
+                f"{setting} is not set in {self.config_path}. It names {describes}, so there is "
+                "nothing to fall back on - set it rather than let the run guess."
+            )
+        return value
+
     def _validate(self) -> None:
         """Refuse a configuration whose settings contradict each other.
 
@@ -561,8 +606,23 @@ class Config:
             If a column is declared both as a lab column and as a category, or if clustering is
             switched on without the split that builds the clusters.
         """
+        self._validate_static_source()
         self._validate_categorical_not_label()
         self._validate_clustering_has_a_spatial_split()
+
+    def _validate_static_source(self) -> None:
+        """Refuse a configuration that never says where the static covariates are.
+
+        Checked on the resolved source rather than on one key, because three spellings name it -
+        ``common.data.static``, ``STATIC_FEATURES_FILE`` and ``STATIC_FEATURES_FOLDER`` - and a
+        manifest can list the files instead.
+        """
+        if self.STATIC_SOURCE or self.DATA_INDEX_MANIFEST_PATH:
+            return
+        raise ValueError(
+            f"No static data source is set in {self.config_path}. Set common.data.static to the "
+            "file (or folder) holding one row per sample point, beside common.data.root."
+        )
 
     def _validate_categorical_not_label(self) -> None:
         """Refuse a column declared as both a lab column and a category.

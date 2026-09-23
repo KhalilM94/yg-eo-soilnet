@@ -53,8 +53,10 @@ def test_naming_a_model_explicitly_beats_the_skip_list():
 
 
 def test_the_id_column_comes_from_the_runs_own_config():
+    """Only from the config: there is no invented default to fall back on any more."""
     assert point_id_column(_config()) == "uuid"
-    assert point_id_column(SimpleNamespace()) == "point_id"
+    with pytest.raises(AttributeError):
+        point_id_column(SimpleNamespace())
 
 
 # --- the child frame -------------------------------------------------------

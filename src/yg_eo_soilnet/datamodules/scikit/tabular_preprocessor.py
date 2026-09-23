@@ -146,7 +146,7 @@ class TabularPreprocessor:
 
     def _point_ids(self, data: pd.DataFrame) -> pd.Series:
         """The point id of every row, or its row number when the data has no id column."""
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
+        point_col = self.data_manager.point_id_column()
         if point_col in data.columns:
             return data[point_col]
         # With no id column, row numbers still key the split: both families read the same file in

@@ -42,6 +42,20 @@ First match wins:
 4. The top level of the main file.
 5. The default in the code.
 
+## Required settings
+
+Four settings name *your* data, so there is nothing sensible to fall back on. A run that omits one
+stops and says which it is, rather than guessing at a file or column that does not exist:
+
+| Setting | What it names |
+|---|---|
+| `common.data.root` | The folder your data files live in. |
+| `common.data.static` | The file, or folder, holding one row per sample point. (The older `STATIC_FEATURES_FILE` and `STATIC_FEATURES_FOLDER` spellings count too, as does a manifest.) |
+| `POINT_ID_COLUMN` | The column identifying each point, which the shared split is keyed on. |
+| `temporal.time_column` | The column holding each reading's date - required only when a time series is configured. |
+
+Everything else has a default, listed with its setting below.
+
 So a setting can be overridden for a single run without editing anything:
 
 ```bash

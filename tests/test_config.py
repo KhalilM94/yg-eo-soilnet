@@ -2,6 +2,7 @@
 
 import importlib
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,7 @@ common:
     DATA_FOLDER: base_folder
     STATIC_FEATURES_FILE: base_static.csv
     TARGETS_FILE: base_targets.csv
+    POINT_ID_COLUMN: point_id
     RANDOM_SEED: 1
     TEST_SIZE: 0.3
     DATA_SPEC_PATH: data_spec.yml
@@ -217,6 +219,8 @@ def test_config_reads_temporal_features_from_common_section(tmp_path: Path) -> N
         f"""
 common:
   DATA_FOLDER: {tmp_path}
+  POINT_ID_COLUMN: point_id
+  STATIC_FEATURES_FILE: static.csv
   DATA_SPEC_PATH: data_spec.yml
   SKLEARN_CONFIG_PATH: sklearn.yml
   LIGHTNING_CONFIG_PATH: lightning.yml
@@ -260,6 +264,7 @@ def test_config_resolves_manifest_and_folder_paths_relative_to_data_folder(tmp_p
         f"""
 common:
   DATA_FOLDER: {data_root}
+  POINT_ID_COLUMN: point_id
   DATA_INDEX_MANIFEST: index.json
   STATIC_FEATURES_FOLDER: static_features
   TARGETS_FOLDER: targets
@@ -299,6 +304,8 @@ def test_config_loads_layered_data_spec_and_family_files(tmp_path: Path) -> None
         f"""
 common:
   DATA_FOLDER: {tmp_path}
+  POINT_ID_COLUMN: point_id
+  STATIC_FEATURES_FILE: static.csv
   DATA_SPEC_PATH: data_spec.yml
   SKLEARN_CONFIG_PATH: sklearn.yml
   LIGHTNING_CONFIG_PATH: lightning.yml
@@ -387,6 +394,7 @@ common:
         targets: targets_dir
         timeseries: ts_dir
         manifest: index.json
+    POINT_ID_COLUMN: point_id
     RANDOM_SEED: 1
     DATA_SPEC_PATH: data_spec.yml
     SKLEARN_CONFIG_PATH: sklearn.yml
@@ -748,6 +756,10 @@ def _config_with(tmp_path, uncertainty_yaml: str, *, data_spec: str = BASE_DATA_
     config_path = tmp_path / "config.yml"
     config_path.write_text(
         "common:\n"
+        # Every configuration must name its own data; see Config._require.
+        "    DATA_FOLDER: base_folder\n"
+        "    STATIC_FEATURES_FILE: base_static.csv\n"
+        "    POINT_ID_COLUMN: point_id\n"
         "    DATA_SPEC_PATH: data_spec.yml\n"
         "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
         "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
@@ -913,3 +925,63 @@ existing_hs_features:
 """,
     )
     assert config.IGNORE_BANDS == ["S2_1", "S2_2", "CLIM_1", "CLIM_2"]
+
+
+# --- the settings that name your own data ----------------------------------
+# These have no sensible fallback. The values that used to stand in for them named a retired
+# dataset, so a config that omitted one looked for a folder that has not existed for years.
+
+
+@pytest.mark.parametrize(
+    ("dropped", "named"),
+    [
+        ("    DATA_FOLDER: base_folder\n", "common.data.root"),
+        ("    POINT_ID_COLUMN: point_id\n", "POINT_ID_COLUMN"),
+        ("    STATIC_FEATURES_FILE: base_static.csv\n", "common.data.static"),
+    ],
+    ids=["root", "point-id", "static"],
+)
+def test_a_setting_that_names_your_data_must_be_declared(tmp_path, dropped, named):
+    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
+    (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
+    (tmp_path / "registry.yml").write_text("enabled: true\n")
+    (tmp_path / "lightning_registry.yml").write_text(MOCK_LIGHTNING_REGISTRY)
+
+    full = (
+        "common:\n"
+        "    DATA_FOLDER: base_folder\n"
+        "    STATIC_FEATURES_FILE: base_static.csv\n"
+        "    POINT_ID_COLUMN: point_id\n"
+        "    DATA_SPEC_PATH: data_spec.yml\n"
+        "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
+        "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
+        "    SKLEARN_REGISTRY_PATH: registry.yml\n"
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
+    )
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(full.replace(dropped, ""))
+
+    with pytest.raises(ValueError, match=re.escape(named)):
+        Config(
+            config_path=str(config_path),
+            registry_path=str(tmp_path / "registry.yml"),
+            lightning_registry_path=str(tmp_path / "lightning_registry.yml"),
+        )
+
+
+def test_the_date_column_is_required_only_with_a_time_series(tmp_path):
+    """A covariates-only run has no date column to name, so it must not be asked for one."""
+    without = _config_with(tmp_path, "    temporal:\n        enabled: false\n")
+    assert without.TIME_COLUMN is None
+
+    with pytest.raises(ValueError, match="temporal.time_column"):
+        _config_with(
+            tmp_path,
+            "    data:\n"
+            "        root: base_folder\n"
+            "        static: base_static.csv\n"
+            "        timeseries: ts.csv\n"
+            "    temporal:\n"
+            "        enabled: true\n",
+        )

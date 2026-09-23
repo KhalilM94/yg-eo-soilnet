@@ -73,6 +73,9 @@ common:
 
 A relative `root` is taken from the folder you run the command in.
 
+`root`, `static` and `POINT_ID_COLUMN` are required, as is `temporal.time_column` when you have a
+time series: they name your data, so the run stops and says which is missing rather than guessing.
+
 ## 4. Say what your columns are
 
 In `configs/data_spec.yml`:

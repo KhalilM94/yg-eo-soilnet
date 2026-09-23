@@ -64,6 +64,20 @@ class DataManager:
             getattr(self.config, "LON_COLUMN", "lon"),
         )
 
+    def point_id_column(self) -> str:
+        """Return the name of the point id column, from ``POINT_ID_COLUMN``.
+
+        Beside :meth:`coordinate_columns` and for the same reason: the split, the targets join and
+        the per-point export all read it, and a value invented at one of those call sites would
+        route that one somewhere the others do not.
+        """
+        return str(self.config.POINT_ID_COLUMN)
+
+    def time_column(self) -> str | None:
+        """Return the name of the date column, or None when no time series is configured."""
+        configured = self.temporal_config().get("time_column")
+        return str(configured) if configured else getattr(self.config, "TIME_COLUMN", None)
+
     def context_feature_columns(self) -> list[str]:
         """Return the spatial-context covariates, or nothing when the group is switched off.
 
@@ -100,7 +114,7 @@ class DataManager:
         """
         lat_column, lon_column = self.coordinate_columns()
         columns = {
-            getattr(self.config, "POINT_ID_COLUMN", "point_id"),
+            self.point_id_column(),
             lat_column,
             lon_column,
             "geometry",
@@ -384,7 +398,7 @@ class DataManager:
         lat_column, lon_column = self.coordinate_columns()
         return SoilDataset(
             tabular=self.load_tabular_data(),
-            point_id_column=getattr(self.config, "POINT_ID_COLUMN", "point_id"),
+            point_id_column=self.point_id_column(),
             lat_column=lat_column,
             lon_column=lon_column,
             target_columns=list(getattr(self.config, "TARGET_COLUMNS", [])),
@@ -479,7 +493,7 @@ class DataManager:
             return static_df
 
         targets_df = self._load_targets()
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
+        point_col = self.point_id_column()
         if point_col not in static_df.columns:
             raise KeyError(f"Point id column '{point_col}' not found in static features file")
         if point_col not in targets_df.columns:
@@ -585,8 +599,8 @@ class DataManager:
             raise FileNotFoundError(f"No time-series files were discovered under {resolved_root}")
 
         combined_frame = modality_frames[0]
-        point_col = getattr(self.config, "POINT_ID_COLUMN", "point_id")
-        time_col = self.temporal_config().get("time_column", getattr(self.config, "TIME_COLUMN", "date"))
+        point_col = self.point_id_column()
+        time_col = self.time_column()
         for frame in modality_frames[1:]:
             combined_frame = combined_frame.merge(frame, on=[point_col, time_col], how="outer")
         self._cache[cache_key] = combined_frame

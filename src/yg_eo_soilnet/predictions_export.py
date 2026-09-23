@@ -50,7 +50,7 @@ def export_enabled_for(config: Any, model_name: str) -> bool:
 
 def point_id_column(config: Any) -> str:
     """What the id column is called in the exported files."""
-    return str(getattr(config, "POINT_ID_COLUMN", "point_id") or "point_id")
+    return str(config.POINT_ID_COLUMN)
 
 
 def point_prediction_frame(

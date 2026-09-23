@@ -493,8 +493,7 @@ class SoilSequenceBuilder:
         KeyError
             If the time series has no point id or date column.
         """
-        temporal_config = self.data_manager.temporal_config()
-        time_col = temporal_config.get("time_column", getattr(self.config, "TIME_COLUMN", "date"))
+        time_col = self.data_manager.time_column()
 
         if point_col not in timeseries_df.columns or time_col not in timeseries_df.columns:
             raise KeyError(f"Time-series source must contain '{point_col}' and '{time_col}' columns")
