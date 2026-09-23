@@ -489,3 +489,40 @@ def test_absent_label_columns_reproduces_previous_behaviour(toy_config, logger) 
     filtered = DataManager(toy_config, logger).filter_schema(frame)
 
     assert sorted(filtered.columns) == ["elevation", "target_b"]
+
+
+# --- existing_hs_features.prefix -------------------------------------------
+# The shipped setting is a list of six prefixes. str() on a list gives "['S2_', ...]", which no
+# column starts with, so the whole block did nothing.
+
+
+def test_a_list_of_prefixes_drops_every_matching_column(toy_config, logger) -> None:
+    toy_config.EXISTING_HS_FEATURES = {
+        "enabled": True,
+        "ignore": True,
+        "band_names": [],
+        "prefix": ["S2_", "CLIM_"],
+    }
+    columns = ["S2_B4", "CLIM_precip", "S1_asc_VV", "elevation"]
+
+    dropped = DataManager(toy_config, logger).hyperspectral_drop_columns(columns)
+
+    assert dropped == {"S2_B4", "CLIM_precip"}
+
+
+def test_a_single_prefix_still_works(toy_config, logger) -> None:
+    toy_config.EXISTING_HS_FEATURES = {
+        "enabled": True, "ignore": True, "band_names": [], "prefix": "S2_"
+    }
+
+    dropped = DataManager(toy_config, logger).hyperspectral_drop_columns(["S2_B4", "CLIM_precip"])
+
+    assert dropped == {"S2_B4"}
+
+
+def test_nothing_is_dropped_while_the_block_is_switched_off(toy_config, logger) -> None:
+    toy_config.EXISTING_HS_FEATURES = {
+        "enabled": False, "ignore": True, "band_names": [], "prefix": ["S2_"]
+    }
+
+    assert DataManager(toy_config, logger).hyperspectral_drop_columns(["S2_B4"]) == set()

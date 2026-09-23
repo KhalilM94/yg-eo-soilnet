@@ -14,15 +14,6 @@ explanations default to on in code and are `false` in `main_config.yml`; early-s
 defaults to 5 in code and is `100` in `configs/lightning/models/defaults.yml`. Both shipped values
 win as long as you keep them in the file.
 
-**`existing_hs_features.prefix` only works as a single string.** Given a list, the prefix match
-never fires and no column is ignored. Use `band_names` to name the columns instead.
-
-**Turning on `CLUSTERING_STRATEGY` with a random split fails.** `configs/sklearn/config.yml` has a
-clustering block, but the groups it makes are only produced by `split.strategy: spatial_group` in
-`main_config.yml`. Switching the block on without that leaves the training looking for groups that
-were never made. Use `split.strategy: spatial_group` with `split.group`, which is the supported way
-to hold out whole areas.
-
 **There is a `config.yml` and a `model_registry.yml` at the repository root.** Nothing reads them;
 the files in use are `configs/main_config.yml` and the two model lists it names.
 

@@ -174,8 +174,8 @@ class DataManager:
         """Return the spectral band columns to drop.
 
         With ``existing_hs_features`` both ``enabled`` and ``ignore``, that is its listed
-        ``band_names`` plus every column starting with its ``prefix`` (one string, not a list).
-        Columns named in the older ``IGNORE_BANDS`` setting are dropped too.
+        ``band_names`` plus every column starting with any of its ``prefix`` entries - one string
+        or a list of them. Columns named in the older ``IGNORE_BANDS`` setting are dropped too.
 
         Parameters
         ----------
@@ -193,9 +193,15 @@ class DataManager:
             if isinstance(band_names, (list, tuple, set)):
                 drop_columns.update({str(name) for name in band_names if name})
 
+            # One prefix or a list of them; the shipped file has a list, and str() on that used to
+            # make a prefix no column could start with. Config._get_ignore_bands reads the same
+            # setting and normalizes it the same way.
             prefix = existing_hs.get("prefix", "")
-            if prefix:
-                drop_columns.update({str(column) for column in columns if str(column).startswith(str(prefix))})
+            prefixes = tuple(
+                str(one) for one in (prefix if isinstance(prefix, (list, tuple, set)) else [prefix]) if one
+            )
+            if prefixes:
+                drop_columns.update({str(column) for column in columns if str(column).startswith(prefixes)})
 
         legacy_ignore_bands = getattr(self.config, "IGNORE_BANDS", [])
         if isinstance(legacy_ignore_bands, (list, tuple, set)):

@@ -558,9 +558,11 @@ class Config:
         Raises
         ------
         ValueError
-            If a column is declared both as a lab column and as a category.
+            If a column is declared both as a lab column and as a category, or if clustering is
+            switched on without the split that builds the clusters.
         """
         self._validate_categorical_not_label()
+        self._validate_clustering_has_a_spatial_split()
 
     def _validate_categorical_not_label(self) -> None:
         """Refuse a column declared as both a lab column and a category.
@@ -581,6 +583,23 @@ class Config:
             "category handling sees it, so no model would receive them. Remove each one from "
             "CATEGORICAL_FEATURES to keep it out of the inputs, or from LABEL_COLUMNS to make it a "
             "real categorical input."
+        )
+
+    def _validate_clustering_has_a_spatial_split(self) -> None:
+        """Refuse clustering without the split that builds the clusters.
+
+        The groups the scikit-learn folds need are written only by ``split.strategy:
+        spatial_group``; with any other strategy the training used to stop on a missing key, after
+        the data had been loaded.
+        """
+        if not self.ENABLE_CLUSTERING or self.SPLIT_HOLDOUT_STRATEGY == 'spatial_group':
+            return
+        raise ValueError(
+            f"CLUSTERING_STRATEGY is enabled in {self.sklearn_config_path}, but split.strategy is "
+            f"{self.SPLIT_HOLDOUT_STRATEGY!r} in {self.config_path}. The clusters the folds group "
+            "by are only built by a spatial split, so training would stop on a missing key part "
+            "way through. Set split.strategy: spatial_group with a split.group block to hold out "
+            "whole areas, or switch CLUSTERING_STRATEGY off."
         )
 
     def _get_config(self, key: str, default: Any) -> Any:
@@ -763,10 +782,13 @@ class Config:
                 return [str(name) for name in band_names if name]
 
             band_count = hs_config.get('band_count', None)
+            # One prefix or a list of them, as DataManager.hyperspectral_drop_columns also reads it.
+            # A list used to be formatted into the name, giving "['S2_', ...]1".
             prefix = hs_config.get('prefix', '')
-            if band_count and prefix:
+            prefixes = [str(one) for one in (prefix if isinstance(prefix, (list, tuple, set)) else [prefix]) if one]
+            if band_count and prefixes:
                 try:
-                    return [f"{prefix}{i}" for i in range(1, int(band_count) + 1)]
+                    return [f"{one}{i}" for one in prefixes for i in range(1, int(band_count) + 1)]
                 except (TypeError, ValueError):
                     return default if isinstance(default, list) else []
 

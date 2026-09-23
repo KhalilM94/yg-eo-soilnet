@@ -852,3 +852,64 @@ def test_the_shipped_configurations_pass_every_check(config_path):
     """Both must construct: a check that rejects the project's own configuration is a broken check."""
     config = Config(config_path=str(config_path))
     assert not set(config.CATEGORICAL_FEATURES) & set(config.LABEL_COLUMNS)
+
+
+# --- clustering needs the split that builds the clusters -------------------
+# The groups the folds use are written only by a spatial split. With any other strategy the
+# training stopped on a missing key after the data had been loaded.
+
+
+def test_clustering_without_a_spatial_split_stops_the_run(tmp_path):
+    with pytest.raises(ValueError) as raised:
+        _config_with(
+            tmp_path,
+            """    split:
+        strategy: random
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+        )
+
+    message = str(raised.value)
+    assert "CLUSTERING_STRATEGY" in message and "split.strategy" in message
+    assert "spatial_group" in message
+
+
+def test_clustering_with_a_spatial_split_is_fine(tmp_path):
+    config = _config_with(
+        tmp_path,
+        """    split:
+        strategy: spatial_group
+    CLUSTERING_STRATEGY:
+        enabled: true
+        class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+        params: {}
+""",
+    )
+    assert config.ENABLE_CLUSTERING is True
+    assert config.SPLIT_HOLDOUT_STRATEGY == "spatial_group"
+
+
+def test_a_random_split_without_clustering_is_fine(tmp_path):
+    config = _config_with(tmp_path, "    split:\n        strategy: random\n")
+    assert config.ENABLE_CLUSTERING is False
+
+
+def test_a_list_of_band_prefixes_generates_one_name_per_prefix(tmp_path):
+    """The other half of the prefix fix: the generated band names, not the column match."""
+    config = _config_with(
+        tmp_path,
+        "",
+        data_spec="""
+TARGET_COLUMNS: [clay_pct]
+existing_hs_features:
+    enabled: true
+    ignore: true
+    prefix: ["S2_", "CLIM_"]
+    band_count: 2
+    band_names: []
+""",
+    )
+    assert config.IGNORE_BANDS == ["S2_1", "S2_2", "CLIM_1", "CLIM_2"]

@@ -27,6 +27,10 @@ LOG_TRAIN_FIT_METRIC_SKIP_MODELS: ["TabICL"]
 
 # Optional: group points into spatial clusters before training - e.g. to use as the grouping for
 # `groupkfold` above. Off by default.
+#
+# Requires `split.strategy: spatial_group` in main_config.yml, which is what actually builds the
+# clusters; with any other split strategy the run stops and says so. Note also that the groups only
+# reach the folds when SPLIT_STRATEGY above is `groupkfold`.
 CLUSTERING_STRATEGY:
   enabled: false
   class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy # SpatialGridClusterStrategy / KMeansClusterStrategy
