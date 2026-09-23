@@ -83,6 +83,10 @@ test-with-cov = "pytest --cov=yg_eo_soilnet tests/"
 # Runs the ">>>" examples written inside the docstrings, so they cannot drift from the code.
 doctest = "pytest --doctest-modules src/yg_eo_soilnet config.py main.py"
 lint = "ruff check"
+# Checks the layout only - it changes nothing. Run "ruff format ." to apply it.
+format-check = "ruff format --check ."
+# Checks that values are used as the kind of thing they are. See [tool.mypy] for what it skips.
+typecheck = "mypy"
 # Builds the documentation website into docs/_build/html; any warning fails the build.
 docs = "sphinx-build -W --keep-going -b html docs docs/_build/html"
 
@@ -94,7 +98,7 @@ py-xgboost = ">=3.3.0,<4"
 
 [dependency-groups]
 explore = ["jupyterlab", "scikit-gstat", "pykrige", "xarray"]
-test = ["pytest", "ruff", "pytest-cov"]
+test = ["pytest", "ruff", "pytest-cov", "mypy"]
 docs = ["sphinx", "sphinx-rtd-theme", "myst-parser"]
 dev = [{include-group = "test"}, {include-group = "docs"}]
 
@@ -148,3 +152,76 @@ filterwarnings = [
     "ignore:.*Any type hint is inferred as AnyType.*:UserWarning",
     "ignore:.*Union type hint with multiple non-None types.*:UserWarning",
 ]
+
+[tool.mypy]
+# A starting point, not a finished job. The settings below are deliberately forgiving: the aim is a
+# check that passes today and can be tightened a module at a time, rather than one that reports
+# thousands of problems at once and gets switched off.
+files = ["src/yg_eo_soilnet", "main.py", "config.py"]
+mypy_path = "src"
+python_version = "3.12"
+# Most of the libraries this project uses ship no type information; complaining about that on every
+# import would drown out anything worth reading.
+ignore_missing_imports = true
+follow_imports = "silent"
+
+# The files below are not checked yet. Each group says why, because "it complained" is not a reason
+# anyone can act on later. This list is meant to shrink: when a group's cause is dealt with, delete
+# its block and the check starts covering those files.
+
+# PyTorch describes anything read off a model as "either a tensor or a layer", because that is what
+# its attribute lookup is declared to return. Every use of such a value then looks wrong, even
+# though the code is right. Nothing here is a real problem.
+[[tool.mypy.overrides]]
+module = [
+    "yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module",
+    "yg_eo_soilnet.models.lightningmodules.losses",
+    "yg_eo_soilnet.models.lightningmodules.spatial_encoders",
+    "yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders",
+]
+ignore_errors = true
+
+# Optuna says a trial's score might be missing, because a trial that failed has none. These two
+# modules only ever sort and compare trials they have already filtered down to the finished ones,
+# which the checker cannot see.
+[[tool.mypy.overrides]]
+module = ["yg_eo_soilnet.hpo.rerank", "yg_eo_soilnet.hpo.tracker"]
+ignore_errors = true
+
+# Both modules fall back to a stand-in class when an optional package is absent. Assigning a
+# stand-in to the name of a class reads, to the checker, as assigning to a type.
+[[tool.mypy.overrides]]
+module = ["yg_eo_soilnet.hpo.pruning", "yg_eo_soilnet.hpo.progress"]
+ignore_errors = true
+
+# A setting that names a file is checked once, when the configuration is read, and trusted from
+# then on. The checker follows neither the check nor the trust, so it treats every later use as
+# though the setting might still be missing.
+[[tool.mypy.overrides]]
+module = ["config", "yg_eo_soilnet.hpo.data"]
+ignore_errors = true
+
+# Values these classes set up in one method and use in another. The checker reads the attribute as
+# still holding its starting value of None at the point it is used.
+[[tool.mypy.overrides]]
+module = [
+    "yg_eo_soilnet.models.config_fatories.lightning_config_factory",
+    "yg_eo_soilnet.datamodules.sequence.sequence_datamodule",
+    "yg_eo_soilnet.explain.lightning_explainer",
+    "yg_eo_soilnet.logger.mlflow_loggers",
+]
+ignore_errors = true
+
+# One-off mismatches, mostly between a read-only mapping and a plain dictionary, or between a list
+# and the sequence type a library asks for. Worth fixing one at a time rather than in a batch.
+[[tool.mypy.overrides]]
+module = [
+    "yg_eo_soilnet.trainers.lightning_trainer",
+    "yg_eo_soilnet.trainers.sklearn_trainer",
+    "yg_eo_soilnet.datamodules.splitting",
+    "yg_eo_soilnet.datamodules.scikit.sklearn_data_splitter",
+    "yg_eo_soilnet.datamodules.loaders",
+    "yg_eo_soilnet.datamodules.categorical",
+    "yg_eo_soilnet.serving._pyfunc_entry",
+]
+ignore_errors = true
