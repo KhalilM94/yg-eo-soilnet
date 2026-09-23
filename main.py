@@ -147,6 +147,9 @@ class SoilModelTraining:
         Name of the run; also used to name the log files.
     config_path : str
         Main configuration file (``configs/main_config.yml`` by default).
+    dev_mode : bool, optional
+        Cut the run down to the quickest one that still touches every part, for checking that the
+        pipeline works rather than for results. See :func:`apply_dev_mode`.
 
     Examples
     --------
@@ -158,6 +161,7 @@ class SoilModelTraining:
         self,
         run_name: str = "Soil_Model_Training",
         config_path: str = "configs/main_config.yml",
+        dev_mode: bool = False,
     ):
         self.run_name = run_name
         self.config = Config(
@@ -179,6 +183,9 @@ class SoilModelTraining:
         self.sklearn_logger = self.sklearn_logger_wrapper.get_logger()
         # Stated in the log because repeating a run means repeating this number.
         self.logger.info("Random seed for this run: %s", self.config.RANDOM_SEED)
+        # Before the two model builders below, because they read the model lists as they are built.
+        if dev_mode:
+            apply_dev_mode(self.config, self.logger)
 
         self.data_manager = DataManager(self.config, self.logger)
         # One split for the whole run, shared by both model families, so a point in the test set
@@ -342,6 +349,73 @@ class SoilModelTraining:
             self.logger.warning(f"Could not log the target plan: {type(exc).__name__}: {exc}")
 
 
+#: The training settings a cut-down run forces on every deep-learning model. One pass over two
+#: batches is enough to build the model, run data through it forwards and backwards, and write the
+#: result - which is all a check of this kind is trying to prove. Saving the model is deliberately
+#: left switched on, because writing it out and recording it is one of the steps most worth
+#: checking.
+DEV_MODE_TRAINER_ARGS = {
+    "max_epochs": 1,
+    "limit_train_batches": 2,
+    "limit_val_batches": 1,
+    "limit_test_batches": 1,
+    "accelerator": "cpu",
+    "devices": 1,
+}
+
+
+def apply_dev_mode(config, logger) -> None:
+    """Cut a loaded configuration down to the quickest run that still touches every part.
+
+    Behind the ``--dev-mode`` option. It exists to prove the pipeline runs from end to end: that
+    the deep-learning model builds and takes a step, that the scikit-learn preparation steps fit
+    and transform, that the shared split holds, and that results reach MLflow. It trains for one
+    pass over two batches and tries one setting per classic model, so nothing it produces is worth
+    reading - the point is that it finishes without an error, not what it scores.
+
+    The settings are written into the already-loaded model lists rather than read from the
+    environment, because the number of passes lives inside each model's entry, and an entry always
+    wins over a setting read from elsewhere.
+
+    Parameters
+    ----------
+    config : Config
+        The loaded configuration. Changed in place: the two model lists, the training settings and
+        the optional extras are all overwritten.
+    logger : logging.Logger
+        Used to say plainly that this is a cut-down run, so its results are not mistaken for real
+        ones.
+    """
+    for spec in (getattr(config, "LIGHTNING_MODEL_REGISTRY", None) or {}).values():
+        spec["trainer_args"] = {**spec.get("trainer_args", {}), **DEV_MODE_TRAINER_ARGS}
+        # Stopping early means comparing one pass with the ones before it, and there are none.
+        callbacks = spec.get("callbacks")
+        if isinstance(callbacks, dict):
+            callbacks.pop("early_stopping", None)
+
+    # Each classic model lists several values to try for its settings and keeps the one that scores
+    # best. Keeping only the first value means one fit per model instead of one per combination.
+    for spec in (getattr(config, "MODEL_REGISTRY", None) or {}).values():
+        params = spec.get("params")
+        if isinstance(params, dict):
+            spec["params"] = {
+                name: values[:1] if isinstance(values, list) and values else values for name, values in params.items()
+            }
+
+    # The slow extras. None of them is needed to show that training itself works.
+    config.EXPLAIN_ENABLED = False
+    config.UNCERTAINTY_ENABLED = False
+    # A model from a one-pass run must never end up in the registry as something to serve.
+    config.MLFLOW_REGISTER_MODELS = False
+    config.MLFLOW_EXPERIMENT_EXPORT_ENABLED = False
+
+    logger.warning(
+        "--dev-mode: training one pass over two batches with one setting per classic model, and "
+        "the slow extras switched off. This run is only checking that the pipeline works - its "
+        "scores mean nothing."
+    )
+
+
 def parse_args() -> argparse.Namespace:
     """Read the command-line options (just ``--config-path``)."""
     parser = argparse.ArgumentParser(
@@ -353,6 +427,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Main configuration file to read (default: configs/main_config.yml). The other "
             "configuration files it names are looked up next to it."
+        ),
+    )
+    parser.add_argument(
+        "--dev-mode",
+        action="store_true",
+        help=(
+            "Run everything once, as fast as it will go: one pass over the training points, two "
+            "batches of them, one setting per classic model, and the slow extras switched off. It "
+            "is there to show the pipeline runs from end to end without an error - the scores it "
+            "produces mean nothing."
         ),
     )
     return parser.parse_args()
@@ -389,7 +473,9 @@ def main():
         trainer = SoilModelTraining(
             run_name=run_name,
             config_path=args.config_path,
+            dev_mode=args.dev_mode,
         )
+        mlflow.set_tag("dev_mode", str(args.dev_mode).lower())
         mlflow.log_param("CONFIG_PATH", trainer.config.config_path)
         for param_name, param_value in (
             ("DATA_SPEC_PATH", getattr(trainer.config, "data_spec_path", None)),

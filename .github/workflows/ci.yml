@@ -1,0 +1,109 @@
+# Runs on every proposed change to main, and on main itself.
+#
+# Two jobs. The first runs the same checks a developer runs by hand; the second trains the whole
+# pipeline once, on a made-up dataset, to show it still works from end to end. Both use the `ci`
+# environment, which is the project's own environment without the graphics-card requirement, built
+# from pixi.lock so it is the same set of package versions every time.
+name: Checks
+
+on:
+  # Every proposed change, whichever branch it is proposed into. Naming main here instead would
+  # skip the ones aimed at another branch, which is exactly what a stack of changes built on each
+  # other looks like - the checks would sit out the whole stack and only wake up at the end.
+  pull_request:
+  push:
+    branches: [main]
+
+# Pushing again to the same branch cancels the run already going, so a branch pushed three times
+# in a minute does not occupy three machines.
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Lint, types, tests and docs
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the environment
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          environments: ci
+          # Refuse to run if pixi.lock no longer matches pyproject.toml, rather than quietly
+          # solving something different from what everyone else is using.
+          locked: true
+          # Keeps the built environment between runs, under a key made from pixi.lock, so it is
+          # only rebuilt when the dependencies actually change.
+          cache: true
+          pixi-version: v0.58.0
+
+      - name: Style
+        run: pixi run -e ci lint
+
+      - name: Layout
+        run: pixi run -e ci format-check
+
+      - name: Types
+        run: pixi run -e ci typecheck
+
+      # Everything but the tests marked slow. The job below covers the same ground more directly.
+      - name: Tests
+        run: pixi run -e ci test-fast
+
+      - name: Examples inside the docstrings
+        run: pixi run -e ci doctest
+
+      # Builds the documentation website with warnings treated as errors.
+      - name: Documentation
+        run: pixi run -e ci docs
+
+  smoke:
+    name: Train once, end to end
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # Only worth a training run once the cheap checks have passed. It also means this job finds
+    # the environment already built and cached by the job above.
+    needs: quality
+
+    env:
+      # Recorded under its own name so these runs are obvious for what they are. Where they are
+      # recorded is left alone: with nothing set, that is an mlruns/ folder on the machine running
+      # the job, which is thrown away with it.
+      MLFLOW_EXPERIMENT_NAME: CI_Smoke
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the environment
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          environments: ci
+          locked: true
+          cache: true
+          pixi-version: v0.58.0
+
+      # Writes the made-up dataset (from the same seed every time, so the same numbers), then
+      # trains on it for one pass. This is what proves the deep-learning model builds and takes a
+      # step, that the scikit-learn preparation steps fit and transform, that the split holds and
+      # that results, figures and saved models all reach MLflow. It does not prove the models are
+      # any good - one pass cannot - only that nothing is broken.
+      - name: Make the dataset and train on it
+        run: pixi run -e ci smoke
+
+      - name: Keep the logs when it fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: smoke-test-logs
+          path: |
+            logs/
+            mlruns/
+            lightning_logs/
+          retention-days: 7
+          if-no-files-found: ignore

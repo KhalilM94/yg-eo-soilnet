@@ -13,9 +13,40 @@ All commands run from the repository root, in the `dev` environment:
 | `pixi run -e dev test-fast` | Skips the 20 slowest tests (about 2 minutes). |
 | `pixi run -e dev doctest` | Runs the `>>>` examples written inside the docstrings. |
 | `pixi run -e dev lint` | Checks the code style, and that every public module, class and function has a docstring. |
+| `pixi run -e dev format-check` | Checks the layout only. It changes nothing; run `ruff format .` to apply it. |
+| `pixi run -e dev typecheck` | Checks that values are used as the kind of thing they are. |
 | `pixi run -e dev docs` | Builds this documentation into `docs/_build/html/`. Any warning fails the build. |
+| `pixi run -e dev smoke` | Writes the made-up dataset and trains on it for one pass (about a minute). |
 
 Open `docs/_build/html/index.html` in a browser to read the built documentation.
+
+`smoke` is the one that catches what the others cannot. The tests stand in for most of the moving
+parts; `smoke` is the only check that builds the deep-learning model for real, puts data through
+it, fits the scikit-learn preparation steps, makes the split and writes results to MLflow. Its
+scores are meaningless - one pass cannot learn anything - and it says so in its own output. Run it
+before proposing a change that touches how models are built or how data reaches them.
+
+## The checks that run on their own
+
+Everything in the table above also runs on every proposed change to `main`, and on `main` itself,
+as [GitHub Actions](https://github.com/KhalilM94/yg-eo-soilnet/actions). Those runs use the `ci`
+environment rather than `dev`: the same tools, without the graphics-card requirement, because the
+machines running them have no graphics card. If a check passes for you and fails there, the first
+thing to suspect is that the two environments hold different versions of something.
+
+There is a second workflow, `ct.yml`, for training on the real dataset and recording the result in
+a shared MLflow server. It does nothing yet; the settings it needs are listed at the top of the
+file.
+
+### Not checked yet
+
+Two of the checks skip part of the project on purpose, and both lists are meant to shrink:
+
+- `typecheck` skips 21 files. `[tool.mypy]` in `pyproject.toml` groups them by reason. The largest
+  group is not a fault in this project at all: PyTorch describes anything read off a model as
+  "either a tensor or a layer", so every use of such a value looks wrong.
+- `lint` holds ruff below version 0.16, which would otherwise insist the imports be sorted - worth
+  doing, but its own piece of work.
 
 ## Who we write for
 

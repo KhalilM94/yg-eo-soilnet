@@ -13,6 +13,95 @@ def test_parse_args_supports_cli_overrides(monkeypatch: pytest.MonkeyPatch) -> N
     args = main_module.parse_args()
 
     assert args.config_path == "custom.yml"
+    assert args.dev_mode is False
+
+
+def test_parse_args_reads_dev_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.argv", ["main.py", "--dev-mode"])
+
+    assert main_module.parse_args().dev_mode is True
+
+
+def _dev_mode_config():
+    """A stand-in Config holding the parts apply_dev_mode changes."""
+    return SimpleNamespace(
+        LIGHTNING_MODEL_REGISTRY={
+            "soil_cnn": {
+                "enabled": True,
+                "trainer_args": {"max_epochs": 500, "precision": "32-true"},
+                "callbacks": {"early_stopping": {"patience": 100}, "checkpoint": {"save_top_k": 1}},
+            }
+        },
+        MODEL_REGISTRY={"Ridge": {"params": {"model__alpha": [0.1, 1, 10, 100], "model__fit_intercept": True}}},
+        EXPLAIN_ENABLED=True,
+        UNCERTAINTY_ENABLED=True,
+        MLFLOW_REGISTER_MODELS=True,
+        MLFLOW_EXPERIMENT_EXPORT_ENABLED=True,
+    )
+
+
+def test_dev_mode_trains_a_single_pass() -> None:
+    config = _dev_mode_config()
+
+    main_module.apply_dev_mode(config, MagicMock())
+
+    trainer_args = config.LIGHTNING_MODEL_REGISTRY["soil_cnn"]["trainer_args"]
+    assert trainer_args["max_epochs"] == 1
+    assert trainer_args["limit_train_batches"] == 2
+    assert trainer_args["accelerator"] == "cpu"
+    # Settings it says nothing about are left alone.
+    assert trainer_args["precision"] == "32-true"
+
+
+def test_dev_mode_keeps_saving_the_model_but_drops_stopping_early() -> None:
+    """Writing the model out is one of the steps most worth checking, so it stays on."""
+    config = _dev_mode_config()
+
+    main_module.apply_dev_mode(config, MagicMock())
+
+    callbacks = config.LIGHTNING_MODEL_REGISTRY["soil_cnn"]["callbacks"]
+    assert "early_stopping" not in callbacks
+    assert callbacks["checkpoint"] == {"save_top_k": 1}
+
+
+def test_dev_mode_tries_one_setting_per_classic_model() -> None:
+    config = _dev_mode_config()
+
+    main_module.apply_dev_mode(config, MagicMock())
+
+    params = config.MODEL_REGISTRY["Ridge"]["params"]
+    assert params["model__alpha"] == [0.1]
+    # A setting that is not a list of values to try is left as it is.
+    assert params["model__fit_intercept"] is True
+
+
+def test_dev_mode_switches_off_the_slow_extras() -> None:
+    config = _dev_mode_config()
+
+    main_module.apply_dev_mode(config, MagicMock())
+
+    assert config.EXPLAIN_ENABLED is False
+    assert config.UNCERTAINTY_ENABLED is False
+    # A model from a one-pass run must never be offered as something to serve.
+    assert config.MLFLOW_REGISTER_MODELS is False
+    assert config.MLFLOW_EXPERIMENT_EXPORT_ENABLED is False
+
+
+def test_dev_mode_says_plainly_that_the_run_means_nothing() -> None:
+    logger = MagicMock()
+
+    main_module.apply_dev_mode(_dev_mode_config(), logger)
+
+    assert logger.warning.call_count == 1
+    assert "mean nothing" in logger.warning.call_args.args[0]
+
+
+def test_dev_mode_copes_with_a_configuration_that_has_no_models() -> None:
+    config = SimpleNamespace(LIGHTNING_MODEL_REGISTRY=None, MODEL_REGISTRY={})
+
+    main_module.apply_dev_mode(config, MagicMock())
+
+    assert config.EXPLAIN_ENABLED is False
 
 
 def _fake_plan():
