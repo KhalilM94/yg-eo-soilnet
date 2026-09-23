@@ -1,0 +1,117 @@
+# A full training run on the real dataset, recorded in a shared MLflow server.
+#
+# Nothing here runs on its own yet. It has to be started by hand, from the Actions tab, and it
+# cannot work until three things exist: a machine to run it on, the dataset in cloud storage, and
+# the settings listed under "Before this can run" below. It is written out in full so that turning
+# it on is a matter of filling those in rather than starting from nothing.
+#
+# Before this can run
+# -------------------
+# Repository settings -> Secrets and variables -> Actions:
+#   MLFLOW_TRACKING_URI          the shared MLflow server, e.g. https://mlflow.example.org
+#   MLFLOW_TRACKING_USERNAME     only if that server asks for a username and password
+#   MLFLOW_TRACKING_PASSWORD
+#   AWS_TRAINING_ROLE_ARN        the role this workflow takes on to read the data
+#   AWS_REGION                   e.g. eu-west-1
+#   TRAINING_DATA_BUCKET         the bucket holding the three data files
+#   TRAINING_DATA_PREFIX         the folder inside it
+#
+# The role is preferable to an access key and secret: it is handed out for the length of one run
+# and cannot be used from anywhere else. `id-token: write` below is what allows that.
+#
+# A machine
+# ---------
+# The shipped settings train for up to 500 passes, waiting 100 of them for an improvement, across
+# several models. A machine provided by GitHub has four processors, no graphics card and a
+# six-hour limit, which this run will pass. Register your own machine and change `runs-on` to
+# `[self-hosted, linux, gpu]`, and `environments` to `core-gpu`.
+name: Full training
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Which settings file to train with"
+        default: "configs/main_config.yml"
+        required: true
+      experiment_name:
+        description: "What to call this set of runs in MLflow"
+        default: "Soil_Model_Training_v2"
+        required: true
+      register_models:
+        description: "Offer the fitted models as ones that could be served"
+        type: boolean
+        default: false
+
+  # Switched off on purpose. Turn this on once there is a machine that can finish the run and the
+  # data is in cloud storage, and every merge to main will retrain.
+  # push:
+  #   branches: [main]
+
+permissions:
+  contents: read
+  # Lets the job prove who it is to AWS without a stored access key.
+  id-token: write
+
+jobs:
+  train:
+    name: Train on the full dataset
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      # main.py reads all of these from the environment in preference to the settings file, so
+      # nothing in configs/ has to be edited for a run here.
+      MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+      MLFLOW_EXPERIMENT_NAME: ${{ inputs.experiment_name }}
+      MLFLOW_REGISTER_MODELS: ${{ inputs.register_models }}
+      # Stands in for common.data.root, which in the shipped settings file is a folder on a
+      # particular desktop machine.
+      DATA_FOLDER: ${{ github.workspace }}/data/production
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the environment
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          # core-gpu on a machine with a graphics card. `ci` is the processor-only one, which is
+          # all a machine provided by GitHub can install.
+          environments: ci
+          locked: true
+          cache: true
+          pixi-version: v0.58.0
+
+      - name: Prove who we are to AWS
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_TRAINING_ROLE_ARN }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Fetch the data
+        run: |
+          mkdir -p "${DATA_FOLDER}"
+          aws s3 sync \
+            "s3://${{ secrets.TRAINING_DATA_BUCKET }}/${{ secrets.TRAINING_DATA_PREFIX }}" \
+            "${DATA_FOLDER}" --only-show-errors
+          echo "Fetched:"
+          ls -la "${DATA_FOLDER}"
+
+      - name: Train
+        run: pixi run -e ci python main.py --config-path "${{ inputs.config_path }}"
+
+      # The fitted models and their scores go to the MLflow server named above, by the same path
+      # every run uses. What is kept here is only what is written beside the run on the machine:
+      # the logs, and the per-pass records the deep-learning models leave behind.
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: training-logs-${{ github.run_id }}
+          path: |
+            logs/
+            lightning_logs/
+          retention-days: 30
+          if-no-files-found: ignore
