@@ -263,10 +263,10 @@ def _export_config(config, args: argparse.Namespace):
     proxy = copy.copy(config)
     proxy.EXPORT_POINT_PREDICTIONS = True
     proxy.EXPORT_POINT_PREDICTIONS_FAIL_ON_ERROR = True
+    # Each filter is replaced only when the command names one, so the configuration's own lists
+    # apply otherwise - as they do during training.
     if args.models is not None:
         proxy.EXPORT_POINT_PREDICTIONS_MODELS = [n.strip() for n in args.models.split(",") if n.strip()]
-    else:
-        proxy.EXPORT_POINT_PREDICTIONS_MODELS = []
     if args.skip_models is not None:
         proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS = [
             n.strip() for n in args.skip_models.split(",") if n.strip()

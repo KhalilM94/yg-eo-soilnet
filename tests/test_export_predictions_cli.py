@@ -77,12 +77,26 @@ def test_the_cli_model_filters_override_the_config_lists():
     assert proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS == ["PLSRegression"]
 
 
-def test_the_config_skip_list_survives_when_the_cli_names_none():
+def test_the_config_lists_survive_when_the_cli_names_none():
+    """Both filters, not just the skip list: --models used to clear the allowlist on every run."""
     config = SimpleNamespace(
-        EXPORT_POINT_PREDICTIONS_MODELS=[], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"]
+        EXPORT_POINT_PREDICTIONS_MODELS=["Ridge"], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=["TabICL"]
     )
     proxy = ep._export_config(config, _args())
+    assert proxy.EXPORT_POINT_PREDICTIONS_MODELS == ["Ridge"]
     assert proxy.EXPORT_POINT_PREDICTIONS_SKIP_MODELS == ["TabICL"]
+
+
+def test_the_config_allowlist_decides_which_models_are_exported():
+    """The end the allowlist exists for, checked through the gate the logger actually calls."""
+    from yg_eo_soilnet.predictions_export import export_enabled_for
+
+    config = SimpleNamespace(
+        EXPORT_POINT_PREDICTIONS_MODELS=["Ridge"], EXPORT_POINT_PREDICTIONS_SKIP_MODELS=[]
+    )
+    proxy = ep._export_config(config, _args())
+    assert export_enabled_for(proxy, "Ridge") is True
+    assert export_enabled_for(proxy, "soil_cnn") is False
 
 
 # --- the drift guard -------------------------------------------------------

@@ -13,10 +13,6 @@ data-preparation step opens a run before that takes effect, so an empty
 **`tune.py` ignores `MLFLOW_TRACKING_URI`.** Tuning always records to the default location, even
 when that environment variable points somewhere else. Training and the other tools honour it.
 
-**`export_predictions.py` exports every model unless you name some.** The configuration's
-`export_point_predictions.models` list is not read: without `--models`, every model the run trained
-is exported. `--skip-models` and the configuration's skip list do work.
-
 ## Configuration
 
 **Some settings default differently in code and in YAML.** The code's own default is used when a
