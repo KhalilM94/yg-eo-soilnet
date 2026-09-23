@@ -28,9 +28,6 @@ the files in use are `configs/main_config.yml` and the two model lists it names.
 
 ## Runs and results
 
-**The leaderboard's `framework` column says `sklearn` for every row.** Including the deep-learning
-models. The `model` column is correct, so read that instead.
-
 **The GPU is assumed.** `configs/lightning/models/defaults.yml` has `accelerator: cuda`, and TabICL
 in the scikit-learn model list has `device: "cuda"`. On a machine without an NVIDIA card both have
 to be set to `cpu`. The demo configuration already does.

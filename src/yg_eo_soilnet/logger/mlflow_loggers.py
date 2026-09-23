@@ -318,10 +318,14 @@ class ChildRunLogger:
     # target is one flat run. Several targets give a model run - holding the model, its settings
     # and its training curves - with one sub-run per target holding that target's results.
 
-    def _log_per_target_runs(self, evaluation_df, target: str, model_name: str, log_one):
+    def _log_per_target_runs(
+        self, evaluation_df, target: str, model_name: str, log_one, framework: str | None = None
+    ):
         """Call ``log_one`` once per target, each inside the run that holds that target.
 
-        One target logs into the current run; several open a sub-run each.
+        One target logs into the current run; several open a sub-run each. ``framework`` is tagged
+        on those sub-runs: they are what the leaderboard reads, so without it every model a
+        sub-run belongs to would be reported as the same family.
 
         Returns
         -------
@@ -338,10 +342,13 @@ class ChildRunLogger:
             return [(name, log_one(frame, name))]
 
         results = []
+        tags = {"target": None, "model_name": model_name}
+        if framework:
+            tags["framework"] = framework
         for frame, target_name, _prediction_column in frames:
             with start_child_run(
                 f"{target_name}_{model_name}",
-                tags={"target": target_name, "model_name": model_name},
+                tags={**tags, "target": target_name},
             ):
                 results.append((target_name, log_one(frame, target_name)))
         return results
@@ -1405,7 +1412,7 @@ class ChildRunLogger:
             )
             return explain_summary
 
-        target_runs = self._log_per_target_runs(eval_df, target, model_name, log_one)
+        target_runs = self._log_per_target_runs(eval_df, target, model_name, log_one, "sklearn")
         self._record_model_run_explain(shap_summary, results=shap_results, target_runs=target_runs)
 
         # --- The train-fit diagnostic, LAST ---
@@ -1824,7 +1831,9 @@ class ChildRunLogger:
             )
             return explain_summary
 
-        target_runs = self._log_per_target_runs(evaluation_df, run_target, model_name, log_one)
+        target_runs = self._log_per_target_runs(
+            evaluation_df, run_target, model_name, log_one, "lightning"
+        )
         self._record_model_run_explain(shap_summary, results=shap_results, target_runs=target_runs)
 
 
@@ -1880,10 +1889,14 @@ class ParentRunLogger:
             # The model run's own metrics are means over its children, so listing it beside them
             # would put the same model on the board twice, once under a label ("a__b") that names
             # no measurable target.
-            leaf_runs.extend(grandchildren or [child])
+            #
+            # The model run is carried alongside as the fallback for anything its per-target runs
+            # do not carry themselves - the framework, for runs recorded before those sub-runs were
+            # tagged with it.
+            leaf_runs.extend((leaf, child) for leaf in (grandchildren or [child]))
 
         rows = []
-        for run in leaf_runs:
+        for run, model_run in leaf_runs:
             run_data = run.data
             target = run_data.tags.get("target")
             model_name = run_data.tags.get("model_name")
@@ -1894,7 +1907,9 @@ class ParentRunLogger:
                 "run_id": run.info.run_id,
                 "target": target,
                 "model": model_name,
-                "framework": run_data.tags.get("framework", "sklearn"),
+                "framework": run_data.tags.get("framework")
+                or model_run.data.tags.get("framework")
+                or "unknown",
             }
             # Collect all logged metrics (rmse_test, r2_test, mae_test, ...)
             row.update(run_data.metrics)

@@ -3,6 +3,7 @@ contract both families share, and the training log file."""
 
 import gc
 import os
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -793,3 +794,111 @@ def test_file_logging_can_be_disabled() -> None:
     logger = TrainingLogger(name="logger-off", log_filename="off", enable_file_logging=False)
 
     assert logger.log_file is None
+
+
+# --- the leaderboard's framework column ----------------------------------------------------
+# A model predicting several targets keeps its results in per-target sub-runs, and those are what
+# the leaderboard reads. They carried no framework tag, so every such row - deep-learning included -
+# fell through to a hardcoded "sklearn".
+
+
+def _patch_run_tree(monkeypatch, tree: dict[str, list]):
+    """Point ParentRunLogger at a run tree given as {parent run id: [(run id, tags), ...]}."""
+
+    def runs_for(parent_run_id: str):
+        return [
+            SimpleNamespace(
+                info=SimpleNamespace(run_id=run_id),
+                data=SimpleNamespace(tags=tags, metrics={"rmse_test": 1.0}),
+            )
+            for run_id, tags in tree.get(parent_run_id, [])
+        ]
+
+    class FakeMlflowClient:
+        def get_run(self, run_id):
+            return SimpleNamespace(info=SimpleNamespace(run_id=run_id, experiment_id="experiment-1"))
+
+        def search_runs(self, experiment_ids, filter_string):
+            parent = filter_string.split("'")[1]
+            return runs_for(parent)
+
+    monkeypatch.setattr(mlflow_loggers_module.mlflow.tracking, "MlflowClient", FakeMlflowClient)
+
+
+def test_a_per_target_row_reports_the_framework_of_the_model_it_belongs_to(monkeypatch) -> None:
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [
+                ("cnn-model", {"model_name": "soil_cnn", "framework": "lightning"}),
+                ("ridge-model", {"model_name": "Ridge", "framework": "sklearn"}),
+            ],
+            # Per-target sub-runs, as runs recorded before this fix hold them: no framework tag.
+            "cnn-model": [("cnn-clay", {"target": "clay_pct", "model_name": "soil_cnn"})],
+            "ridge-model": [("ridge-clay", {"target": "clay_pct", "model_name": "Ridge"})],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    frameworks = dict(zip(board["model"], board["framework"]))
+    assert frameworks == {"soil_cnn": "lightning", "Ridge": "sklearn"}
+
+
+def test_a_sub_runs_own_framework_tag_wins(monkeypatch) -> None:
+    """New runs carry it themselves; the model run is only the fallback."""
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [("cnn-model", {"model_name": "soil_cnn", "framework": "lightning"})],
+            "cnn-model": [
+                ("cnn-clay", {"target": "clay_pct", "model_name": "soil_cnn", "framework": "lightning"})
+            ],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    assert list(board["framework"]) == ["lightning"]
+
+
+def test_a_single_target_model_run_keeps_its_own_tag(monkeypatch) -> None:
+    """With one target there are no sub-runs, so the model run is the row."""
+    _patch_run_tree(
+        monkeypatch,
+        {
+            "parent": [
+                ("cnn-model", {"target": "clay_pct", "model_name": "soil_cnn", "framework": "lightning"})
+            ],
+            "cnn-model": [],
+        },
+    )
+
+    board = ParentRunLogger()._collect_leaderboard("parent")
+
+    assert list(board["framework"]) == ["lightning"]
+
+
+def test_the_per_target_sub_runs_are_tagged_with_the_framework(monkeypatch) -> None:
+    """The other half of the fix: new runs no longer need the fallback."""
+    opened = []
+
+    def recording_start_child_run(run_name, tags=None):
+        opened.append((run_name, tags or {}))
+        return nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run")))
+
+    monkeypatch.setattr(mlflow_loggers_module, "start_child_run", recording_start_child_run)
+
+    frame = pd.DataFrame(
+        {
+            "clay_pct": [1.0, 2.0],
+            "ph_water": [7.0, 7.5],
+            "prediction_clay_pct": [1.1, 1.9],
+            "prediction_ph_water": [7.1, 7.4],
+            "target_names": ["clay_pct__ph_water"] * 2,
+        }
+    )
+    ChildRunLogger()._log_per_target_runs(frame, "clay_pct__ph_water", "soil_cnn", lambda *_: None, "lightning")
+
+    assert [tags.get("framework") for _name, tags in opened] == ["lightning", "lightning"]
+    assert [tags["target"] for _name, tags in opened] == ["clay_pct", "ph_water"]
