@@ -101,6 +101,9 @@ dev = [{include-group = "test"}, {include-group = "docs"}]
 
 [tool.ruff]
 extend-exclude = ["notebooks"]
+# The width the code is already written to by hand. The tool's own default is 88, which would
+# rewrap most lines in the project for no reason other than the default.
+line-length = 120
 
 [tool.ruff.lint]
 # D1: every public module, class, method and function must have a docstring.
