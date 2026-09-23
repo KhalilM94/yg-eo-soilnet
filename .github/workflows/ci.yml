@@ -7,8 +7,10 @@
 name: Checks
 
 on:
+  # Every proposed change, whichever branch it is proposed into. Naming main here instead would
+  # skip the ones aimed at another branch, which is exactly what a stack of changes built on each
+  # other looks like - the checks would sit out the whole stack and only wake up at the end.
   pull_request:
-    branches: [main]
   push:
     branches: [main]
 
