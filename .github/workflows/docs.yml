@@ -1,0 +1,59 @@
+# Builds the documentation and publishes it as a website, so it can be read as pages in a browser
+# rather than as Markdown files in the repository.
+#
+# The site appears at https://khalilm94.github.io/yg-eo-soilnet/ and is rebuilt on every change to
+# main. It needs one setting on the repository, once: Settings -> Pages -> Source: GitHub Actions.
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  # Also buildable by hand, for checking a rebuild without waiting for a change.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  # The two the publishing step needs, and nothing more.
+  pages: write
+  id-token: write
+
+# One publish at a time. A run already going is left to finish rather than cancelled, so the
+# published site is never left half-written.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the environment
+        uses: prefix-dev/setup-pixi@v0.10.2
+        with:
+          environments: ci
+          locked: true
+          cache: true
+          pixi-version: v0.58.0
+
+      # The same command developers run by hand, warnings treated as errors, so the published site
+      # cannot quietly drift from what the strict local build produces.
+      - name: Build the documentation
+        run: pixi run -e ci docs
+
+      - uses: actions/configure-pages@v6
+
+      - name: Package the built site
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/_build/html
+
+      - name: Publish
+        id: deploy
+        uses: actions/deploy-pages@v5
