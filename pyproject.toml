@@ -79,6 +79,10 @@ mlflow = { cmd = "mlflow ui", env = { MLFLOW_ALLOW_FILE_STORE = "true" } }
 # A small made-up dataset, and a full pipeline run on it - see the Quickstart in README.md.
 demo-data = "python examples/make_demo_data.py"
 demo = "python main.py --config-path examples/demo_config/main_config.yml"
+# The same run, cut down to one pass over the data. It is there to show the pipeline still
+# works end to end, in a couple of minutes; its scores mean nothing. This is what the
+# automated checks run on every proposed change. It writes the demo dataset first.
+smoke = { cmd = "python main.py --config-path examples/demo_config/main_config.yml --dev-mode", depends-on = ["demo-data"] }
 
 [tool.pixi.feature.dev.tasks]
 dev-env = "pixi shell -e dev"
