@@ -65,6 +65,12 @@ core = { features = ["prod-core", "cpu-backend"], solve-group = "default" }
 core-gpu = { features = ["prod-core", "gpu-backend"], solve-group = "default" }
 dev = { features = ["prod-core", "gpu-backend", "dev"], solve-group = "core-gpu" }
 explore = { features = ["prod-core", "cpu-backend", "explore"]}
+# What the automated checks install. Same tools as `dev`, but without the graphics-card
+# requirement that `dev` inherits from gpu-backend, because the machines running the checks
+# have no graphics card and would refuse to build the environment at all. It is deliberately
+# left out of every solve group: sharing one with core-gpu is what makes `core` pull the much
+# larger graphics-card build of PyTorch on Linux, and the checks do not need it.
+ci = { features = ["prod-core", "cpu-backend", "dev"] }
 
 # Tasks every environment can run (core, core-gpu, dev, explore).
 [tool.pixi.tasks]
@@ -98,7 +104,11 @@ py-xgboost = ">=3.3.0,<4"
 
 [dependency-groups]
 explore = ["jupyterlab", "scikit-gstat", "pykrige", "xarray"]
-test = ["pytest", "ruff", "pytest-cov", "mypy"]
+# ruff is held below 0.16 on purpose. 0.16 turns on import sorting by default, which would
+# report a fault in roughly 450 places across the project. Sorting the imports is a worthwhile
+# change, but it is its own piece of work - until someone does it, an unpinned ruff would mean
+# the automated checks fail on rules a developer's own environment never mentions.
+test = ["pytest", "ruff>=0.15,<0.16", "pytest-cov", "mypy"]
 docs = ["sphinx", "sphinx-rtd-theme", "myst-parser"]
 dev = [{include-group = "test"}, {include-group = "docs"}]
 
