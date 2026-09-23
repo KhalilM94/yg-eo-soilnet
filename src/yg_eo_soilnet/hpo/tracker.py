@@ -1,11 +1,8 @@
-"""Following the objective across a study.
+"""Follow how a study is going: the score of each trial, and the best so far.
 
 The question a running study cannot otherwise answer is not "is it alive" but "is the search
-working". This accumulates the per-trial objective so the CLI can render a trend live, and turns
-the finished study into a table and a CSV.
-
-Nothing here needs new plumbing on the trial side: `study.trials` already carries the value, the
-state, the parameters, the duration and the user attributes TrialObjective records.
+working". This keeps the scores as they arrive, so the command line can show a trend, and turns the
+finished study into a table.
 """
 
 from __future__ import annotations
@@ -27,12 +24,7 @@ COMPLETE = "COMPLETE"
 
 
 def best_value_or_none(study: optuna.Study) -> float | None:
-    """`study.best_value`, or None when no trial has completed.
-
-    Optuna *raises* ValueError rather than returning None in that case, which makes the obvious
-    `if study.best_value is not None` guard useless - it blows up before the comparison. A study
-    whose first trial is pruned hits this on trial 0.
-    """
+    """The best score so far, or None when no trial has finished yet."""
     try:
         return float(study.best_value)
     except (ValueError, RuntimeError):
@@ -40,6 +32,7 @@ def best_value_or_none(study: optuna.Study) -> float | None:
 
 
 def best_trial_number_or_none(study: optuna.Study) -> int | None:
+    """Which trial holds the best score, or None when none has finished."""
     try:
         return int(study.best_trial.number)
     except (ValueError, RuntimeError):
@@ -48,6 +41,7 @@ def best_trial_number_or_none(study: optuna.Study) -> int | None:
 
 @dataclass
 class TrialRecord:
+    """One trial's outcome: its number, its score, its state and its settings."""
     number: int
     value: float | None
     state: str
@@ -57,15 +51,15 @@ class TrialRecord:
 
     @property
     def is_complete(self) -> bool:
-        """Whether the trial finished.
+        """Whether the trial finished, rather than being abandoned partway.
 
-        Not `value is not None`: Optuna carries the last intermediate value over onto a PRUNED
-        trial, so a pruned trial has a value too. Only the state distinguishes them.
-        """
+        Not simply "has a score": an abandoned trial carries its last score too.
+                """
         return self.state == COMPLETE
 
     @classmethod
     def from_trial(cls, trial: optuna.trial.FrozenTrial) -> "TrialRecord":
+        """Read one record from a finished trial."""
         duration = getattr(trial, "duration", None)
         return cls(
             number=int(trial.number),
@@ -78,9 +72,10 @@ class TrialRecord:
 
 
 class ObjectiveTracker:
-    """Per-trial objective history, plus the renderings built from it."""
+    """Keeps every trial's score, and the renderings built from them."""
 
     def __init__(self, objective: Objective):
+        """Start with no trials recorded."""
         self.objective = objective
         self.records: list[TrialRecord] = []
         self.best_value: float | None = None
@@ -89,21 +84,23 @@ class ObjectiveTracker:
     # --- accumulation ------------------------------------------------------
 
     def prime(self, study: optuna.Study) -> None:
-        """Seed from a study that already holds trials, so a resumed run shows its real history."""
+        """Load the trials a resumed study already holds, so its history is shown too."""
         self.records = [TrialRecord.from_trial(trial) for trial in study.trials]
         self._refresh_best(study)
 
     def record(self, study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-        """An Optuna study callback: `study.optimize(..., callbacks=[tracker.record])`."""
+        """Record one finished trial; passed to the study as a callback."""
         self.records.append(TrialRecord.from_trial(trial))
         self._refresh_best(study)
 
     def _refresh_best(self, study: optuna.Study) -> None:
+        """Update the best score and which trial holds it."""
         self.best_value = best_value_or_none(study)
         self.best_trial = best_trial_number_or_none(study)
 
     @property
     def counts(self) -> dict[str, int]:
+        """How many trials finished, were abandoned, or failed."""
         counts = {"complete": 0, "pruned": 0, "failed": 0}
         for record in self.records:
             if record.state == COMPLETE:
@@ -117,7 +114,7 @@ class ObjectiveTracker:
     # --- renderings --------------------------------------------------------
 
     def sparkline(self, width: int = 24) -> str:
-        """The last `width` trials as block characters, with `·` where a trial produced no value."""
+        """The last few trials as a row of block characters, tall for good scores."""
         window = self.records[-width:] if width > 0 else []
         if not window:
             return ""
@@ -142,7 +139,7 @@ class ObjectiveTracker:
         )
 
     def summary_line(self) -> str:
-        """`best=0.1831 (t8) ok10 pruned2` - the postfix for a bar or a log line."""
+        """One line: the best score, which trial, and how the rest went."""
         counts = self.counts
         if self.best_value is None:
             best = "best=n/a"
@@ -156,16 +153,16 @@ class ObjectiveTracker:
         return " ".join(parts)
 
     def trials_frame(self, study: optuna.Study) -> pd.DataFrame:
-        """Every trial with every parameter - what lands in trials.csv."""
+        """Every trial with every setting - what goes into ``trials.csv``."""
         frame = study.trials_dataframe()
         return frame if frame is not None else pd.DataFrame()
 
     def top_frame(self, study: optuna.Study, n: int = 10) -> pd.DataFrame:
-        """The best `n` completed trials, in fixed narrow columns.
+        """The best few finished trials, in a few narrow columns.
 
-        Parameters are deliberately excluded: a dozen of them would make the table unreadable in a
-        terminal, and the winning set is printed separately. trials.csv keeps everything.
-        """
+        The settings are left out: a dozen of them would make the table unreadable in a terminal, and the
+        winning set is printed separately.
+                """
         completed = [record for record in self.records if record.is_complete and record.value is not None]
         if not completed:
             return pd.DataFrame(columns=["trial", self.objective.metric, "best_epoch", "epochs_run", "duration_s"])
@@ -185,6 +182,7 @@ class ObjectiveTracker:
         )
 
     def best_params(self, study: optuna.Study) -> dict[str, Any]:
+        """The settings of the best trial so far."""
         try:
             return dict(study.best_trial.params)
         except (ValueError, RuntimeError):

@@ -1,8 +1,8 @@
-"""Training plumbing shared by the soil regression LightningModules.
+"""The training machinery every deep-learning model here shares.
 
-Loss selection, target de-standardization, the train/val/test steps and the optimizer are identical
-across architectures; only ``forward`` differs. Subclasses implement ``forward(batch)`` and call
-``_init_regression_targets`` from their constructor.
+Choosing the loss, running the training, validation and test steps, reporting the scores each epoch,
+converting predictions back to the target's own units, and building the optimizer. Only how a model
+reads its inputs differs, so that is all a model class defines.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from yg_eo_soilnet.models.lightningmodules.losses import (
 
 
 def batch_get(batch: Any, key: str, default=None):
-    """Read a key from a batch that may be a dict or a dataclass with Mapping-style access."""
+    """Read one entry from a batch, whether it is a dict or an object with named fields."""
     if isinstance(batch, Mapping):
         return batch.get(key, default)
     if hasattr(batch, "get"):
@@ -35,14 +35,35 @@ def batch_get(batch: Any, key: str, default=None):
 
 
 def as_float_list(value: Any) -> Optional[list[float]]:
-    """Normalize array-likes to plain Python floats so hyperparameters stay pickle-safe."""
+    """Return any array of numbers as a flat list of plain floats.
+
+    A model's settings are saved in its :term:`checkpoint`, which can only hold plain values.
+
+    Examples
+    --------
+    >>> as_float_list([1, 2.5])
+    [1.0, 2.5]
+    >>> as_float_list(None) is None
+    True
+    """
     if value is None:
         return None
     return [float(item) for item in torch.as_tensor(value, dtype=torch.float32).flatten().tolist()]
 
 
 def as_float_matrix(value: Any) -> Optional[list[list[float]]]:
-    """``as_float_list`` for a 2-D statistic, keeping its rows. Same pickle-safety reason."""
+    """Like :func:`as_float_list` for a table of numbers, keeping its rows.
+
+    Raises
+    ------
+    ValueError
+        If the value is not a table.
+
+    Examples
+    --------
+    >>> as_float_matrix([[1, 0], [0, 1]])
+    [[1.0, 0.0], [0.0, 1.0]]
+    """
     if value is None:
         return None
     rows = torch.as_tensor(value, dtype=torch.float32)
@@ -52,7 +73,15 @@ def as_float_matrix(value: Any) -> Optional[list[list[float]]]:
 
 
 class SoilRegressionLightningBase(LightningModule):
-    """Loss, target inversion, steps, metrics and optimizer for a soil regression head."""
+    """What every deep-learning model here inherits: loss, steps, scores and optimizer.
+
+    A model class adds how it reads its inputs - its ``forward`` - and calls
+    ``_init_regression_targets`` from its constructor with the settings below.
+
+    The model is trained in standardized units (and log-transformed ones, if that is switched on);
+    :meth:`predict_step` converts its predictions back to the target's own units, so everything the
+    run reports is comparable with the lab measurements.
+    """
 
     def _init_regression_targets(
         self,
@@ -63,8 +92,7 @@ class SoilRegressionLightningBase(LightningModule):
         target_transform: Optional[str],
         loss_name: str,
         huber_delta: float,
-        # --- structure-aware losses (see lightningmodules/losses.py) -----------------------
-        # Inert unless loss_name is one of mahalanobis / correlation_penalty / cosine.
+        # Settings for the losses that read across targets; ignored by the others.
         loss_base: str = "mse",
         loss_lambda: float = 0.1,
         loss_shrinkage: float = 0.05,
@@ -83,22 +111,74 @@ class SoilRegressionLightningBase(LightningModule):
         predict_variance: bool = False,
         beta_nll: float = 0.5,
     ) -> None:
+        """Set up the loss, the target statistics, the optimizer settings and the score tracking.
+
+        Called from a model's constructor.
+
+        Parameters
+        ----------
+        target_dim : int
+            How many targets the model predicts.
+        target_mean, target_scale : array-like, optional
+            The target standardization statistics, from the datamodule.
+        target_transform : {None, "log1p"}, optional
+            Whether the targets were log-transformed.
+        loss_name : str
+            What to minimize; see :func:`~yg_eo_soilnet.models.lightningmodules.losses.build_loss_fn`.
+        huber_delta : float
+            Where ``huber`` and ``smooth_l1`` switch from squared to absolute error.
+        loss_base : str, default "mse"
+            The per-target loss a structural loss adds its penalty to.
+        loss_lambda : float, default 0.1
+            How heavily that penalty counts.
+        loss_shrinkage : float, default 0.05
+            For ``mahalanobis``.
+        loss_min_batch : int, default 16
+            For ``correlation_penalty``.
+        cosine_space : str, default "original"
+            For ``cosine``.
+        target_covariance : array-like, optional
+            How the training targets vary together, needed by the structural losses.
+        learning_rate : float
+            How large a step training takes.
+        optimizer_name : {"adam", "adamw"}
+            Which optimizer.
+        weight_decay : float
+            How strongly large weights are penalized.
+        scheduler_type : str
+            ``"plateau"`` lowers the learning rate when the watched score stops improving; anything
+            else leaves it fixed.
+        scheduler_factor : float
+            What the learning rate is multiplied by then.
+        scheduler_patience : int
+            How many epochs without improvement to wait first.
+        scheduler_min_lr : float
+            The lowest the learning rate may go.
+        scheduler_monitor : str
+            Which score to watch, normally ``"val_loss"``.
+        target_names : sequence of str, optional
+            The target names, used to name the per-target scores.
+        predict_variance : bool, default False
+            Predict a spread alongside each value; see :term:`variance head`.
+        beta_nll : float, default 0.5
+            How the variance head balances fitting the values against fitting their spread; 0 is the
+            plain likelihood, 1 weights every point equally.
+
+        Raises
+        ------
+        ValueError
+            If ``target_transform`` is unknown, or a structural loss is combined with a variance
+            head, which would silently ignore it.
+        """
         self.target_dim = int(target_dim)
-        # --- heteroscedastic head ---------------------------------------------------------
-        # With predict_variance the readout emits TWO numbers per target - a mean and a log
-        # variance - and the loss becomes beta-NLL instead of the point loss. That is what makes a
-        # prediction interval narrow where the data is clean and wide where it is noisy; an
-        # ensemble on its own can only measure where its members disagree, which is a different
-        # quantity and is often near-constant across the test set.
-        #
-        # Subclasses build their readout at `self.head_output_dim` rather than `self.target_dim`,
-        # so the extra width is decided in exactly one place.
+        # With a variance head the model predicts two numbers per target - the value and how
+        # uncertain it is - and is trained accordingly. That is what makes an interval narrow where
+        # the data is clean and wide where it is noisy, which an ensemble alone cannot tell.
         self.predict_variance = bool(predict_variance)
         self.head_output_dim = self.target_dim * (2 if self.predict_variance else 1)
         self.beta_nll = float(beta_nll)
-        # Only set when the subclass has not already: SoilCNNLightningModule assigns its own after
-        # this call. Used to NAME the per-target metrics below, so a joint run's r2 can be read per
-        # target instead of only in aggregate.
+        # Used to name the per-target scores, so a model predicting several targets reports an R²
+        # for each rather than only an average.
         if not getattr(self, "target_names", None):
             self.target_names = [str(name) for name in (target_names or [])]
         self.learning_rate = float(learning_rate)
@@ -110,8 +190,8 @@ class SoilRegressionLightningBase(LightningModule):
         self.scheduler_min_lr = float(scheduler_min_lr)
         self.scheduler_monitor = str(scheduler_monitor)
 
-        # Target standardization stats from the datamodule. The loss is computed in standardized
-        # space; predict_step inverts so downstream evaluation sees original units.
+        # The target statistics from the datamodule. Training happens in standardized units;
+        # predict_step converts back, so the scores are in the target's own units.
         self.register_buffer(
             "target_mean",
             torch.zeros(self.target_dim) if target_mean is None else torch.as_tensor(target_mean, dtype=torch.float32),
@@ -122,9 +202,8 @@ class SoilRegressionLightningBase(LightningModule):
             torch.ones(self.target_dim) if target_scale is None else torch.as_tensor(target_scale, dtype=torch.float32),
             persistent=True,
         )
-        # Buffers, not plain attributes: they must round-trip through state_dict. Derived from init
-        # args alone, a checkpoint restore that lost the hyperparameters would silently skip the
-        # inverse transform and report predictions in standardized units.
+        # Saved with the weights: a checkpoint that lost these would quietly report predictions in
+        # standardized units instead of the target's own.
         self.register_buffer(
             "targets_are_standardized",
             torch.tensor(target_mean is not None and target_scale is not None),
@@ -138,30 +217,27 @@ class SoilRegressionLightningBase(LightningModule):
             torch.tensor(self.target_transform == "log1p"),
             persistent=True,
         )
-        # A buffer for the same reason the two above are: a checkpoint restored without its
-        # hyperparameters would otherwise read a 2*target_dim head as 2*target_dim TARGETS, and
-        # report log variances as if they were predictions of targets that do not exist.
+        # Likewise: without it a restored variance head would report its spreads as if they were
+        # predictions of targets that do not exist.
         self.register_buffer(
             "head_predicts_variance",
             torch.tensor(self.predict_variance),
             persistent=True,
         )
 
-        # NOTE: val_loss is only comparable across runs that share loss_name - it is the monitor for
-        # early stopping, checkpoint selection and the LR scheduler.
+        # val_loss decides when training stops and which checkpoint is kept. It is only comparable
+        # between runs using the same loss.
         self.loss_name = str(loss_name).lower()
         self.huber_delta = float(huber_delta)
-        # A structural loss would be SILENTLY IGNORED on a variance head: _shared_step routes to
-        # beta-NLL whenever the readout emits a log variance and never consults self.loss_fn. Refuse
-        # here rather than let a run report a mahalanobis loss_name it never optimized.
+        # A variance head is trained on its own loss, so a structural one would be ignored without
+        # a word. Refuse instead of reporting a loss the run never minimized.
         if self.predict_variance and self.loss_name in STRUCTURAL_LOSSES:
             raise ValueError(
                 f"loss_name '{self.loss_name}' cannot be combined with a heteroscedastic head: "
                 f"predict_variance replaces the point loss with beta-NLL. Set "
                 f"uncertainty.heteroscedastic to false, or use a point loss."
             )
-        # An nn.Module assigned here becomes a submodule, so the loss's own buffers - the whitening
-        # matrix, the reference correlation - follow the model onto the accelerator.
+        # Held as part of the model, so whatever the loss carries moves to the GPU with it.
         self.loss_fn = self._build_loss_fn(
             self.loss_name,
             self.huber_delta,
@@ -176,46 +252,36 @@ class SoilRegressionLightningBase(LightningModule):
             target_scale=target_scale,
             target_transform=self.target_transform,
         )
-        # stage -> {"n": float, and one length-target_dim float64 tensor per running sum}
+        # Running totals for the per-epoch scores, one set per stage.
         self._metric_state: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _build_loss_fn(loss_name: str, huber_delta: float, **kwargs):
-        """The objective named by ``loss_name``; see ``lightningmodules.losses.build_loss_fn``.
-
-        Kept as a method so the two-argument call every existing caller and test makes still selects
-        the point losses exactly as it did.
-        """
+        """Build the loss; see :func:`~yg_eo_soilnet.models.lightningmodules.losses.build_loss_fn`."""
         return build_loss_fn(loss_name, huber_delta=huber_delta, **kwargs)
 
     # --- steps -------------------------------------------------------------
 
-    # Bounds on the predicted log variance. Not cosmetic: an unclamped head can drive the variance
-    # toward zero on a point it happens to fit early, at which point the NLL's 1/var term explodes
-    # and the run dies with a non-finite loss. exp(-10) ~ 4.5e-5 and exp(10) ~ 2.2e4, which spans
-    # every plausible noise level in STANDARDIZED space, where the target has unit variance.
+    #: Limits on the spread a :term:`variance head` may predict. Without them the model can claim
+    #: near-certainty about a point it happens to fit early, and the training then blows up. The
+    #: range covers every plausible noise level in standardized units.
     LOG_VARIANCE_MIN = -10.0
     LOG_VARIANCE_MAX = 10.0
 
     def _split_head_output(self, raw: torch.Tensor):
-        """``(mean, log_variance)`` from the readout, with log_variance None on a point head."""
+        """Split the model's output into the predicted values and their spread, if it predicts one."""
         if not self.predict_variance:
             return raw, None
         mean, log_variance = raw[..., : self.target_dim], raw[..., self.target_dim :]
         return mean, log_variance.clamp(self.LOG_VARIANCE_MIN, self.LOG_VARIANCE_MAX)
 
     def _beta_nll_loss(self, mean, log_variance, targets):
-        """beta-NLL (Seitzer et al. 2022), reducing to Gaussian NLL at beta = 0.
+        """The loss a :term:`variance head` is trained on.
 
-        Plain Gaussian NLL has a well-known failure that matters here. The 1/var factor weights each
-        point's mean-error by how certain the model already is, so a point it starts out uncertain
-        about contributes almost nothing to the mean's gradient - and it therefore never learns to
-        fit it, which retroactively justifies the large variance. The result is a model that has
-        given up on its hard points while scoring well on NLL.
-
-        beta-NLL multiplies each term by ``var^beta`` with the gradient stopped, which cancels that
-        weighting back out. beta = 0 is plain NLL and beta = 1 recovers MSE-like weighting on the
-        mean; 0.5 is the paper's recommendation and the default here.
+        It rewards predicting a value close to the measurement *and* being honest about how far off
+        it might be. The plain version of this loss has a known failing: a point the model is
+        unsure about barely counts, so it never learns to fit it, which then justifies the
+        uncertainty. ``beta_nll`` corrects that; 0.5 is the usual recommendation.
         """
         variance = torch.exp(log_variance)
         negative_log_likelihood = 0.5 * (log_variance + (targets - mean) ** 2 / variance)
@@ -224,6 +290,15 @@ class SoilRegressionLightningBase(LightningModule):
         return negative_log_likelihood.mean()
 
     def _shared_step(self, batch: Any, stage: str):
+        """One training, validation or test step: predict, score, record.
+
+        Raises
+        ------
+        KeyError
+            If the batch carries no measured targets.
+        ValueError
+            If a target, a prediction or the loss is missing or infinite.
+        """
         raw_output = self.forward(batch)
         predictions, log_variance = self._split_head_output(raw_output)
         targets = batch_get(batch, "y")
@@ -244,9 +319,8 @@ class SoilRegressionLightningBase(LightningModule):
         if not torch.isfinite(loss):
             raise ValueError(f"Non-finite loss encountered during {stage} step.")
 
-        # The real sample count, not 1: Lightning weights the epoch mean by batch_size, so a constant
-        # 1 makes the trailing partial batch count as much as a full one. This metric drives early
-        # stopping, checkpoint selection and the LR scheduler.
+        # The real number of points: the epoch average is weighted by it, so a short last batch
+        # must not count as much as a full one.
         batch_size = int(targets.shape[0]) if targets.ndim else 1
         self.log(
             f"{stage}_loss",
@@ -256,9 +330,8 @@ class SoilRegressionLightningBase(LightningModule):
             on_step=False,
             on_epoch=True,
         )
-        # A composite loss reports its two halves separately. Without them there is no way to tell a
-        # lambda that is doing nothing from one that has swamped the accuracy term - both look like
-        # a single number that went down.
+        # A loss with a penalty reports both halves, so a penalty weight that does nothing can be
+        # told from one that has swamped the accuracy term.
         for name, value in getattr(self.loss_fn, "last_components", {}).items():
             self.log(
                 f"{stage}_loss_{name}",
@@ -271,55 +344,57 @@ class SoilRegressionLightningBase(LightningModule):
         return loss
 
     def training_step(self, batch: Any, batch_idx: int):
+        """Score one training batch; its loss is what the weights are updated from."""
         return self._shared_step(batch, "train")
 
     def validation_step(self, batch: Any, batch_idx: int):
+        """Score one validation batch; ``val_loss`` decides when training stops."""
         return self._shared_step(batch, "val")
 
     def test_step(self, batch: Any, batch_idx: int):
+        """Score one test batch, once training has finished."""
         return self._shared_step(batch, "test")
 
     def predict_step(self, batch: Any, batch_idx: int, dataloader_idx: int = 0):
-        """Predictions in the target's original units, with sigma alongside on a variance head.
+        """Predict, in the target's own units.
 
-        The return type deliberately changes shape with the head: a bare tensor for a point head,
-        so every existing caller is untouched, and a ``(mean, sigma)`` tuple when there is a sigma
-        to report. LightningTrainer._flatten_predictions handles both.
+        Returns
+        -------
+        torch.Tensor or tuple of torch.Tensor
+            The predictions; or ``(predictions, sigma)`` when the model has a :term:`variance head`,
+            where sigma is the predicted spread, also in the target's own units.
         """
         mean, log_variance = self._split_head_output(self.forward(batch))
         if log_variance is None:
             return self.inverse_transform_targets(mean)
         sigma = torch.exp(0.5 * log_variance)
-        # Order matters: the sigma inversion reads the STANDARDIZED mean, so it has to be computed
-        # before `mean` is overwritten with the inverted one.
+        # The spread is converted using the standardized prediction, so it is worked out before
+        # that prediction is converted.
         return (
             self.inverse_transform_targets(mean),
             self.inverse_transform_sigma(sigma, mean),
         )
 
-    # --- epoch metrics -----------------------------------------------------
-    # R2 and the prediction/target standard-deviation ratio are the two numbers that say whether a
-    # run has collapsed toward the target mean. Accumulated by hand because torchmetrics is not a
-    # dependency of this project.
+    # --- scores reported each epoch ----------------------------------------
+    # R², and how much the predictions vary compared with the measurements. Together they say
+    # whether a model is learning or has settled for predicting the average of everything.
 
     def _metric_target_names(self) -> list[str]:
-        """Names for the head's outputs, one per column, for metric keys."""
+        """One name per predicted target, for naming the scores."""
         names = [str(name) for name in (getattr(self, "target_names", None) or [])]
         if len(names) == self.target_dim:
             return names
         return [f"target_{index}" for index in range(self.target_dim)]
 
     def _accumulate_metrics(self, stage: str, predictions: torch.Tensor, targets: torch.Tensor) -> None:
-        # Summed over the BATCH axis only, so every accumulator is one value per target. Flattening
-        # both axes - which is what this used to do - pools every target into a single r2. That is
-        # not the mean of the per-target scores and it hides a target that has collapsed behind one
-        # that has not, which on a joint run is exactly the failure worth seeing.
+        """Add one batch to the running totals the epoch scores are computed from."""
+        # Totalled per target, not pooled across them: pooling would hide a target the model has
+        # given up on behind one it predicts well.
         predictions = predictions.double().reshape(-1, self.target_dim)
         targets = targets.double().reshape(-1, self.target_dim)
         state = self._metric_state.setdefault(stage, {})
         if not state:
-            # Kept on the CPU so the accumulator does not pin accelerator memory for the epoch, and
-            # so the addends below can be moved to it unconditionally.
+            # Kept on the processor, so the totals do not hold GPU memory for a whole epoch.
             zeros = torch.zeros(self.target_dim, dtype=torch.float64)
             state.update(
                 {
@@ -339,6 +414,7 @@ class SoilRegressionLightningBase(LightningModule):
         state["sse"] += ((predictions - targets) ** 2).sum(dim=0).cpu()
 
     def _log_epoch_metrics(self, stage: str) -> None:
+        """Report R² and the prediction spread for the epoch, per target and averaged."""
         state = self._metric_state.pop(stage, None)
         if not state or state["n"] < 2:
             return
@@ -352,12 +428,12 @@ class SoilRegressionLightningBase(LightningModule):
         std_ratios: list[float] = []
         for index, name in enumerate(names):
             variance = float(target_variance[index])
-            # A constant target has no variance to explain, so r2 is undefined rather than zero.
-            # Skipped per column: one degenerate target must not suppress the others' metrics.
+            # A target that never varies has nothing to explain, so R² is undefined rather than
+            # zero. Skipped for that target alone.
             if variance <= 1e-12:
                 continue
-            # In standardized space this is exactly 1 - MSE, which is how a run's health can be read
-            # straight off test_loss.
+            # In training units this is exactly 1 minus the mean squared error, which is how a
+            # run's health can be read straight off its loss.
             r2 = 1.0 - (float(state["sse"][index]) / count) / variance
             std_ratio = (max(float(prediction_variance[index]), 0.0) ** 0.5) / (variance**0.5)
             r2_scores.append(r2)
@@ -368,8 +444,7 @@ class SoilRegressionLightningBase(LightningModule):
 
         if not r2_scores:
             return
-        # The unsuffixed pair is the MEAN across targets, which is what makes it comparable with a
-        # per-target run's single value. A single target leaves it numerically unchanged.
+        # The unnamed pair is the average across targets, comparable with a single-target run.
         self.log(
             f"{stage}_r2",
             sum(r2_scores) / len(r2_scores),
@@ -385,41 +460,43 @@ class SoilRegressionLightningBase(LightningModule):
         )
 
     def on_train_epoch_start(self) -> None:
+        """Clear the training totals at the start of an epoch."""
         self._metric_state.pop("train", None)
 
     def on_validation_epoch_start(self) -> None:
+        """Clear the validation totals at the start of an epoch."""
         self._metric_state.pop("val", None)
 
     def on_test_epoch_start(self) -> None:
+        """Clear the test totals before scoring."""
         self._metric_state.pop("test", None)
 
     def on_train_epoch_end(self) -> None:
+        """Report the training scores for the epoch."""
         self._log_epoch_metrics("train")
 
     def on_validation_epoch_end(self) -> None:
+        """Report the validation scores for the epoch."""
         self._log_epoch_metrics("val")
 
     def on_test_epoch_end(self) -> None:
+        """Report the test scores."""
         self._log_epoch_metrics("test")
 
     # --- preprocessing state ------------------------------------------------
 
     def attach_preprocessing_state(self, state: Mapping[str, Any] | None) -> None:
-        """Record the datamodule's fitted input statistics on this module.
+        """Keep the datamodule's fitted input statistics on the model.
 
-        The target statistics were always buffers, so a restored checkpoint could invert its own
-        predictions. The INPUT statistics were not: they lived only on the datamodule, so a
-        restored model could not standardize raw data and was therefore not servable on its own.
-        This carries them across.
+        They go into the checkpoint alongside the weights, which is what lets a saved model prepare
+        raw data by itself. They also carry the column names the SHAP figures label their rows with.
 
-        Carried in the checkpoint by :meth:`on_save_checkpoint` rather than in ``hparams``. It is
-        deliberately NOT a hyperparameter: Lightning replays ``hparams`` as constructor keyword
-        arguments on restore, so an entry that is not an ``__init__`` parameter would break
-        ``load_from_checkpoint``. It is not a buffer either - the payload is ragged (per-modality
-        dicts of differing widths, string vocabularies, feature names), which is not a tensor shape.
-
-        Also the source of the feature names an explainer labels its rows with; without it the
-        attribution seam falls back to positional names like ``static_0``.
+        Parameters
+        ----------
+        state : mapping or None
+            What :meth:`SoilSequenceDataModule.preprocessing_state
+            <yg_eo_soilnet.datamodules.sequence.sequence_datamodule.SoilSequenceDataModule.preprocessing_state>`
+            returned.
         """
         if not state:
             return
@@ -427,47 +504,33 @@ class SoilRegressionLightningBase(LightningModule):
         payload = dict(state)
         self.preprocessing_state = payload
 
-        # Promoted to attributes because the attribution seam and the serving wrapper read them on
-        # every call and should not have to know they came from a dict.
+        # Kept as attributes too: the explanations and the serving wrapper read them constantly.
         self.static_feature_names = list(payload.get("static_feature_names") or [])
         self.modality_column_names = {
             str(name): list(columns) for name, columns in (payload.get("modality_column_names") or {}).items()
         }
-        # The declared spatial-context subset of static_feature_names, and the coordinate column
-        # names. Both ride this channel rather than being constructor arguments, for the same reason
-        # static_feature_names does: they label attributions and change no shape, so making them
-        # hyperparameters would put a purely cosmetic list in the load_from_checkpoint contract.
+        # Names only: they label the figures and change nothing about the model's shape.
         self.context_feature_names = list(payload.get("context_feature_names") or [])
         self.coord_names = list(payload.get("coord_names") or [])
 
     def get_preprocessing_state(self) -> dict:
-        """The attached state, empty when this module was never given one."""
+        """The fitted input statistics, or an empty dict when the model has none."""
         return dict(getattr(self, "preprocessing_state", None) or {})
 
     def on_save_checkpoint(self, checkpoint: dict) -> None:
-        """Put the fitted input statistics in the checkpoint, beside the weights.
-
-        Plain builtins by contract (see SoilSequenceDataModule.preprocessing_state), so a checkpoint
-        carrying them still loads under ``torch.load``'s ``weights_only=True`` default.
-        """
+        """Write the fitted input statistics into the checkpoint, beside the weights."""
         state = self.get_preprocessing_state()
         if state:
             checkpoint["preprocessing_state"] = state
 
     def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Read those statistics back when a checkpoint is loaded."""
         self.attach_preprocessing_state(checkpoint.get("preprocessing_state"))
 
     # --- target inversion and optimizer ------------------------------------
 
     def inverse_transform_targets(self, predictions):
-        """Map standardized predictions back to the target's original units.
-
-        Un-standardize first, then undo log1p: the datamodule fits the standardization stats on
-        already-transformed targets, so the two must be inverted in the opposite order.
-
-        The arithmetic lives in ``losses.inverse_transform_targets`` because CosineStructureLoss
-        needs the same inversion and must not reach back into the module that owns it.
-        """
+        """Convert predictions from training units back to the target's own units."""
         return inverse_transform_targets(
             predictions,
             mean=self.target_mean,
@@ -477,26 +540,25 @@ class SoilRegressionLightningBase(LightningModule):
         )
 
     def inverse_transform_sigma(self, sigma, predictions):
-        """Map a standardized predictive sigma back to the target's original units.
+        """Convert a predicted spread from training units back to the target's own units.
 
-        ``predictions`` must be the STANDARDIZED mean - the same tensor that goes into
-        ``inverse_transform_targets``, not its output.
+        Undoing the standardization only rescales it. Undoing the log transform does not: that
+        transform stretches the scale by a different amount at every value, so the spread is
+        converted using the slope at this point's own prediction. On a log-transformed target the
+        spread therefore grows with the prediction - a wide prediction is uncertain by more g/kg
+        than a small one, even at the same relative uncertainty.
 
-        Two steps, and only the first is the one people expect:
+        Parameters
+        ----------
+        sigma : torch.Tensor
+            The predicted spread, in training units.
+        predictions : torch.Tensor
+            The predictions **in training units**, not the converted ones.
 
-        1. Un-standardize. Scaling is linear, so the sigma scales with it: ``sigma * target_scale``.
-
-        2. Undo log1p. This one is NOT linear, so there is no single factor that maps a standard
-           deviation across it - the transform stretches the axis by a different amount at every
-           point. The delta method takes the local slope: the forward transform is
-           ``z = 10 * log1p(y)``, so ``y = expm1(z / 10)`` and ``dy/dz = exp(z / 10) / 10``,
-           evaluated at this row's own predicted ``z``.
-
-        The consequence worth stating: on a log1p target the returned sigma is asymmetric in
-        substance even though it is reported as one number, and it grows with the prediction. A
-        version of this that reused ``inverse_transform_targets`` on the sigma - the obvious
-        shortcut - would produce a number in no units at all, and nothing downstream would catch it
-        because it would still be positive and roughly the right magnitude.
+        Returns
+        -------
+        torch.Tensor
+            The spread in the target's own units.
         """
         if bool(self.targets_are_standardized):
             scale = self.target_scale.to(sigma.device)
@@ -510,6 +572,14 @@ class SoilRegressionLightningBase(LightningModule):
         return sigma
 
     def configure_optimizers(self):
+        """Build the optimizer, and the learning-rate schedule when one is configured.
+
+        Returns
+        -------
+        torch.optim.Optimizer or dict
+            A dict when ``scheduler_type`` asks for the learning rate to be lowered once the watched
+            score stops improving.
+        """
         if self.optimizer_name in {"adamw", "adam_w"}:
             optimizer = torch.optim.AdamW(self.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay)
         else:

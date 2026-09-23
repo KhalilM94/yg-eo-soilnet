@@ -1,9 +1,7 @@
-"""Ensemble mechanics: which seeds the members train at, and how their outputs combine.
+"""How :term:`ensemble` members are seeded, and how their predictions are combined.
 
-Deliberately free of any sklearn or torch import. Both families call the same three functions on
-plain arrays, which is what keeps the epistemic/aleatoric decomposition identical no matter which
-framework produced the members - the same discipline yg_eo_soilnet.metrics applies to the point
-metrics.
+Plain arrays only, no scikit-learn and no PyTorch, so both families combine their members exactly
+the same way.
 """
 
 from __future__ import annotations
@@ -21,44 +19,51 @@ BOOTSTRAP_MODES = (BOOTSTRAP_AUTO, BOOTSTRAP_ALWAYS, BOOTSTRAP_NEVER)
 
 
 def member_seeds(base_seed: int, n_members: int, stride: int = 1000) -> list[int]:
-    """The seed each ensemble member trains at.
+    """The seed each ensemble member is trained at.
 
-    A STRIDE rather than consecutive integers. Member seeds share a namespace with split.seed and
-    with every registry entry's `random_seed`, and `base + 1` collides with the next entry's seed
-    often enough to matter: two members drawing the same initialization are not two samples of the
-    posterior, they are one sample counted twice, and the variance they report is too small with no
-    sign that anything went wrong.
-    """
+    Spaced well apart rather than consecutive, so a member's seed does not collide with the seed of the
+    next model or of the split - two members trained at the same seed are the same model twice.
+
+    Parameters
+    ----------
+    base_seed : int
+        The run's seed.
+    n_members : int
+        How many members.
+    stride : int, default 1000
+        The gap between members' seeds.
+
+    Returns
+    -------
+    list of int
+
+    Examples
+    --------
+    >>> member_seeds(42, 3)
+    [42, 1042, 2042]
+        """
     if n_members < 1:
         raise ValueError(f"n_members must be at least 1; got {n_members}")
     return [int(base_seed) + index * int(stride) for index in range(int(n_members))]
 
 
 def should_bootstrap(estimator: Any, mode: str = BOOTSTRAP_AUTO) -> bool:
-    """Whether this estimator's members must differ by a resample of the training rows.
+    """Whether this model's members have to be trained on resampled rows to differ.
 
-    ``auto`` resamples for EVERY sklearn estimator, and the reason is worth stating because the
-    obvious cheaper rule is wrong.
+    ``auto`` resamples for every scikit-learn model: a model that ignores its seed - a plain linear
+    regression does - would otherwise produce identical members and no uncertainty at all. Deep-learning
+    models are not resampled: two networks started from different weights already differ.
 
-    The tempting test is "does it expose a ``random_state``?" - the same test
-    ``ModelConfigFactory._seed_estimator`` uses to decide whether a seed can be pushed. It does not
-    work here, because exposing a seed is not the same as using one. ``sklearn.linear_model.Ridge``
-    reports ``random_state`` in ``get_params``, but only its ``sag``/``saga`` solvers consult it;
-    under the default ``solver="auto"`` the fit is a closed-form solve and the seed is inert. That
-    test therefore classifies Ridge as stochastic, five members train to identical coefficients, the
-    ensemble standard deviation is exactly zero, and the run reports total confidence in every
-    prediction - with nothing anywhere saying that no ensemble was formed. A name list has the same
-    problem one registry entry later.
+    Parameters
+    ----------
+    model : estimator
+        The model being trained.
+    setting : {"auto", "always", "never"}, default "auto"
 
-    Resampling every entry costs each member the ~36.8% of rows a bootstrap leaves out, which is a
-    real if modest hit to each member's fit. It buys an ensemble that is an ensemble for every
-    estimator, including ones nobody has classified yet - and for a convex model, bagging IS the
-    classical epistemic estimate, not a substitute for one.
-
-    ``never`` exists for the Lightning family, where a different weight initialization genuinely
-    produces a different model and resampling on top of it would shrink the training set for no
-    additional spread.
-    """
+    Returns
+    -------
+    bool
+        """
     normalized = str(mode).lower()
     if normalized not in BOOTSTRAP_MODES:
         raise ValueError(f"bootstrap must be one of {BOOTSTRAP_MODES}; got {mode!r}")
@@ -68,22 +73,31 @@ def should_bootstrap(estimator: Any, mode: str = BOOTSTRAP_AUTO) -> bool:
 
 
 def bootstrap_indices(n_rows: int, seed: int) -> np.ndarray:
-    """Row positions for one bootstrap resample: `n_rows` draws with replacement.
+    """Which rows one member trains on: ``n_rows`` draws, with repeats allowed.
 
-    Its own function so the sklearn trainer and the tests draw the same rows for the same seed.
-    """
+    Examples
+    --------
+    >>> len(bootstrap_indices(10, seed=42))
+    10
+        """
     generator = np.random.default_rng(int(seed))
     return generator.integers(0, int(n_rows), size=int(n_rows))
 
 
 @dataclass(frozen=True)
 class EnsemblePrediction:
-    """One ensemble's output for one array of inputs, shaped ``(n_rows, n_targets)`` throughout.
+    """What an ensemble predicted: the value, and the two kinds of uncertainty.
 
-    The two variance components are kept apart rather than pre-summed because they answer different
-    questions and have different remedies: epistemic shrinks if you collect more training data,
-    aleatoric does not. A wide bar means nothing until you know which of the two produced it.
-    """
+    Attributes
+    ----------
+    mean : numpy.ndarray of shape (n_points, n_targets)
+        The members' average - the prediction.
+    epistemic_std : numpy.ndarray
+        How much the members disagree; see :term:`epistemic uncertainty`. More training data reduces it.
+    aleatoric_std : numpy.ndarray
+        Noise the members agree about; see :term:`aleatoric uncertainty`. Only a model with a
+        :term:`variance head` predicts it, and more data does not reduce it.
+        """
 
     mean: np.ndarray
     epistemic_std: np.ndarray
@@ -91,11 +105,11 @@ class EnsemblePrediction:
 
     @property
     def total_std(self) -> np.ndarray:
-        """The predictive standard deviation the interval is built from.
+        """The overall spread, which is what an interval is built from.
 
-        Variances add, standard deviations do not - hence the sum under the root. Writing
-        ``epistemic_std + aleatoric_std`` instead would overstate the width by up to 41%.
-        """
+        The two kinds are combined as variances - added under a square root - because adding the spreads
+        themselves would overstate the width by up to 41%.
+                """
         return np.sqrt(self.epistemic_std**2 + self.aleatoric_std**2)
 
 
@@ -103,21 +117,19 @@ def aggregate(
     member_predictions: Sequence[Any],
     member_sigmas: Optional[Sequence[Any]] = None,
 ) -> EnsemblePrediction:
-    """Combine per-member outputs into a mean and its two variance components.
+    """Combine the members' predictions into an average and its two uncertainties.
 
-    ``member_predictions`` is one entry per member, each ``(n_rows,)`` or ``(n_rows, n_targets)``.
-    ``member_sigmas``, when given, is the per-member ALEATORIC standard deviation from a
-    heteroscedastic head, in the same shapes and the same units.
+    Parameters
+    ----------
+    member_predictions : sequence of array-like
+        One entry per member.
+    member_sigmas : sequence of array-like, optional
+        Each member's own predicted spread, from a :term:`variance head`.
 
-    The decomposition is the deep-ensemble one (Lakshminarayanan et al. 2017): the mixture of the
-    members' Gaussians has mean ``mean(mu_k)`` and variance ``mean(sigma_k^2) + var(mu_k)``. Note
-    that the aleatoric term averages VARIANCES, not standard deviations; averaging the standard
-    deviations understates a mixture whose members disagree about the noise level.
-
-    The population variance (``ddof=0``) is used for the epistemic term deliberately: this is the
-    variance of the mixture that was actually fitted, not an estimate of the variance of a larger
-    population of models it was sampled from.
-    """
+    Returns
+    -------
+    EnsemblePrediction
+        """
     if not len(member_predictions):
         raise ValueError("aggregate needs at least one member prediction")
 
@@ -149,11 +161,7 @@ def aggregate(
 
 
 def _as_2d(values: Any) -> np.ndarray:
-    """A member's output as ``(n_rows, n_targets)`` float array.
-
-    A single-target member is ``(n_rows,)``; widening it here means every caller downstream sees
-    one shape and the single-target path is not a special case in five different places.
-    """
+    """One member's predictions as a points-by-targets array, whatever shape arrived."""
     array = np.asarray(values, dtype=float)
     if array.ndim == 0:
         return array.reshape(1, 1)

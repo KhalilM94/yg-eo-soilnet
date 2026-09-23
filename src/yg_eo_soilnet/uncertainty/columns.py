@@ -1,17 +1,9 @@
-"""The uncertainty column names in an evaluation frame, and how to read them back out.
+"""The names of the uncertainty columns in a results table, and how to read them.
 
-Both families write these columns and three separate readers consume them (the metric fan-out, the
-per-run plot, the parent overlay). Centralising the names here is what stops the sklearn frame and
-the Lightning frame from drifting apart - the same reason ArtifactLayout owns the artifact paths
-rather than each logger spelling them out.
-
-The convention mirrors the existing prediction columns exactly:
-
-    one target      prediction, prediction_std, prediction_lower, prediction_upper
-    several targets prediction_<t>, prediction_std_<t>, prediction_lower_<t>, ...
-
-with `prediction_<t>` keeping its name and meaning - it is the ensemble MEAN - so that every reader
-written before uncertainty existed keeps working unchanged.
+Both model families write the same names - ``prediction_std``, ``prediction_lower``,
+``prediction_upper``, suffixed with the target when a run has several - so one reader handles
+either. The figures and the scores all go through the helpers here rather than spelling the names
+out again.
 """
 
 from __future__ import annotations
@@ -39,25 +31,44 @@ NON_PREDICTION_PREFIXES: tuple[str, ...] = tuple(f"{stem}_" for stem in UNCERTAI
 
 
 def column_name(stem: str, target_name: Optional[str] = None, *, multi_target: bool = False) -> str:
-    """``prediction_std`` for a lone target, ``prediction_std_<target>`` for one of several.
+    """The column name for one kind of uncertainty value.
 
-    `multi_target` is explicit rather than inferred from `target_name` being set, because a
-    single-target run knows its target's name too and must still write the unsuffixed column.
-    """
+    Parameters
+    ----------
+    stem : str
+        ``"prediction_std"``, ``"prediction_lower"`` or ``"prediction_upper"``.
+    target_name : str, optional
+        The target, appended when the run has several.
+    multi_target : bool, default False
+        Whether this run predicts several targets.
+
+    Returns
+    -------
+    str
+
+    Examples
+    --------
+    >>> column_name("prediction_std")
+    'prediction_std'
+    >>> column_name("prediction_std", "clay_pct", multi_target=True)
+    'prediction_std_clay_pct'
+        """
     if not multi_target or target_name is None:
         return stem
     return f"{stem}_{target_name}"
 
 
 def is_prediction_column(column_name_value: Any) -> bool:
-    """True for a per-target prediction column, False for an uncertainty column.
+    """Whether a column holds predictions rather than an uncertainty value.
 
-    The test every reader that scans for `prediction_*` columns should use.
+    The test any reader scanning for prediction columns should use: without it, ``prediction_std`` and
+    ``prediction_lower`` would be counted as targets.
 
-    Both spellings have to be excluded: a single-target run writes the bare stem `prediction_std`,
-    and a joint run writes `prediction_std_<target>`. Matching only the suffixed form would let the
-    single-target frame - the more common one - slip a sigma through as a prediction.
-    """
+    Examples
+    --------
+    >>> is_prediction_column("prediction_clay_pct"), is_prediction_column("prediction_std")
+    (True, False)
+        """
     name = str(column_name_value)
     if not name.startswith("prediction"):
         return False
@@ -70,11 +81,11 @@ def interval_columns(
     frame: pd.DataFrame,
     target_name: Optional[str] = None,
 ) -> Optional[tuple[pd.Series, pd.Series]]:
-    """``(lower, upper)`` for this target when the frame carries them, else None.
+    """The lower and upper bounds for one target, or None when the table has none.
 
-    Returning None rather than raising is deliberate: every plot and metric call site has to work on
-    frames from runs where uncertainty was off, and those are the majority.
-    """
+    None rather than an error: most runs have no uncertainty, and every caller would otherwise have to
+    check first.
+        """
     lower = _first_present(frame, LOWER, target_name)
     upper = _first_present(frame, UPPER, target_name)
     if lower is None or upper is None:
@@ -83,19 +94,17 @@ def interval_columns(
 
 
 def sigma_column(frame: pd.DataFrame, target_name: Optional[str] = None) -> Optional[pd.Series]:
-    """The total predictive standard deviation for this target, or None."""
+    """The predicted spread for one target, or None when the table has none."""
     name = _first_present(frame, STD, target_name)
     return None if name is None else frame[name]
 
 
 def _first_present(frame: pd.DataFrame, stem: str, target_name: Optional[str]) -> Optional[str]:
-    """The suffixed name if the frame has it, else the bare stem, else None.
+    """The suffixed column name if the table has it, else the plain one, else None.
 
-    Suffixed first: a per-target child frame produced by `_iter_target_eval_frames` is a COPY of the
-    whole multi-target frame, so it carries every target's columns and the bare stem may be absent
-    while several suffixed ones are present. Preferring the bare name there would find nothing on a
-    joint run; preferring it after the suffixed one is correct in both shapes.
-    """
+    Suffixed first: a single target's table is a copy of the whole run's, so it carries every target's
+    columns and the plain name may be missing.
+        """
     if target_name:
         suffixed = f"{stem}_{target_name}"
         if suffixed in frame.columns:

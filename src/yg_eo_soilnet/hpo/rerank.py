@@ -1,14 +1,9 @@
-"""Re-running the shortlist, because the best trial's value is not what a retrain will give you.
+"""Re-run the best few :term:`trials <trial>`, because the winner is partly luck.
 
-A study reports the minimum (or maximum) over hundreds of trials, each itself the best epoch of a
-noisy run. That is a maximum of noise: the winner is partly whichever configuration drew the
-luckiest seed, and its headline number is optimistically biased. On the study this was written for,
-the top 20 configurations spanned 0.0197 in val_loss while the winner missed its own retrain by
-0.0239 - the ranking at the top carried less signal than the run-to-run noise.
-
-Re-running a shortlist over several seeds and choosing on the mean fixes both halves: the winner is
-chosen on evidence that is not a single lucky draw, and the exported number predicts what retraining
-will actually deliver.
+A study reports the best of hundreds of trials, each itself the best epoch of a noisy run: the
+headline number is the luckiest draw as much as the best settings, and a retrain usually lands
+somewhat worse. :term:`Reranking <rerank>` re-runs the shortlist over several seeds and picks the
+best *average*, which is a far better guide to what the settings will actually give.
 """
 
 from __future__ import annotations
@@ -30,6 +25,19 @@ REPRODUCTION_TOLERANCE = 0.02
 
 @dataclass
 class RerankResult:
+    """One shortlisted trial, re-run several times.
+
+    Attributes
+    ----------
+    trial_number : int
+        Which trial it was.
+    values : list of float
+        What each re-run scored.
+    overrides : dict
+        The settings it ran with.
+    headline : float
+        What the study originally reported for it.
+        """
     trial_number: int
     original_value: float
     overrides: dict[str, Any]
@@ -38,32 +46,33 @@ class RerankResult:
 
     @property
     def mean(self) -> float | None:
+        """The average of the re-runs - what this configuration is really worth."""
         return statistics.fmean(self.values) if self.values else None
 
     @property
     def std(self) -> float:
-        """Population-style spread; 0.0 for a single seed rather than an error."""
+        """How much the re-runs varied; 0 for a single seed rather than an error."""
         return statistics.stdev(self.values) if len(self.values) > 1 else 0.0
 
     @property
     def reproduced(self) -> bool | None:
-        """Did the re-run at the trial's own seed land back on the trial's value?
+        """Whether re-running at the trial's own seed landed back on its original score.
 
-        The first seed is deliberately the trial's own, so this doubles as a check that seeding
-        reaches the weights. False here means a run is not reproducible from its recorded seed.
-        """
+        The first seed is deliberately the trial's own, so this doubles as a check that seeding really
+        reaches the weights. False means a run is not reproducible from its seed.
+                """
         if not self.values:
             return None
         return abs(self.values[0] - self.original_value) <= REPRODUCTION_TOLERANCE
 
     @property
     def drift(self) -> float | None:
-        """How far the mean sits from the headline value - the size of the selection bias."""
+        """How far the average sits from the headline score - the size of the luck."""
         return None if self.mean is None else self.mean - self.original_value
 
 
 def top_trials(study: optuna.Study, k: int) -> list[optuna.trial.FrozenTrial]:
-    """The `k` best COMPLETE trials, ordered by the study's own direction."""
+    """The best few finished trials, in the study's own order."""
     completed = [t for t in study.trials if t.state.name == COMPLETE and t.value is not None]
     reverse = study.direction.name.lower() == "maximize"
     completed.sort(key=lambda trial: trial.value, reverse=reverse)
@@ -78,12 +87,14 @@ def rerank(
     seeds: int = 3,
     logger: Any = None,
 ) -> list[RerankResult]:
-    """Re-run each shortlisted trial `seeds` times and collect the values.
+    """Re-run each shortlisted trial several times and collect what they score.
 
-    `objective` is the TrialObjective the study was run with - re-using it means a re-run is built
-    and trained by exactly the same code as the original trial, with no second implementation to
-    drift.
-    """
+    Trained by exactly the same code that ran the trials, so a re-run is comparable with the original.
+
+    Returns
+    -------
+    list of RerankResult
+        """
     candidates = top_trials(study, top_k)
     if not candidates:
         return []
@@ -131,6 +142,7 @@ def rerank(
 
 
 def _run_once(objective: Any, scratch: optuna.Study, overrides: dict[str, Any], seed: int) -> float:
+    """Train one shortlisted trial at one seed."""
     from yg_eo_soilnet.hpo.objective import seed_everything
     from yg_eo_soilnet.hpo.trial_runner import release_dataloader_workers
 
@@ -145,7 +157,7 @@ def _run_once(objective: Any, scratch: optuna.Study, overrides: dict[str, Any], 
 
 
 def choose_winner(results: list[RerankResult], direction: str) -> RerankResult | None:
-    """Best mean, not best headline value - which is frequently a different trial."""
+    """The best average, which is often a different trial from the best headline score."""
     scored = [result for result in results if result.mean is not None]
     if not scored:
         return None
@@ -153,6 +165,7 @@ def choose_winner(results: list[RerankResult], direction: str) -> RerankResult |
 
 
 def rerank_frame(results: list[RerankResult], metric: str = "value") -> pd.DataFrame:
+    """The re-ranking as a table: each trial, its re-runs, its average and its spread."""
     if not results:
         return pd.DataFrame(columns=["trial", f"original_{metric}", f"mean_{metric}", "std", "drift", "seeds"])
     return pd.DataFrame(

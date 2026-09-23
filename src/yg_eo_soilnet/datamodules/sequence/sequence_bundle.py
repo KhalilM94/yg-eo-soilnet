@@ -1,3 +1,5 @@
+"""Everything the deep-learning model reads about every point, in one object."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,93 +10,117 @@ import numpy as np
 
 @dataclass
 class SoilSequenceBundle:
-    """The bundle exchanged between :class:`SoilSequenceBuilder` and the sequence datamodule.
+    """Everything the deep-learning model reads about every point: the :term:`bundle`.
 
-    Every point carries only its **actual observations**, each paired with its own date. There is no
-    shared time axis, no fixed number of steps and no zero-filled gap: ``sequences[modality][i]`` has
-    one row per reading that point genuinely has for that modality, and
-    ``sequence_times[modality][i]`` holds the matching decimal years.
+    Built by :class:`~yg_eo_soilnet.datamodules.sequence.sequence_builder.SoilSequenceBuilder` and
+    read by :class:`~yg_eo_soilnet.datamodules.sequence.sequence_datamodule.SoilSequenceDataModule`.
 
-    That is what makes a model built on this bundle transferable. Nothing here encodes *which* years
-    the data came from, so a 2030-2035 series is the same kind of object as a 2017-2025 one, and
-    points with 40 readings sit beside points with 90 without any padding at rest.
+    Each point carries only the readings it actually has, each with its own date in
+    :term:`decimal years <decimal year>`: there is no shared time axis and no filled-in gap, so a
+    point with 40 readings sits beside one with 90. Nothing records *which* years the data came
+    from, which is what lets a model trained on one period read another.
 
-    Deliberately absent, because there is no graph: edges, edge attributes and residuals.
-
-    ``coords`` is present but is NOT the graph's notion of coordinates - there is nothing here that
-    relates one point to another. It is a per-point attribute, carried only when
-    ``USE_HARMONIC_COORDS`` asks for it, and read by exactly one consumer: the CNN's harmonic
-    coordinate branch. With the flag off it is ``(n, 0)`` and every batch is identical to a build
-    that had never heard of coordinates.
+    Attributes
+    ----------
+    point_ids : list
+        The points, in the order every array below follows.
+    static_features : numpy.ndarray of shape (n_points, n_static)
+        The numeric covariates. Gaps are kept as NaN: they are filled with the training points'
+        median later, and the split does not exist yet at build time.
+    static_feature_names : list of str
+        Their column names.
+    static_validity : numpy.ndarray of bool
+        True where the covariate was measured rather than filled in. Only columns that have gaps
+        appear; empty means nothing was filled.
+    static_validity_names : list of str
+        The columns ``static_validity`` covers.
+    static_categoricals : numpy.ndarray of shape (n_points, n_categorical)
+        Category covariates as raw labels. They are numbered later, from the training points only.
+    categorical_feature_names : list of str
+        Their column names.
+    context_feature_names : list of str
+        Which of ``static_feature_names`` are spatial-context covariates. A list of names, not
+        values: the columns stay in ``static_features`` and are read like any other.
+    coords : numpy.ndarray of shape (n_points, 2)
+        Latitude and longitude, only with ``USE_HARMONIC_COORDS``; otherwise no columns. Kept at
+        full precision, since the model works with differences between nearby coordinates.
+    coord_names : list of str
+        Their column names.
+    targets : numpy.ndarray of shape (n_points, n_targets)
+        The lab measurements being predicted.
+    target_names : list of str
+        Their column names.
+    label_features : numpy.ndarray of shape (n_points, n_labels)
+        Every lab measurement the data carries, for models using an :term:`auxiliary lab input`. The
+        bundle is built once and reused, so it holds them all and each model picks by name. Gaps
+        stay NaN, as for the covariates.
+    label_feature_names : list of str
+        Their column names.
+    sequences : dict of str to list of numpy.ndarray
+        Per :term:`data source`, one ``(n_readings, n_channels)`` array per point.
+    sequence_times : dict of str to list of numpy.ndarray
+        Per data source, the :term:`decimal year` of each of those readings.
+    sequence_validity : dict of str to list of numpy.ndarray
+        Per data source, True where the reading was measured rather than filled in. An empty dict
+        means nothing was filled.
+    modality_columns : dict of str to list of str
+        Per data source, the columns its channels correspond to.
+    temporal_enabled : bool
+        Whether the time series is being used at all.
     """
 
     point_ids: list[Any] = field(default_factory=list)
-    # NaN is PRESERVED here, exactly as in label_features below: the fill value is a train-split
-    # median and at build time the split does not exist yet. A covariate gap used to delete the whole
-    # row instead, which on one real dataset turned 5761 points into 17.
+    # Gaps are kept as NaN, here and in label_features: the fill value is the training points'
+    # median, and the split does not exist yet at build time.
     static_features: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float32))
     static_feature_names: list[str] = field(default_factory=list)
-    # (n_points, len(static_validity_names)) bool: True where the covariate was measured rather than
-    # median-filled. Only columns that ACTUALLY have gaps appear - a constant-True channel doubles
-    # the static width and carries nothing. Empty means no covariate had a gap, which reads as
-    # all-True. Matches what SimpleImputer(add_indicator=True, features='missing-only') emits on the
-    # sklearn side, so the two families flag the same set.
+    # Only columns that really have gaps get a flag: an always-true one doubles the width and says
+    # nothing. The scikit-learn pipeline flags the same set.
     static_validity: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=bool))
     static_validity_names: list[str] = field(default_factory=list)
-    # Categorical covariates as RAW LABELS, (n_points, n_categorical) object dtype. Deliberately not
-    # encoded here: a vocabulary must be fitted on the training split alone, and at build time the
-    # split does not exist yet. The datamodule fits it in setup(), beside the scaler.
+    # Raw labels, numbered later by the datamodule from the training points alone.
     static_categoricals: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=object))
     categorical_feature_names: list[str] = field(default_factory=list)
-    # The subset of static_feature_names declared as spatial context. A NAME LIST, not an array:
-    # the values stay in static_features, so x_static keeps its width, its column order and its
-    # standardization, and the columns really do reach TabularStaticEncoder as ordinary continuous
-    # variables. Grouping them buys the ablation switch and a SHAP block, nothing else.
+    # Names only: the values stay in static_features and are read like any other covariate.
+    # Grouping them buys the on/off switch and a block in the SHAP figures, nothing more.
     context_feature_names: list[str] = field(default_factory=list)
-    # (n_points, 2) float64 lat/lon, or (n, 0) when USE_HARMONIC_COORDS is off. float64 rather than
-    # float32 for the same reason sequence_times is: float32 resolves about a metre at this
-    # latitude, and the train-bbox normalization downstream is a subtraction of two nearby numbers,
-    # which would spend most of that.
-    #
-    # NaN is NOT preserved here, unlike static_features and label_features above: there is no
-    # honest fill for a coordinate - a median lat/lon is a point in the middle of the study area
-    # that no sample occupies - so the builder drops the row instead, and says how many.
+    # Full precision, because what the model reads is the difference between nearby coordinates.
+    # A point without coordinates is dropped rather than filled: the median position is a place no
+    # sample occupies.
     coords: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float64))
     coord_names: list[str] = field(default_factory=list)
     targets: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float32))
     target_names: list[str] = field(default_factory=list)
-    # Measured lab values, (n_points, n_labels) float32. Every LABEL_COLUMNS entry the static frame
-    # carries, not just the ones some model asked for: the bundle is built once per registry entry
-    # and cached across them, so it must not depend on any one model's column choice. Selection
-    # happens in the model, by name.
-    #
-    # NaN is PRESERVED here rather than filled. The fill value is a train-split median and at build
-    # time the split does not exist yet - the same reason static_categoricals above stays raw.
+    # Every lab column the data carries, not only what one model asked for: the bundle is built
+    # once and reused, so each model picks the columns it wants by name.
     label_features: np.ndarray = field(default_factory=lambda: np.empty((0, 0), dtype=np.float32))
     label_feature_names: list[str] = field(default_factory=list)
-    # modality -> one (n_i, C_m) array per point, in static point order
+    # data source -> one array of readings per point, in point_ids order
     sequences: dict[str, list[np.ndarray]] = field(default_factory=dict)
-    # modality -> one (n_i,) array of decimal years per point, in static point order
+    # data source -> the decimal year of each of those readings
     sequence_times: dict[str, list[np.ndarray]] = field(default_factory=dict)
-    # modality -> one (n_i, C_m) bool array per point: True where the cell was measured rather than
-    # median-filled. Empty dict means "no imputation was tracked", which reads as all-True.
+    # data source -> True where a reading was measured rather than filled in. An empty dict means
+    # nothing was filled.
     sequence_validity: dict[str, list[np.ndarray]] = field(default_factory=dict)
     modality_columns: dict[str, list[str]] = field(default_factory=dict)
     temporal_enabled: bool = False
 
-    # --- Mapping-style access, so dict-based callers and tests keep working ---
+    # --- Also usable like a dict, for callers written before it was a class ---
 
     def __getitem__(self, key: str):
         return getattr(self, key)
 
     def get(self, key: str, default=None):
+        """The named field, or ``default`` when there is no such field."""
         return getattr(self, key, default)
 
     def keys(self):
+        """The field names."""
         return tuple(self.__dataclass_fields__)
 
     @classmethod
     def from_mapping(cls, value: "SoilSequenceBundle | Mapping[str, Any]") -> "SoilSequenceBundle":
+        """Build a bundle from a dict of fields; a bundle is returned unchanged."""
         if isinstance(value, cls):
             return value
         known = set(cls.__dataclass_fields__)
@@ -102,36 +128,45 @@ class SoilSequenceBundle:
 
     @property
     def num_points(self) -> int:
+        """How many points the bundle holds."""
         return len(self.point_ids)
 
     @property
     def modality_dims(self) -> dict[str, int]:
-        """Channel count per modality, taken from the column lists rather than any point's data.
+        """How many channels each :term:`data source` has, from its column list.
 
-        Reading it off an array would break on a bundle whose first point has no observations.
+        Read from the names rather than from a point's readings, which a point may not have.
         """
         return {name: len(columns) for name, columns in self.modality_columns.items()}
 
     @property
     def coord_dim(self) -> int:
-        """How many coordinate columns travel with the bundle: 2, or 0 when the flag is off.
-
-        From the names rather than the array, for the same reason modality_dims is: a bundle with
-        no points at all has a (0, 0) array whose width would disagree with the name list.
-        """
+        """How many coordinate columns the bundle carries: 2, or 0 when they are not used."""
         return len(self.coord_names)
 
     @property
     def label_dim(self) -> int:
-        """How many lab columns travel with the bundle, from the names rather than the array.
-
-        Same reason as modality_dims: a bundle whose static frame carried no label columns at all
-        has a (0, 0) array, and reading a width off that would disagree with the name list.
-        """
+        """How many lab columns the bundle carries."""
         return len(self.label_feature_names)
 
     def label_missing_fraction(self, column: str) -> float:
-        """Share of points whose value for this lab column is absent."""
+        """Share of points whose value for this lab column is missing.
+
+        Parameters
+        ----------
+        column : str
+            One of ``label_feature_names``.
+
+        Returns
+        -------
+        float
+            Between 0 and 1.
+
+        Raises
+        ------
+        KeyError
+            If the bundle does not carry that column.
+        """
         if column not in self.label_feature_names:
             raise KeyError(f"Unknown label column {column!r}; available: {self.label_feature_names}")
         values = np.asarray(self.label_features, dtype=np.float64)
@@ -141,17 +176,31 @@ class SoilSequenceBundle:
         return float((~np.isfinite(column_values)).mean())
 
     def observation_counts(self, modality: str) -> np.ndarray:
+        """How many readings each point has for one :term:`data source`."""
         return np.asarray([len(values) for values in self.sequences.get(modality, [])], dtype=np.int64)
 
     def validity_for(self, modality: str, index: int) -> np.ndarray:
-        """Per-channel validity for one point, defaulting to all-True when none was tracked."""
+        """Which of one point's readings were measured rather than filled in.
+
+        Parameters
+        ----------
+        modality : str
+            The :term:`data source`.
+        index : int
+            The point's position in ``point_ids``.
+
+        Returns
+        -------
+        numpy.ndarray of bool
+            All true when nothing was filled in.
+        """
         per_point = (self.sequence_validity or {}).get(modality)
         if per_point is not None and index < len(per_point):
             return np.asarray(per_point[index], dtype=bool)
         return np.ones(np.asarray(self.sequences[modality][index]).shape, dtype=bool)
 
     def imputed_fraction(self, modality: str) -> float:
-        """Share of this modality's cells that were median-filled rather than measured."""
+        """Share of one :term:`data source`\'s readings that were filled in rather than measured."""
         per_point = (self.sequence_validity or {}).get(modality)
         if not per_point:
             return 0.0
@@ -163,16 +212,18 @@ class SoilSequenceBundle:
     # --- validation -------------------------------------------------------
 
     def validate(self) -> None:
-        """Raise if the bundle is internally inconsistent or carries non-finite values.
+        """Check the bundle holds together, and say which point is wrong when it does not.
 
-        Every message names the offending point id (and column where known), because a bare
-        "non-finite value" on a 5,700-point bundle is not actionable.
+        Every array must cover every point, every set of readings must match its dates and its
+        channel count, and the dates must be sorted with no repeats.
+
+        Raises
+        ------
+        ValueError
+            Naming the point id, and the column where it is known.
         """
-        # static_features is deliberately NOT run through _validate_numeric_array, for the same
-        # reason label_features below is not: a missing covariate is legitimate and becomes a
-        # train-median fill once the split is known. Requiring finiteness here is what forced the
-        # builder to delete the row instead. Targets are still checked - a point with no label has
-        # nothing to teach.
+        # The covariates are not checked for gaps: a gap is allowed and is filled in once the
+        # split is known. The targets are, since a point with no measurement teaches nothing.
         self._validate_numeric_array("targets", self.targets, self.target_names)
 
         num_points = len(self.point_ids)
@@ -198,9 +249,8 @@ class SoilSequenceBundle:
                     f"static_validity_names must be a subset of static_feature_names; unknown: {unknown}"
                 )
 
-        # Categorical labels are raw and unencoded, so there is no finiteness to check here - a
-        # missing label is legitimate and becomes the reserved index once the vocabulary is fitted.
-        # Only the alignment matters.
+        # Categories are still raw labels, and a missing one gets the reserved code later, so only
+        # the shapes matter here.
         categoricals = np.asarray(self.static_categoricals)
         if categoricals.ndim == 2 and categoricals.shape[1]:
             if categoricals.shape[0] != num_points:
@@ -216,9 +266,8 @@ class SoilSequenceBundle:
         if self.targets.size and self.targets.shape[0] != num_points:
             raise ValueError(f"targets has {self.targets.shape[0]} row(s) but there are {num_points} point(s)")
 
-        # Coordinates ARE checked for finiteness, unlike every other input block above. There is no
-        # train-median fill waiting for them downstream, so a NaN here would reach the normalizer
-        # and silently produce a NaN embedding for that point.
+        # Coordinates are checked, unlike the blocks above: nothing fills them in later, so a gap
+        # here would reach the model.
         coords = np.asarray(self.coords)
         if coords.ndim == 2 and coords.shape[1]:
             if coords.shape[0] != num_points:
@@ -241,8 +290,7 @@ class SoilSequenceBundle:
                 f"{unknown_context}"
             )
 
-        # Deliberately NOT run through _validate_numeric_array: a missing lab value is legitimate
-        # here and becomes a train-median fill once the split is known. Only the alignment matters.
+        # A missing lab value is allowed and is filled in later, so only the shapes matter.
         labels = np.asarray(self.label_features)
         if labels.ndim == 2 and labels.shape[1]:
             if labels.shape[0] != num_points:
@@ -292,6 +340,7 @@ class SoilSequenceBundle:
         times: np.ndarray,
         expected_channels: int,
     ) -> None:
+        """Check one point's readings: shape, one date each, channel count, and sorted dates."""
         values = np.asarray(values)
         times = np.asarray(times)
 
@@ -321,9 +370,8 @@ class SoilSequenceBundle:
         if times.size:
             if not np.isfinite(times).all():
                 raise ValueError(f"Non-finite timestamp in sequence_times['{modality}'] at point {point_label}")
-            # Strictly ascending, because the encoders read the gap between consecutive tokens as a
-            # first difference. An unsorted or duplicated timestamp would silently produce a
-            # negative or zero gap and corrupt the time features.
+            # Strictly ascending: the model reads the gap between one reading and the next, and an
+            # unsorted or repeated date would make that gap zero or negative.
             if times.size > 1 and not bool(np.all(np.diff(times) > 0)):
                 raise ValueError(
                     f"sequence_times['{modality}'] at point {point_label} is not strictly ascending; "
@@ -331,6 +379,7 @@ class SoilSequenceBundle:
                 )
 
     def _validate_numeric_array(self, name: str, array: Any, column_labels: list[str]) -> None:
+        """Raise on the first missing or infinite value, naming the point and column."""
         values = np.asarray(array)
         if values.size == 0 or not np.issubdtype(values.dtype, np.number):
             return

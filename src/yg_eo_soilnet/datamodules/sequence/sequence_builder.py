@@ -1,3 +1,5 @@
+"""Build the bundle the deep-learning model reads: covariates, targets and dated readings."""
+
 from __future__ import annotations
 
 from typing import Any, Mapping, Optional
@@ -17,24 +19,35 @@ from yg_eo_soilnet.datamodules.frame_cleaning import (
 )
 from yg_eo_soilnet.datamodules.sequence.sequence_bundle import SoilSequenceBundle
 
-# Days per average Gregorian year. Only ever used to place an observation *within* its year, so the
-# small drift against a real calendar is irrelevant; what matters is that the mapping is monotonic
-# and identical for every year.
+#: Days in an average year, used to place a reading inside its year.
 DAYS_PER_YEAR = 365.25
 
-# Column-name prefix used to carry per-cell validity through the same pandas operations as the data.
+# Prefix marking the measured-or-filled flags while they travel beside the readings, so every
+# filter and sort applies to both.
 _VALIDITY_PREFIX = "__valid__"
 
 
 def to_decimal_year(dates: pd.Series) -> np.ndarray:
-    """Timestamps -> decimal years, e.g. 2019-07-02 -> 2019.5.
+    """Turn dates into :term:`decimal years <decimal year>`: 2 July 2021 becomes 2021.498.
 
-    Cadence-agnostic by construction: daily, monthly and irregular sampling all map onto the same
-    continuous axis, so nothing downstream has to know how often the sensor reports.
+    One continuous axis for daily, monthly or irregular readings alike, so nothing downstream has to
+    know how often a sensor reports. Kept at full precision, because what the model reads is the gap
+    between one reading and the next.
 
-    Returned as float64 and kept that way end to end. float32 resolves only about a day near year
-    2020, and the year-fraction subtraction downstream would spend most of that, blurring the
-    seasonal signal these features exist to carry.
+    Parameters
+    ----------
+    dates : pandas.Series
+        Dates, or anything pandas can read as dates. An unreadable one gives NaN.
+
+    Returns
+    -------
+    numpy.ndarray of float
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> to_decimal_year(pd.Series(["2021-01-01", "2021-07-02", "2022-01-01"])).round(3)
+    array([2021.   , 2021.498, 2022.   ])
     """
     dates = pd.to_datetime(dates, errors="coerce")
     year = dates.dt.year.to_numpy(dtype=np.float64)
@@ -43,14 +56,26 @@ def to_decimal_year(dates: pd.Series) -> np.ndarray:
 
 
 class SoilSequenceBuilder:
-    """Builds the :class:`SoilSequenceBundle` consumed by the sequence datamodule.
+    """Build the :class:`~yg_eo_soilnet.datamodules.sequence.sequence_bundle.SoilSequenceBundle`.
 
-    Depends on the DataManager only for raw loading and schema filtering, so the sequence path and
-    the sklearn path train on the same predictors. Deliberately torch-free, so bundle construction
-    runs and tests without a torch install.
+    Reads the data through the same :class:`~yg_eo_soilnet.data_manager.DataManager` the
+    scikit-learn family uses, so both train on the same covariates, then attaches each point's dated
+    readings. It does not split the points and does not use PyTorch: the datamodule does both.
 
-    Contains no graph concept whatsoever: no coordinates, no edges, no spatial radius, no baseline
-    residuals. Splitting is not done here - that is the datamodule's concern.
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    logger : logging.Logger
+        Where the summary of what was built goes.
+    data_manager : DataManager
+        Reads the data files.
+
+    Examples
+    --------
+    >>> bundle = SoilSequenceBuilder(config, logger, data_manager).build()   # doctest: +SKIP
+    >>> bundle.num_points, sorted(bundle.sequences)                          # doctest: +SKIP
+    (300, ['clim', 's2'])
     """
 
     def __init__(self, config, logger, data_manager):
@@ -59,18 +84,35 @@ class SoilSequenceBuilder:
         self.data_manager = data_manager
 
     def clean_static_frame(self, static_df: pd.DataFrame, dataset) -> tuple[pd.DataFrame, Any]:
-        """Schema-filter, resolve the categorical blocks, gate sparse covariates and drop bad rows.
+        """Keep the usable columns and rows of the static table.
 
-        Split out of :meth:`build` so :meth:`usable_point_ids` answers "which points can this family
-        actually use?" with the *same* rule the builder applies, rather than a second copy of it
-        that can drift. The unified splitter needs that answer before any bundle exists.
+        A point is dropped only for a missing id, a missing target or - when the model reads
+        coordinates - a missing coordinate. A missing covariate is not a reason to drop a soil
+        sample: it is filled in later and flagged. A covariate too empty to fill in honestly stops
+        the run instead (see
+        :func:`~yg_eo_soilnet.datamodules.frame_cleaning.assert_columns_are_dense_enough`).
 
-        A row now dies only for a missing TARGET or point id. It used to die for a missing
-        *covariate* too, which meant three columns that were 99.7% blank could - and on one real
-        dataset did - reduce 5761 points to 17. Covariate gaps are median-filled and flagged by the
-        datamodule instead; columns too empty for that to be honest are rejected outright by
-        :func:`assert_columns_are_dense_enough` above, so nothing reaching the fill is fabricated
-        wholesale.
+        :meth:`usable_point_ids` calls this too, so the split is told exactly which points this
+        family will keep.
+
+        Parameters
+        ----------
+        static_df : pandas.DataFrame
+            One row per point, covariates and targets together.
+        dataset : SoilDataset
+            The loaded data, for the id and target column names.
+
+        Returns
+        -------
+        cleaned : pandas.DataFrame
+            The rows that survived.
+        blocks : FeatureBlocks
+            Which columns are numeric and which are categories.
+
+        Raises
+        ------
+        KeyError
+            If a target column is missing from the data.
         """
         point_col = dataset.point_id_column
         target_columns = list(dataset.target_columns)
@@ -93,26 +135,14 @@ class SoilSequenceBuilder:
             allow=getattr(self.config, "ALLOW_SPARSE_COLUMNS", ()) or (),
             fail=bool(getattr(self.config, "FAIL_ON_SPARSE_COLUMNS", True)),
         )
-        # Targets, and coordinates when the harmonic branch is on. A missing category becomes the
-        # reserved embedding index and a missing continuous covariate becomes a train-median fill
-        # plus a validity flag; neither is a reason to delete the soil sample. A missing LABEL is,
-        # because there is nothing to learn from it - and so is a missing COORDINATE, because the
-        # fill that rescues a covariate has no honest analogue here: a median lat/lon is a location
-        # in the middle of the study area that the sample does not occupy, and the encoder would
-        # read it as a confident position rather than as an absence.
-        #
-        # Done HERE rather than in build() on purpose. usable_point_ids() calls this method to
-        # answer "which points can this family use?" for the unified splitter; deciding the coord
-        # rule in build() instead would let the splitter assign points that build() then drops, and
-        # under population_policy=intersect that shrinks the whole run's population silently.
+        # The coordinate rule lives here, with the other row rules, so usable_point_ids reports it
+        # to the split: a point the split assigns but the builder then drops would shrink the run.
         coordinate_columns = [
             column for column in self._coordinate_columns() if column in static_df.columns
         ]
         if coordinate_columns:
-            # Attributed to the coordinates specifically, rather than reported as the drop that
-            # drop_non_finite_rows performs below: that one also removes rows with a missing target,
-            # which would have gone whatever this flag said, and blaming those on the coordinates
-            # would send someone to audit their lat/lon over a lab problem.
+            # Counted separately from the drop below, which also removes points with no lab
+            # measurement: those would go whatever the coordinate setting said.
             missing_coords = int(
                 (~build_finite_row_mask(static_df, numeric_columns=coordinate_columns)).sum()
             )
@@ -133,7 +163,20 @@ class SoilSequenceBuilder:
         return cleaned, blocks
 
     def usable_point_ids(self, static_df: Optional[pd.DataFrame] = None) -> pd.Index:
-        """Point ids that survive this family's cleaning. Consumed by the unified splitter."""
+        """The points this family can use, after its own cleaning.
+
+        The split asks every family the same question; see
+        :class:`~yg_eo_soilnet.datamodules.split_plan_provider.SplitPlanProvider`.
+
+        Parameters
+        ----------
+        static_df : pandas.DataFrame, optional
+            Use this table instead of reading the data files.
+
+        Returns
+        -------
+        pandas.Index
+        """
         dataset = self.data_manager.load_dataset()
         frame = dataset.tabular if static_df is None else static_df
         cleaned, _ = self.clean_static_frame(frame, dataset)
@@ -143,6 +186,18 @@ class SoilSequenceBuilder:
         return pd.Index(cleaned[point_col].to_numpy())
 
     def build(self, sequence_data_args: Optional[Mapping[str, Any]] = None) -> SoilSequenceBundle:
+        """Read the data and assemble the bundle, one entry per usable point.
+
+        Parameters
+        ----------
+        sequence_data_args : mapping, optional
+            Extra build settings; unused at present.
+
+        Returns
+        -------
+        SoilSequenceBundle
+            Checked for consistency before it is returned.
+        """
         sequence_data_args = dict(sequence_data_args or {})
         dataset = self.data_manager.load_dataset()
         point_col = dataset.point_id_column
@@ -157,9 +212,8 @@ class SoilSequenceBuilder:
         targets = static_df[target_columns].to_numpy(dtype=np.float32)
         label_features, label_feature_names = self._extract_label_features(static_df)
         coords, coord_names = self._extract_coordinates(static_df)
-        # Order taken from continuous_columns, not from the config: these names index positions in
-        # static_features, and a list in declaration order would mislabel them the moment the config
-        # and the frame disagree about ordering.
+        # In the order the covariate columns actually sit in, not the order the configuration lists
+        # them: these names say which column is which.
         context_columns = set(self.data_manager.context_feature_columns())
         context_feature_names = [
             column for column in blocks.continuous_columns if column in context_columns
@@ -209,15 +263,17 @@ class SoilSequenceBuilder:
     def _assert_context_features_present(
         self, static_df: pd.DataFrame, continuous_columns: list[str]
     ) -> None:
-        """Refuse a CONTEXT_FEATURES entry the data does not carry, or that something else dropped.
+        """Refuse a ``CONTEXT_FEATURES`` column the data does not carry or that something removed.
 
-        Mirrors ``resolve_categorical_columns``' treatment of CATEGORICAL_FEATURES, and for the same
-        reason: a declared column absent from the frame is nearly always a config left over from a
-        retired dataset, and skipping it quietly means the run trains without the context features
-        while the config says it has them.
+        Only checked while the group is switched on: switched off, the columns are meant to be gone.
 
-        Only checked when the group is ON. With it off the columns are *supposed* to be gone - that
-        is the ablation - so demanding their presence would make the switch unusable.
+        Raises
+        ------
+        KeyError
+            If a declared column is not in the data.
+        ValueError
+            If it is in the data but something else - ``IGNORED_COLUMNS``, ``LABEL_COLUMNS``,
+            ``CATEGORICAL_FEATURES`` - keeps it out of the inputs.
         """
         selected = self.data_manager.context_feature_columns()
         if not selected:
@@ -231,9 +287,8 @@ class SoilSequenceBuilder:
                 "list, or set USE_CONTEXT_FEATURES: false to run without the group."
             )
 
-        # Present in the frame but filtered out before reaching the features. Distinguished from the
-        # case above because the fix is elsewhere entirely: the column exists and is spelled right,
-        # and something else - IGNORED_COLUMNS, LABEL_COLUMNS, CATEGORICAL_FEATURES - is removing it.
+        # Present, spelled right, but removed by another setting - a different fix from the case
+        # above, so a different message.
         withheld = [
             column
             for column in selected
@@ -251,12 +306,16 @@ class SoilSequenceBuilder:
     def _static_validity(
         self, static_df: pd.DataFrame, feature_columns: list[str]
     ) -> tuple[np.ndarray, list[str]]:
-        """Measured-vs-missing flags, for the continuous covariates that actually have gaps.
+        """Build the :term:`validity flags <validity flag>` for the covariates that have gaps.
 
-        Only gappy columns get a flag. A fully populated column would contribute a constant-True
-        channel: it doubles the static width, carries no information, and costs the model parameters
-        to ignore it. This mirrors what sklearn's ``SimpleImputer(add_indicator=True)`` does on the
-        other family with ``features='missing-only'``, so both sides emit the same set.
+        A column with no gaps gets no flag: it would be an always-true channel saying nothing. The
+        scikit-learn pipeline flags the same set.
+
+        Returns
+        -------
+        validity : numpy.ndarray of bool
+        names : list of str
+            The columns the flags belong to.
         """
         rows = len(static_df)
         gappy = [
@@ -280,24 +339,21 @@ class SoilSequenceBuilder:
     # --- measured lab values ----------------------------------------------
 
     def _extract_label_features(self, static_df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-        """Every LABEL_COLUMNS value the static frame carries, kept OUT of the feature blocks.
+        """The lab measurements, carried beside the inputs rather than among them.
 
-        Deliberately bypasses ``filter_schema``, whose whole job is to remove these. What authorises
-        that is ``CARRY_LABEL_COLUMNS``: with the flag off this returns nothing, so the bundle and
-        every batch collated from it are identical to a build that had never heard of lab values.
-        Carrying them does not make them predictors either - nothing reads them unless a model names
-        them in ``auxiliary_label_columns``, which is an explicit, per-column opt-out of that rail
-        for the case where the value is genuinely measured at inference time too.
+        Only with ``CARRY_LABEL_COLUMNS: true``; otherwise nothing is carried and every batch is
+        exactly as it would be without the setting. Carrying them does not make them inputs: a model
+        reads one only by naming it in ``auxiliary_label_columns``, an
+        :term:`auxiliary lab input`.
 
-        Reading the flag here rather than trusting the frame is what keeps the joint-file and
-        split-file layouts in agreement. DataManager carries the labels across the targets join
-        under the same flag, so "what may a model select?" is answered by the flag plus
-        LABEL_COLUMNS, never by which files the data happens to be split into.
+        Missing values are kept as NaN rather than costing the point its row - lab coverage varies a
+        lot between columns, and choosing an auxiliary input must not silently delete a third of the
+        data. They are filled in later, from the training points, and flagged.
 
-        Rows are NOT dropped for a missing value. Lab coverage varies from complete to ~37% absent
-        across these columns, so requiring finiteness here would let the choice of an auxiliary
-        column silently delete a third of the dataset. The datamodule median-fills from the train
-        split and passes a validity flag instead.
+        Returns
+        -------
+        values : numpy.ndarray of shape (n_points, n_labels)
+        names : list of str
         """
         if not getattr(self.config, "CARRY_LABEL_COLUMNS", False):
             return np.empty((len(static_df), 0), dtype=np.float32), []
@@ -314,44 +370,38 @@ class SoilSequenceBuilder:
         values = np.column_stack(
             [pd.to_numeric(static_df[column], errors="coerce").to_numpy(dtype=np.float64) for column in label_columns]
         )
-        # Infinities join the missing: an inf reaching the standardizer would poison the column
-        # statistic, and there is no meaningful lab value it could represent.
+        # Infinities count as missing: no lab value is infinite, and one would spoil the column's
+        # statistics.
         values[~np.isfinite(values)] = np.nan
         return values.astype(np.float32), label_columns
 
     # --- coordinates ------------------------------------------------------
 
     def _coordinate_columns(self) -> list[str]:
-        """The lat/lon column names when the harmonic branch wants them, else nothing.
+        """The coordinate column names when the model reads coordinates, otherwise nothing.
 
-        The single place the flag is read. Both :meth:`clean_static_frame` - which must drop rows
-        with no coordinate - and :meth:`_extract_coordinates` - which reads the values - go through
-        it, so the row rule and the value rule can never disagree about whether coordinates are in
-        play. That matters more than it looks: ``usable_point_ids`` calls the former and feeds the
-        unified splitter, so a disagreement would have the splitter assign points this builder then
-        deletes.
+        The one place ``USE_HARMONIC_COORDS`` is read, so the rule that drops a point without
+        coordinates and the code that reads them cannot disagree.
         """
         if not getattr(self.config, "USE_HARMONIC_COORDS", False):
             return []
         return list(self.data_manager.coordinate_columns())
 
     def _extract_coordinates(self, static_df: pd.DataFrame) -> tuple[np.ndarray, list[str]]:
-        """lat/lon as a dedicated block, kept OUT of the feature frame.
+        """The coordinates, carried as their own block rather than as ordinary covariates.
 
-        Deliberately bypasses ``filter_schema``, whose whole job is to remove these. What authorises
-        that is ``USE_HARMONIC_COORDS`` - the same shape of opt-in ``CARRY_LABEL_COLUMNS`` gives the
-        lab values, and with the flag off this returns nothing, so the bundle and every batch
-        collated from it are identical to a build that had never heard of coordinates.
+        Only with ``USE_HARMONIC_COORDS``; otherwise nothing is carried. One part of the model reads
+        them, against the area the training points cover, and no scikit-learn model ever sees them.
 
-        Carrying them does not make them predictors. They never enter ``blocks.continuous_columns``,
-        are never standardized alongside the covariates, and are read by exactly one consumer: the
-        CNN's harmonic branch, which normalizes them against the train bounding box. Passing them
-        through ``filter_schema`` instead would have handed raw degrees to every sklearn model as an
-        ordinary column, and would have z-scored them - which is the wrong transform for a
-        positional encoding, whose frequencies are defined on a known interval.
+        Returns
+        -------
+        values : numpy.ndarray of shape (n_points, 2)
+        names : list of str
 
-        float64 throughout: see ``to_decimal_year`` for the same argument. float32 resolves about a
-        metre at this latitude and the normalization downstream subtracts two nearby numbers.
+        Raises
+        ------
+        KeyError
+            If the coordinate columns are not in the data.
         """
         coordinate_columns = self._coordinate_columns()
         if not coordinate_columns:
@@ -378,7 +428,16 @@ class SoilSequenceBuilder:
     # --- temporal assembly ------------------------------------------------
 
     def _modality_entries(self, timeseries_df: pd.DataFrame) -> list[tuple[str, list[str]]]:
-        """Modality name -> its columns, resolved from the prefix map or an explicit column list."""
+        """Which time-series columns belong to which :term:`data source`.
+
+        From ``temporal.modality_prefix_map`` - each source is a column-name prefix such as ``S2_`` -
+        or from an explicit list of columns per source.
+
+        Returns
+        -------
+        list of tuple
+            ``(source name, its columns)``.
+        """
         temporal_config = self.data_manager.temporal_config()
         prefix_map = self.data_manager.normalize_mapping(
             temporal_config.get("modality_prefix_map", getattr(self.config, "MODALITY_PREFIX_MAP", {}))
@@ -419,6 +478,21 @@ class SoilSequenceBuilder:
         dict[str, list[np.ndarray]],
         dict[str, list[str]],
     ]:
+        """Turn the time-series table into one array of readings per point per data source.
+
+        Readings are sorted by date, repeated dates are averaged, and rows whose date cannot be read
+        or whose point did not survive cleaning are dropped.
+
+        Returns
+        -------
+        tuple of dict
+            The readings, their dates, their measured-or-filled flags, and each source's columns.
+
+        Raises
+        ------
+        KeyError
+            If the time series has no point id or date column.
+        """
         temporal_config = self.data_manager.temporal_config()
         time_col = temporal_config.get("time_column", getattr(self.config, "TIME_COLUMN", "date"))
 
@@ -437,14 +511,13 @@ class SoilSequenceBuilder:
 
         unique_columns = list(dict.fromkeys(all_modality_columns))
         working = timeseries_df[[point_col, time_col, *unique_columns]].copy()
-        # Carry validity as ordinary columns so every filter, sort and groupby below applies to it
-        # identically - keeping it in a side array would silently desynchronise on the first reorder.
+        # The flags travel as ordinary columns, so every filter and sort below moves them with the
+        # readings they belong to.
         for column in unique_columns:
             working[_VALIDITY_PREFIX + column] = validity_df[column].to_numpy(dtype=np.float32)
         working = working[working[point_col].notna()]
 
-        # Parse dates before anything else: a row whose date cannot be read has no place on a
-        # continuous time axis, and silently keeping it would corrupt the gap features.
+        # Dates first: a reading whose date cannot be read has no place on the time axis.
         decimal_year = to_decimal_year(working[time_col])
         unparsed = int(np.isnan(decimal_year).sum())
         if unparsed:
@@ -454,9 +527,8 @@ class SoilSequenceBuilder:
         working = working.loc[np.isfinite(decimal_year)].copy()
         working["__decimal_year__"] = decimal_year[np.isfinite(decimal_year)]
 
-        # Keep only points that survived static cleaning, then collapse duplicate readings. A
-        # duplicate timestamp would make the gap between consecutive tokens zero, which the bundle
-        # rejects; averaging is the least surprising repair.
+        # Keep the points that survived cleaning, then average repeated dates: two readings on one
+        # date would leave a zero gap, which the bundle refuses.
         known_points = set(point_ids)
         before = len(working)
         working = working[working[point_col].isin(known_points)]
@@ -480,9 +552,8 @@ class SoilSequenceBuilder:
         sequence_validity: dict[str, list[np.ndarray]] = {}
         modality_columns: dict[str, list[str]] = {}
 
-        # Row positions per point, computed once and reused by every modality. `working` is already
-        # sorted by (point, date), so each group's positions are in ascending time order and the
-        # per-point slices below need no further sorting.
+        # Each point's rows, found once and reused for every data source. The table is already
+        # sorted by point and date, so these are in date order.
         row_groups: dict[Any, np.ndarray] = {
             point_id: np.asarray(rows, dtype=np.int64)
             for point_id, rows in working.groupby(point_col, sort=False).indices.items()
@@ -491,8 +562,8 @@ class SoilSequenceBuilder:
 
         for modality_name, columns in modality_entries:
             values_all = working[columns].to_numpy(dtype=np.float32)
-            # A duplicate-date groupby averages the validity flags too; require every contributing
-            # row to have been measured before calling the averaged cell measured.
+            # Averaging repeated dates averages the flags too: a reading counts as measured only
+            # if every row behind it was.
             validity_all = working[[_VALIDITY_PREFIX + column for column in columns]].to_numpy() >= 1.0
 
             per_point_values: list[np.ndarray] = []
@@ -517,14 +588,14 @@ class SoilSequenceBuilder:
         return sequences, sequence_times, sequence_validity, modality_columns
 
     def _log_summary(self, bundle: SoilSequenceBundle) -> None:
+        """Report what was built: points, covariates, lab columns and readings per data source."""
         self.logger.info(
             f"Built sequence bundle over {bundle.num_points} point(s) with "
             f"{bundle.static_features.shape[1] if bundle.static_features.size else 0} static feature(s)"
         )
         if bundle.label_dim:
-            # Reported with the missing share because that is what decides whether a column is
-            # usable as an auxiliary input: a 37%-absent column is mostly train-median by the time
-            # the model sees it, which is a different feature from the one its name suggests.
+            # With the missing share, which is what decides whether a column is worth using as an
+            # auxiliary input: a mostly missing one reaches the model mostly filled in.
             sparse = sorted(
                 (
                     (name, bundle.label_missing_fraction(name))
@@ -553,7 +624,6 @@ class SoilSequenceBuilder:
                 f"observations per point min={int(counts.min())} median={int(np.median(counts))} "
                 f"max={int(counts.max())}"
                 + (f", {empty} point(s) with no observations" if empty else "")
-                # Surfaced per modality because a median-filled cell is a repair, not a measurement,
-                # and only the reader can judge whether that share is acceptable.
+                # A filled-in reading is a repair, not a measurement: worth seeing per source.
                 + (f", {imputed:.1%} of cells median-filled" if imputed > 0 else "")
             )

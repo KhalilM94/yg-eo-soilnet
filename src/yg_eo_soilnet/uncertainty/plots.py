@@ -1,17 +1,10 @@
-"""Diagnostics that say whether the bars on the pred-vs-obs plot are honest.
+"""The two figures that say whether the error bars on a run's plots are honest.
 
-Repo convention, the same one plot_utils.py, explain/plots.py and hpo/plots.py follow: build the
-Figure, style it through plot_style, and RETURN it. The caller saves and closes.
+The bars themselves show what a model claims. These check the claim: one asks whether the promised
+coverage actually holds across the whole range of promises, the other whether the model's stated
+uncertainty is the size of its real error.
 
-The pred-vs-obs bars show what the model claims. These two panels are how you check the claim:
-
-  reliability_curve  the interval is built at one nominal level (95%) but the model has an opinion
-                     at every level. Sweeping them and plotting nominal against empirical shows
-                     whether the shape of the predictive distribution is right or whether one
-                     rescaling happens to fix the 95% point while everything else is off.
-  sigma_vs_error     coverage is a global average, and a model can hit 95% overall while being
-                     over-confident on its easy points and under-confident on its hard ones - the
-                     two errors cancel. Binning by sigma is what stops that cancellation hiding.
+As everywhere else here, each function builds a figure and returns it; the caller saves it.
 """
 
 from __future__ import annotations
@@ -46,19 +39,25 @@ def reliability_curve(
     target_name: str = "",
     axis: Optional[plt.Axes] = None,
 ):
-    """Nominal vs empirical coverage, swept across levels.
+    """Promised coverage against actual coverage, swept across levels.
 
-    With a `calibrator`, each nominal level is realised the way the plotted interval is - by scaling
-    sigma with a conformal q refitted at that level - so the curve grades the actual procedure. That
-    is the honest version, and it is why the curve does not simply pass through (0.95, 0.95) by
-    construction: q is fitted on the CALIBRATION split and the curve is drawn on the TEST split, so
-    the gap between them is exactly the generalisation of the calibration.
+    A perfectly calibrated set of intervals sits on the diagonal: whatever share you promise, that share
+    of measurements falls inside. Below it the intervals are too narrow, above it too wide.
 
-    Without one, levels are realised as Gaussian z-multiples, which grades the raw sigma instead and
-    is the right picture when calibration is off.
+    Parameters
+    ----------
+    y_true, y_pred, sigma : array-like
+        The measurements, predictions and predicted spreads.
+    calibrator : ConformalCalibrator, optional
+        With one, each level is built the way the run's own intervals were, so the curve grades the
+        real procedure.
+    target_name : str, optional
+        Named in the title.
 
-    Returns the Figure when it created one, else None (it drew into the axis it was given).
-    """
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     observed = np.asarray(y_true, dtype=float).reshape(-1)
     predicted = np.asarray(y_pred, dtype=float).reshape(-1)
     sigma_values = np.asarray(sigma, dtype=float).reshape(-1)
@@ -117,13 +116,16 @@ def sigma_vs_error(
     target_name: str = "",
     axis: Optional[plt.Axes] = None,
 ):
-    """Per-bin mean sigma against per-bin RMSE, with the identity line.
+    """The predicted spread against the error actually made, in bands of similar spread.
 
-    Points on the diagonal mean the model's stated uncertainty is the size of its actual error at
-    that level. Below means over-confident, above over-cautious. A flat cloud - every bin at the
-    same RMSE regardless of sigma - is the failure that global coverage cannot see: the intervals
-    are the right size on average and carry no per-point information at all.
-    """
+    Points on the diagonal mean the model's stated uncertainty is the size of its real error. Below it
+    the model is over-confident, above it over-cautious. A flat line - the same error whatever the
+    model claimed - means the uncertainty carries no information at all.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        """
     observed = np.asarray(y_true, dtype=float).reshape(-1)
     predicted = np.asarray(y_pred, dtype=float).reshape(-1)
     sigma_values = np.asarray(sigma, dtype=float).reshape(-1)
@@ -170,7 +172,7 @@ def _empirical_coverage(
     level: float,
     calibrator: Any,
 ) -> float:
-    """Fraction of observations inside the interval built at this nominal `level`."""
+    """The share of measurements that fall inside the interval built at one promised level."""
     if calibrator is None:
         # No calibrator: read the level off the Gaussian the raw sigma implies.
         from scipy import stats
@@ -199,12 +201,11 @@ def _bin_by_sigma(
     sigma: np.ndarray,
     n_bins: int,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Equal-COUNT bins ordered by sigma, returning each bin's mean sigma and its RMSE.
+    """Group the points into equal-sized bands by predicted spread, and score each.
 
-    Equal count rather than equal width: predicted sigma is usually heavily right-skewed, so
-    equal-width bins put almost every point in the first bin and leave the rest holding one or two
-    points each, whose RMSE is meaningless.
-    """
+    Equal-sized rather than equal-width bands: predicted spreads are usually bunched at the low end, so
+    equal-width bands would leave most of them holding one or two points.
+        """
     finite = np.isfinite(absolute_residuals) & np.isfinite(sigma)
     absolute_residuals, sigma = absolute_residuals[finite], sigma[finite]
     if sigma.size < n_bins * 2:

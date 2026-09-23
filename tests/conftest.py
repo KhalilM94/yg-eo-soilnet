@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,6 +16,35 @@ for path in (str(PROJECT_ROOT), str(SRC_ROOT)):
     if path not in sys.path:
         sys.path.insert(0, path)
 
+# Headless for every test, set before anything imports matplotlib, so no module has to call
+# matplotlib.use() above its own imports.
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+
+@contextmanager
+def _mlflow_store(root: Path):
+    """Point MLflow at a fresh store under ``root`` and restore everything on the way out."""
+    import mlflow
+
+    previous_uri = mlflow.get_tracking_uri()
+    previous_allow = os.environ.get("MLFLOW_ALLOW_FILE_STORE")
+    # MLflow 3.14 refuses a filesystem backend without this; see yg_eo_soilnet.tracking.
+    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
+    mlflow.set_tracking_uri(root.as_uri())
+    # A bare directory has no experiment 0, and MLflow does not create the default one lazily, so
+    # the first start_run would fail with "Could not find experiment with ID 0".
+    mlflow.set_experiment("pytest")
+    try:
+        yield root.as_uri()
+    finally:
+        while mlflow.active_run() is not None:
+            mlflow.end_run()
+        mlflow.set_tracking_uri(previous_uri)
+        if previous_allow is None:
+            os.environ.pop("MLFLOW_ALLOW_FILE_STORE", None)
+        else:
+            os.environ["MLFLOW_ALLOW_FILE_STORE"] = previous_allow
+
 
 @pytest.fixture(autouse=True)
 def isolated_mlflow_tracking(tmp_path_factory):
@@ -28,26 +58,54 @@ def isolated_mlflow_tracking(tmp_path_factory):
 
     Tests that set their own tracking URI still win: this runs first and they override it.
     """
-    import mlflow
-
-    previous_uri = mlflow.get_tracking_uri()
-    previous_allow = os.environ.get("MLFLOW_ALLOW_FILE_STORE")
-    # MLflow 3.14 refuses a filesystem backend without this; see yg_eo_soilnet.tracking.
-    os.environ["MLFLOW_ALLOW_FILE_STORE"] = "true"
-    mlflow.set_tracking_uri(tmp_path_factory.mktemp("mlruns").as_uri())
-    # A bare directory has no experiment 0, and MLflow does not create the default one lazily, so
-    # the first start_run would fail with "Could not find experiment with ID 0".
-    mlflow.set_experiment("pytest")
-    try:
+    with _mlflow_store(tmp_path_factory.mktemp("mlruns")):
         yield
-    finally:
-        while mlflow.active_run() is not None:
-            mlflow.end_run()
-        mlflow.set_tracking_uri(previous_uri)
-        if previous_allow is None:
-            os.environ.pop("MLFLOW_ALLOW_FILE_STORE", None)
-        else:
-            os.environ["MLFLOW_ALLOW_FILE_STORE"] = previous_allow
+
+
+@pytest.fixture(scope="session")
+def mlflow_store():
+    """The store isolation above, for a module-scoped fixture that trains once for many tests.
+
+    Such a fixture is set up BEFORE the per-test ``isolated_mlflow_tracking``, so without its own
+    store it would log into whatever URI happened to be current. Use it as a context manager around
+    the training; it yields the store's URI. An MlflowClient created inside stays bound to that
+    store; a test that calls code resolving the global URI must ``mlflow.set_tracking_uri`` to it,
+    which the per-test fixture undoes afterwards.
+    """
+    return _mlflow_store
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _no_pip_requirement_inference():
+    """Skip MLflow's pip-requirement inference, which costs 10-12 s per logged sklearn model.
+
+    ``mlflow.sklearn.log_model`` without ``pip_requirements`` spawns a subprocess that reloads the
+    model to see what it imports; no test reads the result. ``mlflow.sklearn`` looks the function
+    up on ``mlflow.models`` at call time, so patching it there is enough. The fallback it is handed
+    is the flavor's default requirement list, which is what inference falls back to anyway.
+
+    Production still infers - the Lightning path declares its requirements
+    (``serving.lightning_pyfunc.serving_requirements``); the sklearn path does not yet.
+
+    Session-scoped so it also covers module-scoped fixtures that log models.
+    """
+    import mlflow.models
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            mlflow.models,
+            "infer_pip_requirements",
+            lambda *args, fallback=None, **kwargs: list(fallback or []),
+        )
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _close_figures():
+    """Close every matplotlib figure a test opened, pass or fail."""
+    yield
+    if "matplotlib.pyplot" in sys.modules:
+        sys.modules["matplotlib.pyplot"].close("all")
 
 
 @pytest.fixture

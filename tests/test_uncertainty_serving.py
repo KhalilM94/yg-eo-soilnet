@@ -28,6 +28,7 @@ def _fitted_ensemble(n_members: int = 3, target_names=("target_a",)):
 # --- the sklearn round-trip ------------------------------------------------
 
 
+@pytest.mark.slow
 def test_the_logged_ensemble_reloads_and_still_predicts_the_mean():
     ensemble, X = _fitted_ensemble()
     with mlflow.start_run():
@@ -238,7 +239,10 @@ def test_relog_refuses_a_single_checkpoint_from_an_ensemble_run(monkeypatch, tmp
 
     monkeypatch.setattr(relog.mlflow, "MlflowClient", lambda: type("C", (), {"get_run": lambda self, _id: FakeRun()})())
     monkeypatch.setattr(relog.mlflow, "set_experiment", lambda **kwargs: None)
-    monkeypatch.setattr(relog, "load_config", lambda path: object(), raising=False)
+    # The refusal comes before the config is read for anything, so neither the real config file
+    # nor its tracking URI has any business in this test.
+    monkeypatch.setattr(relog, "Config", lambda config_path=None: object())
+    monkeypatch.setattr(relog, "configure_tracking_uri", lambda config: None)
 
     with pytest.raises(SystemExit, match="trained an ensemble of 5 members"):
         relog.main(

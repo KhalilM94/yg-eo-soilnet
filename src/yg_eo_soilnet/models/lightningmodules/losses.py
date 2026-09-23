@@ -1,33 +1,26 @@
-"""Training objectives for the soil regression heads, including the structure-aware ones.
+"""What the deep-learning model is trained to minimize.
 
-The point losses - MSE, Huber, SmoothL1 - score every target independently and weight them
-equally. Under ``MULTI_TARGET_MODE: joint`` that throws away the one thing a joint head knows
-that a stack of per-target heads does not: the targets are correlated, and some combinations of
-them are pedologically impossible. A prediction of high CEC with low organic matter costs exactly
-as much as a plausible one, as long as the squared errors match.
+Three ordinary choices score each target on its own: ``mse`` (the default), and ``huber`` /
+``smooth_l1``, which are less swayed by a single badly wrong point.
 
-The three losses below put that structure back into the objective:
+Three more are for a model predicting several targets at once, where the targets are not
+independent - high organic matter goes with high cation exchange capacity, and some combinations do
+not occur in soil at all. They add that structure to what the model is scored on:
 
-``mahalanobis``            whitened MSE - errors are scored against the inverse target covariance,
-                          so an error direction the training data never exhibits costs more than
-                          an equally large one along a natural axis.
-``correlation_penalty``    a point loss plus a regularizer pulling the batch's PREDICTED
-                          correlation matrix toward the one measured on the training split.
-``cosine``                 a point loss plus a penalty on the angle between the predicted and
-                          measured target vectors, i.e. on their ratios rather than magnitudes.
+``mahalanobis``
+    Charges more for an error in a direction the training data never shows - say raising cation
+    exchange capacity while lowering organic matter - than for an equally large error along a
+    combination that does occur.
+``correlation_penalty``
+    An ordinary loss, plus a penalty when the predictions do not vary together the way the measured
+    targets do.
+``cosine``
+    An ordinary loss, plus a penalty on getting the *ratios* between the targets wrong, whatever
+    their size.
 
-THE SPACE THESE OPERATE IN is the thing to keep in mind while reading. The datamodule hands the
-model targets that are already log1p-transformed (optionally) and then per-target standardized, and
-only ``predict_step`` inverts that. So a loss here sees zero-mean, unit-variance columns, which has
-two consequences worth stating rather than rediscovering:
-
-* The covariance of the standardized training targets IS their Pearson correlation matrix. That is
-  what makes the Mahalanobis form useful here rather than redundant - the per-target scale weighting
-  it would otherwise contribute has already been applied by the standardizer, so what is left is
-  purely the cross-target decorrelation.
-* A sample sitting at the target mean is the ZERO VECTOR, and its direction is meaningless. The
-  cosine loss therefore defaults to inverting back to original units, where the targets are positive
-  quantities and an angle between them is the ratio the geochemistry actually constrains.
+All of them see the targets in the units the model trains in - log-transformed, if that is switched
+on, and standardized - not in the target's own units. Only the predictions the run reports are
+converted back.
 """
 
 from __future__ import annotations
@@ -41,15 +34,16 @@ from torch import nn
 
 logger = logging.getLogger(__name__)
 
-# Point losses, by the name the registry spells. Also the set of values `loss_base` accepts, since a
-# composite loss's accuracy term is exactly one of these.
+#: The losses that score each target on its own. Also the values ``loss_base`` accepts.
 BASE_LOSSES = {"mse", "l2", "huber", "smooth_l1", "smoothl1"}
 
-# The losses that read across targets, and are therefore undefined on a single one.
+#: The losses that read across targets, so they need at least two.
 STRUCTURAL_LOSSES = {"mahalanobis", "correlation_penalty", "cosine"}
 
+#: Every value ``loss_name`` accepts.
 LOSS_NAMES = BASE_LOSSES | STRUCTURAL_LOSSES
 
+#: The units the cosine loss may measure its angle in.
 COSINE_SPACES = {"original", "standardized"}
 
 
@@ -61,25 +55,55 @@ def inverse_transform_targets(
     standardized: bool,
     log1p: bool,
 ) -> torch.Tensor:
-    """Map standardized values back to the target's original units.
+    """Convert values from the units the model trains in back to the target's own units.
 
-    Un-standardize first, then undo log1p: the datamodule fits the standardization stats on
-    already-transformed targets, so the two must be inverted in the opposite order.
+    Undoes the standardization first and the log transform second, the reverse of the order they
+    were applied in.
 
-    A free function rather than a method because two callers need it - the LightningModule's
-    ``predict_step`` and ``CosineStructureLoss`` - and the loss must not hold a reference back to
-    the module that owns it. Duplicating the arithmetic instead is how the two silently drift.
+    Parameters
+    ----------
+    values : torch.Tensor
+        Predictions or targets, in training units.
+    mean, scale : torch.Tensor or None
+        The standardization statistics, from the datamodule.
+    standardized : bool
+        Whether the values were standardized.
+    log1p : bool
+        Whether the log transform was applied.
+
+    Returns
+    -------
+    torch.Tensor
+        The values in the target's own units.
     """
     if standardized and mean is not None and scale is not None:
         values = values * scale.to(values.device) + mean.to(values.device)
     if log1p:
-        # Mirrors LogTransformer in yg_eo_soilnet.utils: forward is 10 * log1p(y).
+        # The same transform the scikit-learn side uses: 10 * ln(1 + y).
         values = torch.expm1(values / 10.0)
     return values
 
 
 def build_base_loss(loss_name: str, huber_delta: float) -> nn.Module:
-    """One of the point losses, by name. Raises on anything else."""
+    """Build one of the per-target losses: ``mse``, ``huber`` or ``smooth_l1``.
+
+    Parameters
+    ----------
+    loss_name : str
+        The name from the configuration.
+    huber_delta : float
+        Where ``huber`` and ``smooth_l1`` switch from squared to absolute error - the size of error
+        beyond which a point stops pulling harder.
+
+    Returns
+    -------
+    torch.nn.Module
+
+    Raises
+    ------
+    ValueError
+        If the name is not one of the three.
+    """
     if loss_name in {"mse", "l2"}:
         return nn.MSELoss()
     if loss_name == "huber":
@@ -90,7 +114,7 @@ def build_base_loss(loss_name: str, huber_delta: float) -> nn.Module:
 
 
 def _prepare_covariance(covariance: Any, target_dim: int, shrinkage: float) -> np.ndarray:
-    """A symmetric, positive-definite covariance of the right shape, ready to be whitened."""
+    """Check the targets' covariance and pull it slightly towards the identity matrix."""
     matrix = np.asarray(covariance, dtype=np.float64)
     if matrix.ndim != 2 or matrix.shape != (target_dim, target_dim):
         raise ValueError(
@@ -101,34 +125,36 @@ def _prepare_covariance(covariance: Any, target_dim: int, shrinkage: float) -> n
     shrinkage = float(shrinkage)
     if not 0.0 <= shrinkage < 1.0:
         raise ValueError(f"loss_shrinkage must be in [0, 1); got {shrinkage}.")
-    # Ridge toward the identity BEFORE inverting. Two nearly collinear targets - organic matter and
-    # the C/N ratio are a plausible pair - make the covariance near-singular, and an uncorrected
-    # inverse then puts almost all the loss on one nearly-unobservable contrast.
+    # Pulled towards the identity before inverting. Two targets that track each other almost
+    # exactly would otherwise put nearly the whole loss on one barely observable difference.
     matrix = (1.0 - shrinkage) * matrix + shrinkage * np.eye(target_dim)
-    # np.cov is symmetric in exact arithmetic but not always in floating point, and eigh reads only
-    # one triangle. Symmetrizing makes which triangle irrelevant.
+    # Made exactly symmetric: rounding can leave the two halves slightly different.
     return 0.5 * (matrix + matrix.T)
 
 
 class MahalanobisLoss(nn.Module):
-    """``mean_batch[ d^T Sigma^-1 d ] / D`` for ``d = prediction - target``.
+    """Charge more for an error in a direction the measured targets never take.
 
-    Scores an error by how surprising its DIRECTION is under the training targets' covariance, not
-    just by its length. An error that raises CEC while lowering organic matter runs against the
-    correlation the data shows and is charged for it; an error that moves both together is charged
-    close to what plain MSE would charge.
+    ``loss_name: mahalanobis``. It weighs an error by how unusual its *direction* is, given how the
+    training targets vary together, not only by its size. An error that raises one target while
+    lowering another that normally rises with it costs more than one that moves both together.
 
-    Two implementation choices worth their lines:
+    With targets that do not vary together at all, this is exactly mean squared error.
 
-    * The inverse is taken through an eigendecomposition with clipped eigenvalues, and kept as the
-      whitening matrix ``W`` with ``Sigma^-1 = W W`` rather than as ``Sigma^-1`` itself. The loss is
-      then ``||W d||^2``, which cannot come out negative however ill-conditioned the input was -
-      whereas a directly inverted near-singular matrix can, and a negative loss trips the finiteness
-      check in ``_shared_step`` far downstream of the actual cause.
-    * The ``/ D`` normalization. Without it the loss has expectation ``D`` where MSE has ``1``, so
-      switching to this loss would silently rescale every threshold tuned against ``val_loss`` -
-      the LR-plateau factor, the early-stopping min_delta. With it, an identity covariance makes
-      this loss numerically identical to ``nn.MSELoss``, which is also what the tests pin.
+    Parameters
+    ----------
+    covariance : array-like of shape (n_targets, n_targets)
+        How the training targets vary together, from the datamodule.
+    target_dim : int
+        How many targets.
+    shrinkage : float, default 0.05
+        How far the covariance is pulled towards treating the targets as independent, between 0 and
+        1. Raise it if two targets track each other almost exactly.
+
+    Raises
+    ------
+    ValueError
+        If the covariance has the wrong shape, holds missing values, or is not a covariance.
     """
 
     def __init__(self, covariance: Any, *, target_dim: int, shrinkage: float = 0.05):
@@ -140,8 +166,8 @@ class MahalanobisLoss(nn.Module):
         largest = float(eigenvalues.max())
         if largest <= 0.0:
             raise ValueError("target_covariance has no positive eigenvalue; it is not a covariance.")
-        # A relative floor, not an absolute one: what counts as a degenerate direction depends on the
-        # scale of the matrix, and in standardized space that scale is ~1 but need not be exactly.
+        # A floor relative to the matrix itself: what counts as a flat direction depends on its
+        # overall scale.
         floor = largest * 1e-6
         clipped = np.maximum(eigenvalues, floor)
         self.condition_number = float(clipped.max() / clipped.min())
@@ -160,35 +186,49 @@ class MahalanobisLoss(nn.Module):
         )
         whitening = (eigenvectors * (clipped**-0.5)) @ eigenvectors.T
 
-        # Not persistent: it is derived from the `target_covariance` hyperparameter, which
-        # save_hyperparameters() already puts in the checkpoint, and the loss is a training-time
-        # object that predict_step never touches. Non-persistent buffers still follow .to(device).
+        # Not saved with the weights: it follows from the covariance, which is saved, and the loss
+        # is only used while training.
         self.register_buffer(
             "whitening", torch.as_tensor(whitening, dtype=torch.float32), persistent=False
         )
 
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Score one batch."""
         difference = predictions - targets
-        # The whitening matrix is symmetric, so `d @ W` and `W @ d` agree and the transpose is noise.
+        # The matrix is symmetric, so the order of the multiplication makes no difference.
         whitened = difference @ self.whitening.to(difference.dtype)
         return (whitened**2).sum(dim=-1).mean() / self.target_dim
 
 
 class CorrelationPenaltyLoss(nn.Module):
-    """``base(pred, target) + lambda * mean_{i<j} (rho(pred_i, pred_j) - R_train_ij)^2``.
+    """An ordinary loss, plus a penalty when the predictions do not vary together as the data does.
 
-    Keeps a point loss for accuracy and adds a regularizer that pushes the correlation structure of
-    the model's OUTPUTS toward the structure measured on the training split. A joint head trained on
-    MSE alone will happily produce predictions that are more correlated than reality (they all track
-    the same dominant feature) or less (each target is fit independently); neither shows up in a
-    per-target R2, and both are visible here.
+    ``loss_name: correlation_penalty``. A model trained on squared error alone often predicts targets
+    that track each other more closely than the measurements do - they all follow the same strong
+    covariate - or not at all, if each is fitted separately. Neither shows up in a per-target R²,
+    and both show up here.
 
-    The reference is the fixed training-set correlation matrix rather than the batch's own
-    ``rho(y)``. A batch of 64 estimates a correlation coefficient with a standard error around 0.12,
-    so a batch-computed reference would spend most of its gradient chasing sampling noise.
+    The comparison is against the correlations measured on the training points, not on the current
+    batch, which would be too small to measure them reliably. Batches smaller than ``min_batch``
+    skip the penalty instead of using a poor estimate.
 
-    Below ``min_batch`` rows the penalty is SKIPPED rather than computed from an unusable estimate.
-    That is what makes the trailing partial validation batch harmless - drop_last is train-only.
+    Parameters
+    ----------
+    base_loss : torch.nn.Module
+        The per-target loss the penalty is added to.
+    reference_correlation : array-like of shape (n_targets, n_targets)
+        How the training targets vary together.
+    target_dim : int
+        How many targets.
+    weight : float, default 0.1
+        How heavily the penalty counts against the base loss.
+    min_batch : int, default 16
+        Below this many points, the penalty is skipped.
+
+    Raises
+    ------
+    ValueError
+        If the matrix has the wrong shape or holds missing values.
     """
 
     def __init__(
@@ -215,16 +255,14 @@ class CorrelationPenaltyLoss(nn.Module):
             )
         if not np.isfinite(matrix).all():
             raise ValueError("target_covariance contains non-finite values.")
-        # The datamodule fits this on STANDARDIZED targets, so it already is a correlation matrix.
-        # Re-normalizing by the diagonal anyway costs nothing and makes the class correct if it is
-        # ever handed a covariance in raw units.
+        # Already a correlation matrix as the datamodule fits it; normalizing again costs nothing
+        # and makes this correct if it is ever handed one in the target's own units.
         deviation = np.sqrt(np.clip(np.diag(matrix), 1e-12, None))
         correlation = matrix / np.outer(deviation, deviation)
         self.register_buffer(
             "reference", torch.as_tensor(correlation, dtype=torch.float32), persistent=False
         )
-        # Upper-triangle positions, so each pair is counted once. The diagonal is 1 on both sides by
-        # construction and would only dilute the mean with a term that is always zero.
+        # Each pair of targets once. A target against itself is always 1 on both sides.
         rows, columns = np.triu_indices(self.target_dim, k=1)
         self.register_buffer("pair_rows", torch.as_tensor(rows, dtype=torch.long), persistent=False)
         self.register_buffer(
@@ -233,18 +271,18 @@ class CorrelationPenaltyLoss(nn.Module):
 
     @staticmethod
     def _batch_correlation(values: torch.Tensor) -> torch.Tensor:
-        """Pearson correlation across the columns of ``[B, D]``, differentiable and clamped."""
+        """How the targets vary together within one batch."""
         centered = values - values.mean(dim=0, keepdim=True)
-        # ddof=0, matching how the datamodule standardizes. The floor keeps a collapsed column - a
-        # real early-training state, and exactly what pred_std_ratio reports - from dividing by zero.
+        # The floor keeps a target the model currently predicts as a constant - which happens
+        # early in training - from dividing by zero.
         deviation = centered.pow(2).mean(dim=0).sqrt().clamp_min(1e-6)
         covariance = (centered.T @ centered) / centered.shape[0]
         correlation = covariance / torch.outer(deviation, deviation)
-        # Floating point can put a coefficient a hair outside [-1, 1]; squaring the difference then
-        # rewards the model for overshooting.
+        # Rounding can push a correlation just past 1, which would reward overshooting.
         return correlation.clamp(-1.0, 1.0)
 
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Score one batch; ``last_components`` then holds the two parts separately."""
         base = self.base_loss(predictions, targets)
         if predictions.shape[0] < self.min_batch:
             self.last_components = {"base": float(base.detach()), "penalty": 0.0}
@@ -256,34 +294,45 @@ class CorrelationPenaltyLoss(nn.Module):
             predicted[self.pair_rows, self.pair_columns]
             - reference[self.pair_rows, self.pair_columns]
         )
-        # Mean over pairs, not sum: lambda then keeps its meaning when TARGET_COLUMNS changes length,
-        # where a sum would scale with D^2 and quietly re-tune itself.
+        # Averaged over the pairs, so the weight means the same thing however many targets there
+        # are.
         penalty = difference.pow(2).mean()
         self.last_components = {"base": float(base.detach()), "penalty": float(penalty.detach())}
         return base + self.weight * penalty
 
 
 class CosineStructureLoss(nn.Module):
-    """``base(pred, target) + lambda * mean_batch[ 1 - cos(pred, target) ]``.
+    """An ordinary loss, plus a penalty on getting the ratios between the targets wrong.
 
-    Penalizes getting the RATIOS between targets wrong, independently of magnitude. Where the
-    correlation penalty is a batch statistic and needs a batch large enough to estimate one, this is
-    per-row and works at any batch size.
+    ``loss_name: cosine``. It compares each point's predicted targets with its measured ones as a
+    set of proportions, ignoring their overall size. Unlike the correlation penalty this is computed
+    per point, so it works at any batch size.
 
-    ``space`` decides which vectors the angle is measured between:
+    Parameters
+    ----------
+    base_loss : torch.nn.Module
+        The per-target loss the penalty is added to.
+    space : {"original", "standardized"}, default "original"
+        Which units the proportions are measured in. ``"original"`` converts back to the target's
+        own units first, so the penalty is on the ratios soil chemistry actually constrains; because
+        those values are all positive, the penalty is small and ``weight`` has to be larger than for
+        the other losses. ``"standardized"`` stays in training units, asking instead whether the
+        model gets the shape of a point's departure from average right.
+    weight : float, default 0.1
+        How heavily the penalty counts against the base loss.
+    target_mean, target_scale : sequence of float, optional
+        The standardization statistics, needed to convert back.
+    target_transform : str, optional
+        ``"log1p"`` when the targets were log-transformed.
 
-    ``original``      invert the standardization and log1p first, so the angle is between vectors of
-                      positive physical quantities and 1 - cos is the ratio distortion the soil
-                      chemistry actually constrains. The default. Because every component is then
-                      positive, cos lives in a narrow band near 1 and lambda has to be larger than
-                      it would be for the other losses to have comparable effect.
-    ``standardized``  measure in the space the loss already runs in. The angle is then between
-                      vectors of z-scores: it asks whether the model gets the SHAPE of the joint
-                      anomaly right (all targets high, versus high carbon with low carbonate). A
-                      legitimate quantity, but not the ratio, and rows near the target mean are
-                      near-zero vectors whose direction is noise - hence the norm floor below.
+    Raises
+    ------
+    ValueError
+        If ``space`` is not one of the two.
     """
 
+    #: A point whose measured targets are all near the average has no meaningful set of
+    #: proportions, so it is left out of the penalty.
     NORM_FLOOR = 1e-3
 
     def __init__(
@@ -310,14 +359,12 @@ class CosineStructureLoss(nn.Module):
         self.standardized = target_mean is not None and target_scale is not None
         self.log1p = str(target_transform).lower() == "log1p"
         if self.space == "original" and not (self.standardized or self.log1p):
-            # Nothing to invert means the two spaces coincide. Not an error - a run with no target
-            # transform at all is legal - but it is worth saying so rather than letting the config
-            # read as though it selected something it did not.
+            # With no transform applied there is nothing to undo and the two settings agree.
+            # Legal, but worth saying, since the configuration reads as though it chose something.
             logger.info(
                 "cosine_space='original' with untransformed targets: identical to 'standardized'."
             )
-        # Non-persistent copies of statistics the owning module already carries as its own buffers.
-        # Duplicated rather than shared so the loss never reaches back into its parent.
+        # The loss keeps its own copy of these rather than reaching back into the model.
         self.register_buffer(
             "target_mean",
             torch.as_tensor(list(target_mean or []), dtype=torch.float32),
@@ -330,6 +377,7 @@ class CosineStructureLoss(nn.Module):
         )
 
     def _to_scored_space(self, values: torch.Tensor) -> torch.Tensor:
+        """Put the values in the units the penalty is measured in."""
         if self.space != "original":
             return values
         return inverse_transform_targets(
@@ -341,6 +389,7 @@ class CosineStructureLoss(nn.Module):
         )
 
     def forward(self, predictions: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Score one batch; ``last_components`` then holds the two parts separately."""
         base = self.base_loss(predictions, targets)
         scored_predictions = self._to_scored_space(predictions)
         scored_targets = self._to_scored_space(targets)
@@ -349,9 +398,8 @@ class CosineStructureLoss(nn.Module):
             scored_predictions, scored_targets, dim=-1, eps=1e-8
         )
         deviation = 1.0 - similarity
-        # A row whose target vector is essentially zero has no direction to reproduce. In
-        # standardized space that is a sample sitting at the mean of every target, which is common;
-        # scoring its angle would inject pure noise into the gradient.
+        # A point sitting at the average of every target has no proportions to reproduce, and
+        # scoring it would add noise.
         measurable = scored_targets.norm(dim=-1) > self.NORM_FLOOR
         if bool(measurable.all()):
             penalty = deviation.mean()
@@ -379,33 +427,70 @@ def build_loss_fn(
     target_scale: Optional[Sequence[float]] = None,
     target_transform: Optional[str] = None,
 ) -> nn.Module:
-    """The training objective named by ``loss_name``.
+    """Build the loss a model-list entry asks for.
 
-    Every failure mode is raised HERE, at model construction, rather than at the first training
-    step: a run that dies after the data has been assembled and the first epoch has started has
-    already cost minutes, and a structural loss that silently degenerates to its base term costs an
-    entire experiment because nothing downstream looks wrong.
+    Everything is checked here, while the model is being built, rather than at the first training
+    step: a run that fails after the data is ready has already cost minutes, and a loss that quietly
+    falls back to a simpler one costs a whole experiment, because nothing looks wrong afterwards.
 
-    THE KEYWORD ARGUMENTS ARE PER-LOSS, NOT UNIVERSAL. Each branch below reads only its own subset
-    and the rest are ignored in silence, which the registry comment spells out for whoever is
-    editing the YAML:
+    Each loss reads only the settings that apply to it; the others are ignored:
 
-        mse                  (none)
-        huber | smooth_l1    huber_delta
-        mahalanobis          loss_shrinkage, target_covariance
-        correlation_penalty  loss_base (+ huber_delta through it), loss_lambda, loss_min_batch,
-                             target_covariance
-        cosine               loss_base (+ huber_delta through it), loss_lambda, cosine_space,
-                             target_mean / target_scale / target_transform
+    =========================  ================================================================
+    ``loss_name``              settings it reads
+    =========================  ================================================================
+    ``mse``                    none
+    ``huber``                  ``huber_delta``
+    ``smooth_l1``              ``huber_delta``
+    ``mahalanobis``            ``loss_shrinkage``, ``target_covariance``
+    ``correlation_penalty``    ``loss_base``, ``loss_lambda``, ``loss_min_batch``,
+                               ``target_covariance``
+    ``cosine``                 ``loss_base``, ``loss_lambda``, ``cosine_space``, the target
+                               statistics
+    =========================  ================================================================
 
-    One asymmetry is deliberate and worth naming, because it reads as a bug from either side.
-    ``loss_base`` is validated for EVERY structural loss, ``mahalanobis`` included, even though
-    mahalanobis never uses it - the check sits above the branch. ``cosine_space`` is validated only
-    inside CosineStructureLoss, so a nonsense value passes silently under the other two. Neither is
-    worth tightening on its own: moving the loss_base check down would let a typo through on the
-    losses that DO use it if the branches are ever reordered, and hoisting the cosine_space check up
-    would reject a config key that has no effect on the selected loss. If you change one, change
-    both, and say which way you went.
+    Parameters
+    ----------
+    loss_name : str
+        One of :data:`LOSS_NAMES`.
+    huber_delta : float, default 1.0
+        Where ``huber`` and ``smooth_l1`` switch from squared to absolute error.
+    loss_base : str, default "mse"
+        The per-target loss the structural ones add their penalty to.
+    loss_lambda : float, default 0.1
+        How heavily that penalty counts.
+    loss_shrinkage : float, default 0.05
+        For ``mahalanobis``: how far the targets' covariance is pulled towards treating them as
+        independent.
+    loss_min_batch : int, default 16
+        For ``correlation_penalty``: the smallest batch the penalty is measured on.
+    cosine_space : {"original", "standardized"}, default "original"
+        For ``cosine``: which units the ratios are measured in.
+    target_dim : int, default 1
+        How many targets; the structural losses need at least two.
+    target_covariance : array-like, optional
+        How the training targets vary together. Supplied by the datamodule.
+    target_mean, target_scale : sequence of float, optional
+        The standardization statistics.
+    target_transform : str, optional
+        ``"log1p"`` when the targets were log-transformed.
+
+    Returns
+    -------
+    torch.nn.Module
+
+    Raises
+    ------
+    ValueError
+        If the name is unknown, a structural loss is asked for with one target (set
+        ``MULTI_TARGET_MODE: joint``, or use a per-target loss), or the covariance it needs is
+        missing.
+
+    Examples
+    --------
+    >>> type(build_loss_fn("mse")).__name__
+    'MSELoss'
+    >>> type(build_loss_fn("huber", huber_delta=0.5)).__name__
+    'HuberLoss'
     """
     loss_name = str(loss_name).lower()
     if loss_name in BASE_LOSSES:

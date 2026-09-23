@@ -1,3 +1,5 @@
+"""Train the scikit-learn models: search their settings, fit them, record the results."""
+
 from sklearn.model_selection import GridSearchCV, cross_val_predict
 from sklearn.base import clone
 import mlflow
@@ -26,12 +28,43 @@ from yg_eo_soilnet.uncertainty.intervals import (
 from yg_eo_soilnet.uncertainty.predictors import EnsembleRegressor
 from yg_eo_soilnet.utils import LogTransformer
 
-# Tag distinguishing an ensemble member's run from a per-target evaluation run. Both are children of
-# the same model run, and the parent leaderboard has to be able to tell them apart - see
-# ParentRunLogger._collect_leaderboard, which would otherwise list five members in place of the model.
+#: Tag marking a sub-run as one :term:`ensemble` member rather than one target's results. The
+#: leaderboard reads it, or it would list five members in place of the model.
 MEMBER_RUN_KIND = "ensemble_member"
 
 class ModelTrainer:
+    """Train every scikit-learn model switched on, one :term:`target group` at a time.
+
+    For each model it searches the hyperparameter grid from the model list by cross-validation
+    inside the :term:`fit pool`, fits the winner, and hands the result to the logger, which scores
+    it on the test points and records everything under a sub-run of its own. With uncertainty on it
+    fits an :term:`ensemble` instead of a single model and calibrates the intervals.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    columns_to_transform : list of str, optional
+        Targets trained on 10·ln(1 + *y*) rather than *y*.
+    enable_clustering : bool, default False
+        Keep spatial groups whole in the cross-validation folds.
+    split_strategy : {"kfold", "groupkfold"}, default "kfold"
+        How those folds are made.
+    seed : int, default 42
+        The run's random seed.
+    n_splits : int, default 5
+        How many folds.
+    logger : logging.Logger, optional
+        Where progress messages go.
+    tuning_verbose : int, default 0
+        How much the search itself prints.
+
+    Examples
+    --------
+    >>> trainer = ModelTrainer(config, logger=logger)               # doctest: +SKIP
+    >>> trainer.train("clay_pct", data, model_pipelines)            # doctest: +SKIP
+    """
+
     def __init__(
         self,
         config,
@@ -70,31 +103,47 @@ class ModelTrainer:
         model_pipelines: Dict[str, Dict],
         targets: Optional[list] = None,
         ):
-        """
-        Train models for one TARGET GROUP using the provided data.
+        """Train every model in ``model_pipelines`` for one :term:`target group`.
 
-        `target` is the group's run label and `targets` the columns it covers. A group of one is
-        the familiar single-output fit; a group of several fits one estimator against a 2-D y,
-        which only estimators declaring `multi_target: native` in the registry can do - see
-        yg_eo_soilnet.targets.
+        Each model is trained inside a sub-run named ``<target group>_<model>``. A model that fails
+        is reported and the others carry on, unless ``FAIL_ON_MODEL_ERROR`` is set.
+
+        Parameters
+        ----------
+        target : str
+            The group's name.
+        data : dict
+            What
+            :meth:`ScikitDataModule.prepare
+            <yg_eo_soilnet.datamodules.scikit.scikit_datamodule.ScikitDataModule.prepare>`
+            returned.
+        model_pipelines : dict
+            The built models, from
+            :meth:`ModelConfigFactory.build_model_configs
+            <yg_eo_soilnet.models.config_fatories.model_config_factory.ModelConfigFactory.build_model_configs>`.
+        targets : list of str, optional
+            The targets in the group; read from its name unless given.
+
+        Raises
+        ------
+        ValueError
+            If a model entry is incomplete, or the group's targets disagree about the log transform.
+        RuntimeError
+            If every model failed and ``FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET`` is set.
         """
         self._validate_model_pipelines(model_pipelines)
         target_names = [str(name) for name in (targets or split_target_names(target))] or [str(target)]
         self._guard_uniform_log_transform(target_names)
 
-        # Which rows this family fits on, and which it keeps back to calibrate against. Decided ONCE
-        # for the whole sklearn family rather than per model: two models in one run that fitted on
-        # different row counts would sit on the same leaderboard axis with no sign that their
-        # rmse_test is not a like-for-like comparison.
+        # Decided once for every model here, not per model: two models on one leaderboard must
+        # have been fitted on the same rows for their scores to be comparable.
         fit_pool, calibration_data = self._resolve_fit_pool(data)
         X_train = fit_pool['X']
         X_train = X_train.astype({col: 'float64' for col in X_train.select_dtypes(include=['int64', 'int32']).columns})
-        # A one-column selection stays a Series, so the single-target path is byte-for-byte what it
-        # always was; several columns give the DataFrame a native multi-output estimator wants.
+        # One target stays a single column; several give the table a multi-target model needs.
         y_train = self._select_targets(fit_pool['y'], target_names)
         X_test = data['X_test']
-        # Must read X_test's own dtypes: X_train was already converted above, so keying off it
-        # produced an empty mapping and left X_test integer-typed.
+        # Read from the test table itself: the training one has already been converted.
         X_test = X_test.astype({col: 'float64' for col in X_test.select_dtypes(include=['int64', 'int32']).columns})
         y_test = self._select_targets(data['y_test'], target_names)
         groups_train = data['groups_train'] if self.enable_clustering else None
@@ -106,9 +155,8 @@ class ModelTrainer:
         else:
             X_test, y_test = None, None
 
-        # Same NaN filter as the fit pool and the test split: a calibration row whose target was
-        # never measured contributes a residual of NaN, which fit_conformal would drop anyway - but
-        # dropping it here keeps the row count it reports honest.
+        # The same filter as the other splits, so the number of calibration rows reported is the
+        # number actually used.
         if calibration_data is not None:
             X_calib = calibration_data['X'].astype(
                 {col: 'float64' for col in calibration_data['X'].select_dtypes(include=['int64', 'int32']).columns}
@@ -130,10 +178,8 @@ class ModelTrainer:
                 f"minimum recommended is {min_valid_rows} for {X_train.shape[1]} features."
             )
 
-        # The whole featurized population, for the per-point prediction export. Its index still
-        # keys into `point_ids`, so the export never has to pair rows by position. Deliberately NOT
-        # run through TargetNanFilter: a point with an unmeasured target can still be predicted,
-        # and dropping it here would put holes in an export whose whole purpose is completeness.
+        # Every point, for the per-point export. Points whose target was never measured are kept:
+        # they can still be predicted, and the export is meant to be complete.
         export_data = None
         if data.get('X_all') is not None and data.get('point_ids') is not None:
             X_all = data['X_all']
@@ -146,7 +192,7 @@ class ModelTrainer:
 
         if not self._should_skip_target(y_train, y_test, target):
 
-            # Uniform across the group; _guard_uniform_log_transform above refused a mixed one.
+            # The same for every target in the group; a mixed group was refused above.
             is_log_target = target_names[0] in self.columns_to_transform
             mlflow_logger = ChildRunLogger()
 
@@ -155,10 +201,8 @@ class ModelTrainer:
                 try:
                     self.logger.info(f"Training {model_name} for {target}")
 
-                    # The run is opened HERE, not inside the logger, so the grid search below runs
-                    # inside it and its progress and system metrics attach to the right run. It also
-                    # gives sklearn the same ownership rule as Lightning, where the trainer has
-                    # always had to open the run before fit() so the loss curves had somewhere to go.
+                    # The sub-run is opened here, before the search, so everything the search
+                    # reports is attached to it.
                     with start_child_run(f"{target}_{model_name}"):
                         self._train_one(
                             config=config,
@@ -182,7 +226,8 @@ class ModelTrainer:
                     if getattr(self.config, "FAIL_ON_MODEL_ERROR", False):
                         raise
 
-            # Without this, a target where every model failed still exits 0 with an empty MLflow run.
+            # Without this, a target whose models all failed would end in success with nothing in
+            # its run.
             if trained_models == 0 and getattr(self.config, "FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET", True):
                 raise RuntimeError(
                     f"All {len(model_pipelines)} model(s) failed to train for target {target!r}; "
@@ -209,7 +254,13 @@ class ModelTrainer:
         calibration_data=None,
         export_data=None,
     ):
-        """Fit one registry entry over one target group, inside an already-started run."""
+        """Search, fit and record one model for one target group, inside its open sub-run.
+
+        Raises
+        ------
+        ValueError
+            If the entry's ``modeltype`` is not ``"ml"``.
+        """
         model_seed = int(config.get("random_seed", self.seed))
 
         cv_splitter = CVSplitter(
@@ -233,7 +284,7 @@ class ModelTrainer:
                 col for col in X_train.columns
                 if col not in categorical_cols
             ]
-            # Build pipeline
+            # Fill gaps, scale, encode categories, then the model - all as one object.
             pipeline = self.pipeline_builder.build(
                 model,
                 is_log_target,
@@ -241,7 +292,7 @@ class ModelTrainer:
                 numeric_cols=numeric_cols,
             )
 
-            # Adjust param grid if using TransformedTargetRegressor
+            # A logged target wraps the model one layer deeper, so the grid's names follow.
             if is_log_target and bool(params):
                 params = {
                     k.replace("model__", "model__regressor__") : v
@@ -252,8 +303,8 @@ class ModelTrainer:
                 param_grid= params if params is not None else {},
                 cv=splits, refit=False,
                 scoring= "neg_root_mean_squared_error",
-                # -1 for ordinary estimators; entries whose model loads a large
-                # checkpoint per worker set search_n_jobs to keep memory bounded.
+                # Every processor by default; a model that loads a large file per process
+                # limits this in its entry.
                 n_jobs=int(config.get("search_n_jobs", -1)),
                 return_train_score=True,
                 verbose=self.tuning_verbose
@@ -263,9 +314,8 @@ class ModelTrainer:
             best_params = search.best_params_ if params is not None else {}
             cv_results = pd.DataFrame(search.cv_results_)
 
-            # The grid search stays a SINGLE pass whatever the ensemble size: the members share one
-            # set of hyperparameters, so searching per member would multiply the most expensive part
-            # of the run to answer a question already answered.
+            # One search whatever the ensemble size: the members share the winning settings, so
+            # searching once per member would repeat the most expensive part of the run.
             if uncertainty_enabled_for(self.config, model_name):
                 best_model = self._fit_ensemble(
                     pipeline=pipeline,
@@ -327,34 +377,37 @@ class ModelTrainer:
     # --- uncertainty --------------------------------------------------------
 
     def _resolve_fit_pool(self, data: Dict) -> tuple[Dict, Optional[Dict]]:
-        """``(fit_pool, calibration_data)`` - which rows are fitted on and which are held back.
+        """Decide which rows are fitted on, and which are kept back to calibrate the intervals.
 
-        Normally the fit pool is ``X_train``, which is train u val: sklearn validates by k-fold
-        INSIDE that pool, so it has never needed a separate validation holdout and the val rows
-        would otherwise be wasted.
+        Normally everything: the :term:`fit pool` is the training and validation points together,
+        because the hyperparameters are chosen by cross-validation inside it.
 
-        Conformal calibration needs rows the model has not seen, so enabling it with
-        ``calibration.source: val`` moves the family onto ``X_train_only`` and reserves ``X_val``.
-        The alternative would be to calibrate on rows that were fitted on, which produces residuals
-        that are too small, an interval that is too narrow, and a coverage guarantee that is void -
-        and none of that would show up as an error. Paying ~15% of the training rows is the honest
-        price; ``uncertainty_fit_pool`` is logged so the smaller rmse_test is never mistaken for a
-        regression.
+        :term:`Conformal <conformal>` intervals need points the model has not seen, so with
+        ``uncertainty.calibration.source: val`` the models fit on the training points only and the
+        validation points are reserved. That costs about 15% of the training rows - calibrating on
+        rows the model was fitted on would make the intervals too narrow and the promised coverage
+        meaningless. ``uncertainty_fit_pool`` is recorded with the run, so the slightly worse
+        ``rmse_test`` is not mistaken for something going wrong.
+
+        Returns
+        -------
+        fit_pool : dict
+            The covariates and targets to fit on.
+        calibration_data : dict or None
+            The rows reserved for calibration, if any.
         """
         default_pool = {'X': data['X_train'], 'y': data['y_train']}
 
         if not bool(getattr(self.config, "UNCERTAINTY_ENABLED", False)):
             return default_pool, None
-        # Gated on whether the chosen interval NEEDS held-out rows, not on whether one was asked
-        # for at all. gaussian and sigma turn sigma into an interval by arithmetic, so reserving the
-        # val split for them would cost ~15% of the training rows and buy nothing.
+        # Only the interval methods that need held-out rows pay for them: the others turn the
+        # spread into an interval by arithmetic.
         if not needs_calibration_set(
             getattr(self.config, "UNCERTAINTY_INTERVAL_METHOD", "conformal")
         ):
             return default_pool, None
         if str(getattr(self.config, "UNCERTAINTY_CALIBRATION_SOURCE", "val")).lower() != "val":
-            # cv_oof calibrates on out-of-fold residuals from the k-fold the grid search already
-            # runs, so it keeps the full fit pool. See _calibration_from_out_of_fold.
+            # cv_oof calibrates on the folds the search already ran, so it keeps every row.
             return default_pool, None
 
         train_only = data.get('X_train_only')
@@ -391,13 +444,16 @@ class ModelTrainer:
         splits,
         calibration_data,
     ) -> EnsembleRegressor:
-        """Fit the members, calibrate them, and return them as one estimator.
+        """Fit the :term:`ensemble` members, calibrate the intervals, and return them as one model.
 
-        Each member gets its own MLflow child run, tagged ``run_kind=ensemble_member``. That tag is
-        load-bearing: members are children of the model run, and the parent leaderboard collects the
-        GRANDCHILDREN of the parent run in preference to their parent, so without a way to tell a
-        member from a per-target evaluation run the leaderboard would list five members in place of
-        the one model.
+        Each member is trained from a different seed, and from resampled rows when the estimator
+        would otherwise fit identically every time. Every member gets a sub-run of its own, tagged
+        :data:`MEMBER_RUN_KIND` so the leaderboard can tell members from results.
+
+        Returns
+        -------
+        EnsembleRegressor
+            Predicts the members' average, with their spread as the uncertainty.
         """
         n_members = int(getattr(self.config, "UNCERTAINTY_N_MEMBERS", 5))
         stride = int(getattr(self.config, "UNCERTAINTY_SEED_STRIDE", 1000))
@@ -440,9 +496,8 @@ class ModelTrainer:
                 )
             members.append(member)
 
-        # Which pool these members actually fitted on. Logged because it changes what rmse_test
-        # means: a train-only ensemble trained on ~15% fewer rows than every non-uncertainty run in
-        # the experiment, and comparing the two without knowing that reads as a regression.
+        # Which rows these members fitted on. Recorded because it changes what rmse_test means:
+        # a calibrated ensemble trained on about 15% fewer rows than an ordinary run.
         mlflow.log_params(
             {
                 "uncertainty_fit_pool": "train_only" if calibration_data is not None else "train_val",
@@ -486,11 +541,16 @@ class ModelTrainer:
         splits,
         calibration_data,
     ) -> dict:
-        """One interval estimator per target, of whichever kind the config asked for.
+        """Build one :term:`prediction interval` estimator per target.
 
-        Only the conformal branch touches data. gaussian and sigma turn sigma into an interval by
-        arithmetic alone, so they are built here without a calibration set and without the
-        out-of-fold pass below.
+        ``sigma`` and ``gaussian`` turn the spread into an interval by arithmetic and need no data.
+        ``conformal`` measures how far the predictions actually fall from the measurements, on the
+        reserved rows or, failing those, on the cross-validation folds.
+
+        Returns
+        -------
+        dict of str to object
+            One estimator per target.
         """
         method = normalize_method(getattr(self.config, "UNCERTAINTY_INTERVAL_METHOD", "conformal"))
         alpha = float(getattr(self.config, "UNCERTAINTY_ALPHA", 0.05))
@@ -536,15 +596,17 @@ class ModelTrainer:
         splits,
         alpha,
     ) -> dict:
-        """Calibrate on out-of-fold residuals, keeping every row in the fit pool.
+        """Calibrate on the cross-validation folds instead, keeping every row for fitting.
 
-        One documented approximation, and it is worth being explicit about because it is the reason
-        `val` is the default. The RESIDUALS come from a single pipeline refitted per fold, so each
-        is measured on a model that saw ~80% of the pool; the SIGMA comes from the full ensemble.
-        The two do not describe the same model. The mismatch runs in the conservative direction -
-        out-of-fold residuals are larger than the full model's, so the interval errs wide - but the
-        exact split-conformal guarantee does not carry over. Read this as a well-behaved heuristic,
-        not as the proven bound `val` gives.
+        An approximation, and the reason reserving the validation points is the default: the errors
+        come from a model fitted on part of the pool, while the spread comes from the full ensemble,
+        so the two do not describe the same model. It errs wide rather than narrow, but it does not
+        carry the guarantee the reserved rows give.
+
+        Returns
+        -------
+        dict of str to object
+            One interval estimator per target.
         """
         estimator = clone(pipeline)
         if best_params:
@@ -558,7 +620,7 @@ class ModelTrainer:
 
         sigma = ensemble.predict_uncertainty(X_train).total_std
         prediction = aggregate([out_of_fold], [np.zeros_like(out_of_fold)])
-        # aggregate over one member reports zero spread; the sigma the interval scales is the
+        # One set of predictions has no spread of its own; the spread scaled here is the
         # ensemble's, measured on the same rows.
         prediction = type(prediction)(
             mean=prediction.mean,
@@ -572,12 +634,9 @@ class ModelTrainer:
 
     @staticmethod
     def _seed_member(member, seed: int) -> None:
-        """Push a member's seed into the estimator step of its pipeline.
+        """Give one ensemble member its own seed, wherever the estimator sits in the pipeline.
 
-        Two possible paths because the pipeline's `model` step is the estimator directly, or a
-        TransformedTargetRegressor wrapping it when the target is logged - the same pair the
-        param-grid rewrite in _train_one has to handle. Guarded on the key actually existing:
-        an estimator with no random_state is seeded by the bootstrap instead.
+        An estimator that takes no seed is varied by resampling its rows instead.
         """
         available = member.get_params(deep=True)
         for key in ("model__random_state", "model__regressor__random_state"):
@@ -586,11 +645,11 @@ class ModelTrainer:
                 return
 
     def _warn_if_ensemble_collapsed(self, ensemble, X_train, model_name: str, bootstrap: bool) -> None:
-        """Say so when the members are identical, instead of reporting perfect confidence.
+        """Warn when every member predicts the same thing, instead of reporting perfect confidence.
 
-        A zero standard deviation is indistinguishable from a supremely confident model in every
-        artifact downstream: the bars vanish, picp reads 0 or 1, and nothing says the ensemble never
-        formed. This is the check that turns that into a line in the log.
+        A spread of exactly zero looks like an extremely confident model everywhere downstream: the
+        error bars vanish and the coverage reads 0 or 1, with nothing to say the ensemble never
+        really formed.
         """
         sample = X_train.iloc[: min(len(X_train), 256)]
         spread = float(np.max(ensemble.predict_uncertainty(sample).epistemic_std))
@@ -610,21 +669,21 @@ class ModelTrainer:
 
     @staticmethod
     def _select_targets(frame: pd.DataFrame, target_names: list):
-        """The group's columns, as a Series for one target and a DataFrame for several.
-
-        The squeeze matters: every estimator in the registry takes a 1-D y, and handing a
-        one-column DataFrame instead would change the single-target path that has always worked.
-        """
+        """The group's target columns: one column on its own, or a table for several."""
         if len(target_names) == 1:
             return frame[target_names[0]]
         return frame[list(target_names)]
 
     def _guard_uniform_log_transform(self, target_names: list) -> None:
-        """Refuse a joint group whose targets disagree about the log transform.
+        """Refuse a group whose targets disagree about the log transform.
 
-        ``TransformedTargetRegressor`` wraps the whole estimator, so the transform is a property of
-        the FIT, not of a column. A group mixing logged and unlogged targets cannot be expressed;
-        saying so beats silently applying one target's choice to the other.
+        One model applies one transform to everything it predicts, so a group where some targets
+        are listed in ``COLUMNS_TO_TRANSFORM`` and others are not cannot be trained honestly.
+
+        Raises
+        ------
+        ValueError
+            Naming the targets that disagree, and the two ways out.
         """
         if len(target_names) < 2:
             return
@@ -638,6 +697,7 @@ class ModelTrainer:
             )
 
     def _should_skip_target(self, y_train: pd.Series, y_test: Optional[pd.Series], target: str) -> bool:
+        """Whether a target has too little measured data to train on; reports the row counts."""
         n_train = len(y_train) if y_train is not None else 0
         n_test = len(y_test) if y_test is not None else 0
         self.logger.info(f"Training for target: {target} — {n_train} train samples, {n_test} test samples.")
@@ -647,6 +707,7 @@ class ModelTrainer:
         return False
 
     def _validate_model_pipelines(self, model_pipelines: Dict[str, Dict]):
+        """Check every model entry carries an estimator and a grid of settings to search."""
         for model_name, config in model_pipelines.items():
             if "model" not in config or "params" not in config:
                 raise ValueError(f"Model pipeline '{model_name}' must have 'model' and 'params' keys.")

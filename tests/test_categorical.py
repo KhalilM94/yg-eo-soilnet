@@ -1,8 +1,8 @@
-"""Unit tests for the fitted categorical vocabulary and the entity-embedding blocks.
+"""Unit tests for the fitted categorical vocabulary (the embedding blocks are in test_encoders).
 
 Both components are deliberately free of any datamodule or bundle concept, so these tests build
 their inputs inline rather than going through the pipeline; the end-to-end wiring is covered by
-test_sequence_pipeline.py.
+test_sequence_data.py.
 """
 
 from types import SimpleNamespace
@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pytest
-import torch
 
 from yg_eo_soilnet.datamodules.categorical import (
     OOV_INDEX,
@@ -19,8 +18,6 @@ from yg_eo_soilnet.datamodules.categorical import (
     split_feature_blocks,
 )
 from yg_eo_soilnet.models.lightningmodules.tabular_encoders import (
-    EntityEmbeddingBlock,
-    TabularStaticEncoder,
     embedding_dim_for,
     resolve_embedding_dims,
 )
@@ -230,181 +227,3 @@ def test_resolve_embedding_dims_mapping_must_name_every_feature():
 def test_resolve_embedding_dims_rejects_a_length_mismatch():
     with pytest.raises(ValueError, match="1 entry"):
         resolve_embedding_dims([7, 13], [4])
-
-
-# --- EntityEmbeddingBlock -------------------------------------------------
-
-
-def test_embedding_block_concatenates_per_feature_vectors():
-    block = EntityEmbeddingBlock([7, 13], feature_names=["texture_20cm", "landform_class"])
-
-    assert block.embedding_dims == [4, 7]
-    assert block.output_dim == 11
-
-    output = block(torch.tensor([[0, 0], [3, 12]], dtype=torch.long))
-    assert output.shape == (2, 11)
-    assert torch.isfinite(output).all()
-
-
-def test_embedding_block_is_a_lookup_not_a_magnitude():
-    """Codes 1 and 2 must be unrelated vectors; that is the whole point over ordinal codes."""
-    block = EntityEmbeddingBlock([4], embedding_dims=1)
-    with torch.no_grad():
-        block.embeddings[0].weight.copy_(torch.tensor([[0.0], [5.0], [-3.0], [1.0]]))
-
-    output = block(torch.tensor([[0], [1], [2], [3]], dtype=torch.long))
-
-    assert output.squeeze(-1).tolist() == [0.0, 5.0, -3.0, 1.0]
-
-
-def test_embedding_block_gradients_reach_only_the_looked_up_rows():
-    block = EntityEmbeddingBlock([5])
-
-    block(torch.tensor([[2]], dtype=torch.long)).sum().backward()
-
-    grad = block.embeddings[0].weight.grad
-    assert grad[2].abs().sum() > 0
-    assert grad[[0, 1, 3, 4]].abs().sum() == 0
-
-
-def test_embedding_block_with_no_features_returns_an_empty_tensor():
-    block = EntityEmbeddingBlock([])
-
-    assert block.output_dim == 0
-    assert block(torch.zeros((3, 0), dtype=torch.long)).shape == (3, 0)
-
-
-def test_embedding_block_rejects_a_wrong_column_count():
-    block = EntityEmbeddingBlock([7, 13], feature_names=["texture_20cm", "landform_class"])
-
-    with pytest.raises(ValueError, match="1 column"):
-        block(torch.tensor([[0]], dtype=torch.long))
-
-
-def test_embedding_dropout_is_inactive_in_eval():
-    block = EntityEmbeddingBlock([7], dropout=0.9).eval()
-    indices = torch.tensor([[3]], dtype=torch.long)
-
-    assert torch.equal(block(indices), block(indices))
-
-
-# --- TabularStaticEncoder -------------------------------------------------
-
-
-def test_static_encoder_concatenates_continuous_and_embedded_blocks():
-    encoder = TabularStaticEncoder(num_continuous=11, hidden_dims=[64], cardinalities=[7, 13])
-
-    assert encoder.embedding_dims == [4, 7]
-    assert encoder.input_dim == 22  # 11 continuous + 4 + 7
-    assert encoder.output_dim == 64
-
-    output = encoder(torch.randn(5, 11), torch.zeros((5, 2), dtype=torch.long))
-    assert output.shape == (5, 64)
-
-
-def test_static_encoder_projects_to_output_dim_when_asked():
-    """The sequence model projects to fusion_dim; the CNN model does not."""
-    projected = TabularStaticEncoder(num_continuous=11, hidden_dims=[64], output_dim=32, cardinalities=[7])
-    unprojected = TabularStaticEncoder(num_continuous=11, hidden_dims=[64], cardinalities=[7])
-
-    assert projected(torch.randn(4, 11), torch.zeros((4, 1), dtype=torch.long)).shape == (4, 32)
-    assert unprojected(torch.randn(4, 11), torch.zeros((4, 1), dtype=torch.long)).shape == (4, 64)
-
-
-def test_static_encoder_works_with_no_categoricals():
-    encoder = TabularStaticEncoder(num_continuous=11, hidden_dims=[16])
-
-    assert encoder.input_dim == 11
-    assert encoder(torch.randn(3, 11)).shape == (3, 16)
-
-
-def test_static_encoder_works_with_no_continuous_features():
-    encoder = TabularStaticEncoder(num_continuous=0, hidden_dims=[16], cardinalities=[7, 13])
-
-    assert encoder.input_dim == 11
-    assert encoder(torch.zeros((3, 0)), torch.zeros((3, 2), dtype=torch.long)).shape == (3, 16)
-
-
-def test_static_encoder_raises_when_it_would_have_no_input():
-    with pytest.raises(ValueError, match="at least one feature"):
-        TabularStaticEncoder(num_continuous=0, hidden_dims=[16])
-
-
-def test_static_encoder_raises_when_categoricals_are_missing_from_the_batch():
-    encoder = TabularStaticEncoder(
-        num_continuous=11, hidden_dims=[16], cardinalities=[7], feature_names=["texture_20cm"]
-    )
-
-    with pytest.raises(KeyError, match="texture_20cm"):
-        encoder(torch.randn(2, 11))
-
-
-@pytest.mark.parametrize("activation", ["relu", "gelu"])
-@pytest.mark.parametrize("continuous_norm", ["none", "batch", "layer"])
-def test_static_encoder_variants_build_and_run(activation, continuous_norm):
-    encoder = TabularStaticEncoder(
-        num_continuous=6,
-        hidden_dims=[8],
-        cardinalities=[4],
-        activation=activation,
-        continuous_norm=continuous_norm,
-    )
-
-    output = encoder(torch.randn(4, 6), torch.zeros((4, 1), dtype=torch.long))
-
-    assert output.shape == (4, 8)
-    assert torch.isfinite(output).all()
-
-
-def test_static_encoder_rejects_an_unknown_activation():
-    with pytest.raises(ValueError, match="activation"):
-        TabularStaticEncoder(num_continuous=4, hidden_dims=[8], activation="swish")
-
-
-def test_static_encoder_rejects_an_unknown_continuous_norm():
-    with pytest.raises(ValueError, match="continuous_norm"):
-        TabularStaticEncoder(num_continuous=4, hidden_dims=[8], continuous_norm="instance")
-
-
-def test_static_encoder_backprops_into_the_embedding_tables():
-    encoder = TabularStaticEncoder(num_continuous=3, hidden_dims=[8], cardinalities=[5])
-
-    encoder(torch.randn(4, 3), torch.tensor([[1], [2], [1], [3]], dtype=torch.long)).sum().backward()
-
-    assert encoder.embeddings.embeddings[0].weight.grad.abs().sum() > 0
-
-
-# --- static encoder depth ----------------------------------------------------
-
-
-def test_a_single_width_reproduces_the_old_hand_built_stack() -> None:
-    """`hidden_dims=[64]` must be exactly what `hidden_dim=64` built before it took a list."""
-    from torch import nn
-
-    encoder = TabularStaticEncoder(num_continuous=11, hidden_dims=[64], cardinalities=[7])
-
-    assert [type(m) for m in encoder.encoder] == [nn.Linear, nn.LayerNorm, nn.ReLU, nn.Dropout]
-    assert encoder.output_dim == 64
-
-
-def test_the_static_branch_can_be_deepened() -> None:
-    from torch import nn
-
-    encoder = TabularStaticEncoder(num_continuous=11, hidden_dims=[128, 64], cardinalities=[7])
-    widths = [layer.out_features for layer in encoder.encoder if isinstance(layer, nn.Linear)]
-
-    assert widths == [128, 64]
-    assert encoder.output_dim == 64  # the fusion is sized off the LAST block
-
-
-def test_a_deep_static_branch_still_projects_to_the_requested_width() -> None:
-    encoder = TabularStaticEncoder(num_continuous=11, hidden_dims=[128, 64], output_dim=32, cardinalities=[7])
-
-    assert encoder.output_dim == 32
-    assert encoder(torch.randn(4, 11), torch.zeros(4, 1, dtype=torch.long)).shape == (4, 32)
-
-
-def test_an_empty_static_width_list_is_refused() -> None:
-    """A zero-layer static branch feeds the raw concatenation into the fusion - a different model."""
-    with pytest.raises(ValueError, match="at least one hidden width"):
-        TabularStaticEncoder(num_continuous=11, hidden_dims=[], cardinalities=[7])

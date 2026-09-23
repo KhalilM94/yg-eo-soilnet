@@ -1,3 +1,5 @@
+"""Turn a model-list entry into a model that is ready to train."""
+
 from yg_eo_soilnet.models.config_fatories.lightning_config_factory import (
     LightningConfigFactory,
     LightningModelBundle,

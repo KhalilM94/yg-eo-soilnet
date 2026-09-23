@@ -10,15 +10,18 @@ Two things decide whether the plot means anything, and both are easy to get wron
 """
 
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.base import BaseEstimator, RegressorMixin
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 
 from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import PipelineBuilder
 from yg_eo_soilnet.explain import build_shap_results
+from yg_eo_soilnet.explain.sklearn_explainer import DEFAULT_MAX_EVALS, ExplainBudgetExceeded
 
 
 @pytest.fixture
@@ -232,3 +235,161 @@ def test_a_joint_fit_returns_every_output_correctly_sliced(config, frame) -> Non
     # Each output is driven by the column it was built from, so the slices are not interchangeable.
     assert results[0].feature_names[results[0].ranking()[0]] == "num__clay_pct"
     assert results[1].feature_names[results[1].ranking()[0]] == "num__ph"
+
+
+# --- a model shap cannot parse, and one it cannot afford --------------------------------------
+# The sklearn explainer must survive a model shap cannot parse, and refuse one it cannot afford.
+#
+# Both failures were observed on a real run:
+#
+# * **XGBoost** raised ``ValueError: could not convert string to float: '[2.7789434E1]'`` - shap 0.48
+#   cannot parse xgboost 3.3's ``base_score``, now serialized as a bracketed string. The failure comes
+#   out of ``shap_values``, not the constructor, which is why the fallback has to wrap the call.
+# * **TabICL** matched no tree or linear marker and fell to KernelExplainer at ~2166 coalitions per
+#   row. At 500 rows that is ~1.08M forward passes; the run never terminated.
+
+
+class _UnparsableBooster(BaseEstimator, RegressorMixin):
+    """Stands in for XGBoost 3.3 under shap 0.48.
+
+    Named to match the tree marker list so the explainer picks the fast path, then fails the way the
+    real one does: from inside shap_values rather than at construction.
+    """
+
+    def __init__(self):
+        self.fitted_ = False
+
+    def fit(self, X, y):
+        self._mean = float(np.mean(y))
+        self.fitted_ = True
+        return self
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=float)
+        return self._mean + X[:, 0] * 0.5
+
+
+# The marker test keys off the class name, so this is what routes it to TreeExplainer.
+_UnparsableBooster.__name__ = "XGBRegressorLookalikeBoost"
+
+
+@pytest.fixture
+def numeric_frame():
+    generator = np.random.default_rng(0)
+    features = pd.DataFrame({f"f{index}": generator.normal(0, 1, 80) for index in range(6)})
+    target = pd.Series(features["f0"] * 2 + generator.normal(0, 0.1, 80), name="om")
+    return features, target
+
+
+def _pipeline(model, features, target):
+    from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import PipelineBuilder
+
+    pipeline = PipelineBuilder().build(
+        model, False, categorical_cols=[], numeric_cols=list(features.columns)
+    )
+    return pipeline.fit(features, target)
+
+
+def _config(**overrides):
+    settings = {
+        "RANDOM_SEED": 42,
+        "EXPLAIN_MAX_SAMPLES": 20,
+        "EXPLAIN_BACKGROUND_SAMPLES": 10,
+        "EXPLAIN_MAX_EVALS": DEFAULT_MAX_EVALS,
+    }
+    settings.update(overrides)
+    return SimpleNamespace(**settings)
+
+
+@pytest.mark.slow
+def test_a_model_the_fast_explainer_cannot_parse_still_gets_explained(monkeypatch, numeric_frame) -> None:
+    """The XGBoost case: TreeExplainer raises, and the result comes from the fallback instead."""
+    import shap
+
+    def exploding_tree_explainer(*args, **kwargs):
+        explainer = MagicMock()
+        explainer.shap_values.side_effect = ValueError(
+            "could not convert string to float: '[2.7789434E1]'"
+        )
+        return explainer
+
+    monkeypatch.setattr(shap, "TreeExplainer", exploding_tree_explainer)
+
+    features, target = numeric_frame
+    result = build_shap_results(
+        config=_config(),
+        backend="sklearn",
+        fitted_estimator=_pipeline(_UnparsableBooster(), features, target),
+        X_train=features,
+        X_test=features,
+        target="om",
+    )[0]
+
+    assert result.values.shape[0] == 20
+    assert result.explainer != "TreeExplainer"
+    # The downgrade is recorded, so a reader of the plot knows it is an approximation.
+    assert result.summary()["explainer"] == result.explainer
+
+
+def test_the_fast_explainer_is_still_preferred_when_it_works(numeric_frame) -> None:
+    from sklearn.ensemble import RandomForestRegressor
+
+    features, target = numeric_frame
+    result = build_shap_results(
+        config=_config(),
+        backend="sklearn",
+        fitted_estimator=_pipeline(RandomForestRegressor(n_estimators=5, random_state=0), features, target),
+        X_train=features,
+        X_test=features,
+        target="om",
+    )[0]
+
+    assert result.explainer == "TreeExplainer"
+
+
+def test_an_unaffordable_model_is_refused_rather_than_run(numeric_frame) -> None:
+    """The TabICL case. Raised, not silently downscaled, so the skip is visible in the run."""
+    features, target = numeric_frame
+
+    with pytest.raises(ExplainBudgetExceeded) as excinfo:
+        build_shap_results(
+            config=_config(EXPLAIN_MAX_EVALS=10),
+            backend="sklearn",
+            fitted_estimator=_pipeline(_slow_model(), features, target),
+            X_train=features,
+            X_test=features,
+            target="om",
+        )
+
+    message = str(excinfo.value)
+    assert "EXPLAIN_MAX_EVALS" in message
+    assert "model evaluations" in message
+
+
+def _slow_model():
+    class _Opaque(BaseEstimator, RegressorMixin):
+        """Matches no tree or linear marker, exactly like TabICLRegressor."""
+
+        def fit(self, X, y):
+            self._mean = float(np.mean(y))
+            return self
+
+        def predict(self, X):
+            return np.full(np.asarray(X).shape[0], self._mean)
+
+    return _Opaque()
+
+
+def test_raising_the_budget_lets_an_expensive_model_through(numeric_frame) -> None:
+    features, target = numeric_frame
+
+    result = build_shap_results(
+        config=_config(EXPLAIN_MAX_EVALS=1_000_000),
+        backend="sklearn",
+        fitted_estimator=_pipeline(_slow_model(), features, target),
+        X_train=features,
+        X_test=features,
+        target="om",
+    )[0]
+
+    assert result.values.shape[0] == 20

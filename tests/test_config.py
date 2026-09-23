@@ -1,7 +1,26 @@
+"""Config: the loader, the shipped files, and every dotted path those files name."""
+
+import importlib
+import os
 from pathlib import Path
+
 import pytest
+import yaml
 
 from config import Config
+
+# These imports are the guard: if a module moved, collection of this file fails. Asserting
+# `X is not None` on them afterwards could never fail independently, so that test was removed.
+from yg_eo_soilnet.datamodules.scikit.scikit_datamodule import ScikitDataModule  # noqa: F401
+from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import (  # noqa: F401
+    CVSplitter,
+    PipelineBuilder,
+    TargetNanFilter,
+)
+from yg_eo_soilnet.datamodules.scikit.sklearn_data_splitter import SklearnDataSplitter  # noqa: F401
+from yg_eo_soilnet.datamodules.scikit.tabular_preprocessor import TabularPreprocessor  # noqa: F401
+from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule  # noqa: F401
+from yg_eo_soilnet.uncertainty.intervals import normalize_method
 
 BASE_CONFIG_CONTENT = """
 common:
@@ -112,8 +131,8 @@ def test_config_reads_env_overrides(
     assert config.MAIN_FILE_LOGGING_ENABLED is False
     assert config.SKLEARN_FILE_LOGGING_ENABLED is False
     assert config.MLFLOW_EXPERIMENT_EXPORT_ENABLED is False
-    assert config.STATIC_CSV_PATH == "override_folder/base_static.csv"
-    assert config.TARGETS_CSV_PATH == "override_folder/base_targets.csv"
+    assert config.STATIC_CSV_PATH == os.path.abspath("override_folder/base_static.csv")
+    assert config.TARGETS_CSV_PATH == os.path.abspath("override_folder/base_targets.csv")
 
 
 def test_config_reads_file_logging_toggles(base_config_paths: dict) -> None:
@@ -124,6 +143,28 @@ def test_config_reads_file_logging_toggles(base_config_paths: dict) -> None:
     assert config.MLFLOW_EXPERIMENT_EXPORT_PATH.endswith("export_dir")
     assert config.MIN_FEATURE_COUNT == 10
     assert config.MAX_FEATURE_DROP_RATIO_WARNING == 0.9
+
+
+def test_a_relative_data_folder_is_read_from_the_working_directory(
+    monkeypatch: pytest.MonkeyPatch, base_config_paths: dict, tmp_path: Path, logger
+) -> None:
+    """The data folder is joined on once; joining it twice looked for rel_data/rel_data/..."""
+    import pandas as pd
+
+    from yg_eo_soilnet.data_manager import DataManager
+
+    data_folder = tmp_path / "rel_data"
+    data_folder.mkdir()
+    pd.DataFrame({"point_id": ["a", "b"], "cov": [1.0, 2.0]}).to_csv(data_folder / "base_static.csv", index=False)
+    pd.DataFrame({"point_id": ["a", "b"], "base_target": [3.0, 4.0]}).to_csv(
+        data_folder / "base_targets.csv", index=False
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("DATA_FOLDER", "rel_data")
+
+    frame = DataManager(Config(**base_config_paths), logger).load_tabular_data()
+
+    assert sorted(frame["base_target"]) == [3.0, 4.0]
 
 
 def test_config_raises_for_missing_registry(base_config_paths: dict, tmp_path: Path) -> None:
@@ -368,10 +409,10 @@ def test_data_block_resolves_every_source(base_config_paths: dict) -> None:
 
     assert config.DATA_FOLDER == "unified_root"
     assert config.DATA_ROOT == "unified_root"
-    assert config.STATIC_SOURCE == "unified_root/static_dir"
-    assert config.TARGETS_SOURCE == "unified_root/targets_dir"
-    assert config.TIMESERIES_SOURCE == "unified_root/ts_dir"
-    assert config.DATA_MANIFEST_PATH == "unified_root/index.json"
+    assert config.STATIC_SOURCE == os.path.abspath("unified_root/static_dir")
+    assert config.TARGETS_SOURCE == os.path.abspath("unified_root/targets_dir")
+    assert config.TIMESERIES_SOURCE == os.path.abspath("unified_root/ts_dir")
+    assert config.DATA_MANIFEST_PATH == os.path.abspath("unified_root/index.json")
 
 
 def test_data_block_omitting_targets_means_joint_file(base_config_paths: dict) -> None:
@@ -379,7 +420,7 @@ def test_data_block_omitting_targets_means_joint_file(base_config_paths: dict) -
     content = UNIFIED_DATA_CONFIG_CONTENT.replace("        targets: targets_dir\n", "")
     config = Config(**_write_config(base_config_paths, content))
 
-    assert config.STATIC_SOURCE == "unified_root/static_dir"
+    assert config.STATIC_SOURCE == os.path.abspath("unified_root/static_dir")
     assert config.TARGETS_SOURCE is None
 
 
@@ -387,8 +428,8 @@ def test_legacy_flat_keys_still_resolve_without_a_data_block(base_config_paths: 
     config = Config(**base_config_paths)
 
     assert config.DATA_FOLDER == "base_folder"
-    assert config.STATIC_SOURCE == "base_folder/base_static.csv"
-    assert config.TARGETS_SOURCE == "base_folder/base_targets.csv"
+    assert config.STATIC_SOURCE == os.path.abspath("base_folder/base_static.csv")
+    assert config.TARGETS_SOURCE == os.path.abspath("base_folder/base_targets.csv")
 
 
 def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths: dict) -> None:
@@ -400,7 +441,7 @@ def test_data_file_is_not_rebound_after_static_path_is_derived(base_config_paths
 
     assert config.DATA_FILE == "base_data.csv"
     assert config.STATIC_FEATURES_FILE == "base_static.csv"
-    assert config.STATIC_CSV_PATH == "base_folder/base_static.csv"
+    assert config.STATIC_CSV_PATH == os.path.abspath("base_folder/base_static.csv")
 
 
 @pytest.mark.parametrize("key", ["timeseries_file", "timeseries_csv_path"])
@@ -411,7 +452,7 @@ def test_both_timeseries_key_spellings_resolve(base_config_paths: dict, key: str
     )
     config = Config(**_write_config(base_config_paths, content))
 
-    assert config.TIMESERIES_SOURCE == "base_folder/ts.csv"
+    assert config.TIMESERIES_SOURCE == os.path.abspath("base_folder/ts.csv")
 
 
 # --- lightning registry `defaults:` -------------------------------------------------------------
@@ -539,13 +580,13 @@ def test_every_neighbouring_file_becomes_an_entry(base_config_paths: dict) -> No
         {
             "defaults.yml": "defaults:\n  modeltype: dl\n",
             "soil_cnn.yml": "soil_cnn:\n  enabled: true\n",
-            "soil_graph.yml": "soil_graph:\n  enabled: false\n",
+            "soil_cnn_small.yml": "soil_cnn_small:\n  enabled: false\n",
         },
     )
 
     registry = Config(**paths).LIGHTNING_MODEL_REGISTRY
 
-    assert set(registry) == {"soil_cnn", "soil_graph"}
+    assert set(registry) == {"soil_cnn", "soil_cnn_small"}
     assert all(entry["modeltype"] == "dl" for entry in registry.values())
 
 
@@ -606,3 +647,159 @@ def test_explain_switch_honours_an_env_override(
 
     assert config.EXPLAIN_ENABLED is False
     assert config.EXPLAIN_MAX_SAMPLES == 50
+
+
+# --- shipped configs and their dotted paths ---------------------------------------------------
+# Every dotted path shipped in configs/ must resolve.
+#
+# Module paths inside YAML are resolved at runtime, so a file move that misses them fails only
+# once training starts. These tests catch that at collection time instead.
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONFIGS_ROOT = PROJECT_ROOT / "configs"
+
+
+def _resolve(dotted_path: str):
+    module_path, attr_name = dotted_path.rsplit(".", 1)
+    return getattr(importlib.import_module(module_path), attr_name)
+
+
+def _enabled_lightning_entries() -> list[tuple[str, dict]]:
+    from config import load_lightning_registry
+
+    registry = load_lightning_registry(str(CONFIGS_ROOT / "lightning" / "models" / "defaults.yml"))
+    return [(name, spec) for name, spec in registry.items() if spec.get("enabled", False)]
+
+
+def _sklearn_model_entries() -> list[tuple[str, dict]]:
+    """All entries, enabled or not - these are third-party paths that must stay valid."""
+    registry = yaml.safe_load((CONFIGS_ROOT / "sklearn" / "model_registry.yml").read_text())
+    return list(registry.items())
+
+
+@pytest.mark.parametrize("name,spec", _enabled_lightning_entries())
+@pytest.mark.parametrize("key", ["import_path", "datamodule_import_path"])
+def test_enabled_lightning_registry_paths_resolve(name: str, spec: dict, key: str) -> None:
+    assert _resolve(spec[key]) is not None, f"{name}.{key} does not resolve"
+
+
+@pytest.mark.parametrize("name,spec", _sklearn_model_entries())
+def test_sklearn_model_registry_paths_resolve(name: str, spec: dict) -> None:
+    assert _resolve(spec["import_path"]) is not None, f"{name}.import_path does not resolve"
+
+
+def test_clustering_strategy_class_path_resolves() -> None:
+    sklearn_config = yaml.safe_load((CONFIGS_ROOT / "sklearn" / "config.yml").read_text())
+    class_path = sklearn_config["CLUSTERING_STRATEGY"]["class_path"]
+
+    from yg_eo_soilnet.clustering_utils import BaseSpatialClusterStrategy
+
+    assert issubclass(_resolve(class_path), BaseSpatialClusterStrategy)
+
+
+# --- the shipped configs must actually load ---------------------------------
+# A dangling YAML anchor in data_spec.yml once broke `python main.py` at startup while the suite
+# stayed green, because every test builds its own config fixture instead of reading these files.
+
+
+def test_shipped_configs_load() -> None:
+    from config import Config
+
+    config = Config(config_path=str(CONFIGS_ROOT / "main_config.yml"))
+
+    assert config.TARGET_COLUMNS, "TARGET_COLUMNS must not be empty"
+    assert config.DATA_FOLDER
+
+
+def test_active_targets_are_declared_as_labels() -> None:
+    """TARGET_COLUMNS should be a subset of LABEL_COLUMNS; both are excluded from features anyway."""
+    from config import Config
+
+    config = Config(config_path=str(CONFIGS_ROOT / "main_config.yml"))
+
+    undeclared = sorted(set(config.TARGET_COLUMNS) - set(config.LABEL_COLUMNS))
+    assert not undeclared, f"targets missing from LABEL_COLUMNS: {undeclared}"
+
+
+# --- module paths -----------------------------------------------------------------------------
+
+
+
+
+
+# --- uncertainty interval block ---------------------------------------------------------------
+# The uncertainty interval block: read from the config, legacy spellings included.
+
+
+def _config_with(tmp_path, uncertainty_yaml: str):
+    """A real Config over a minimal tree, reusing this file's fixture content.
+
+    Building the whole tree matters: Config resolves its sub-configs relative to the main file, so
+    a one-key stub raises before it ever reaches the uncertainty block.
+    """
+    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
+    (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
+    (tmp_path / "registry.yml").write_text("enabled: true\n")
+    (tmp_path / "lightning_registry.yml").write_text(MOCK_LIGHTNING_REGISTRY)
+
+    config_path = tmp_path / "config.yml"
+    config_path.write_text(
+        "common:\n"
+        "    DATA_SPEC_PATH: data_spec.yml\n"
+        "    SKLEARN_CONFIG_PATH: sklearn.yml\n"
+        "    LIGHTNING_CONFIG_PATH: lightning.yml\n"
+        "    SKLEARN_REGISTRY_PATH: registry.yml\n"
+        "    LIGHTNING_REGISTRY_PATH: lightning_registry.yml\n"
+        + uncertainty_yaml
+    )
+    return Config(
+        config_path=str(config_path),
+        registry_path=str(tmp_path / "registry.yml"),
+        lightning_registry_path=str(tmp_path / "lightning_registry.yml"),
+    )
+
+
+def test_the_interval_block_is_read_from_the_config(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        interval:
+            method: sigma
+            k: 2.0
+""")
+    assert config.UNCERTAINTY_INTERVAL_METHOD == "sigma"
+    assert config.UNCERTAINTY_INTERVAL_K == 2.0
+
+
+def test_a_config_predating_the_interval_block_still_works(tmp_path):
+    """`calibration.method` is what configs in the wild set; it must keep resolving."""
+    config = _config_with(tmp_path, """    uncertainty:
+        calibration:
+            method: split_conformal
+            alpha: 0.10
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
+    assert config.UNCERTAINTY_ALPHA == pytest.approx(0.10)
+
+
+def test_the_legacy_none_still_means_none(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        calibration:
+            method: none
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "none"
+
+
+def test_the_interval_block_wins_over_the_legacy_key(tmp_path):
+    config = _config_with(tmp_path, """    uncertainty:
+        interval:
+            method: gaussian
+        calibration:
+            method: split_conformal
+""")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "gaussian"
+
+
+def test_the_default_is_conformal_when_nothing_is_configured(tmp_path):
+    config = _config_with(tmp_path, "")
+    assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"

@@ -142,16 +142,23 @@ def test_every_stem_has_a_declared_direction_and_space() -> None:
         assert f"{stem}_test" in METRIC_SPACE
 
 
-def test_metric_space_separates_original_units_from_standardized_log1p() -> None:
-    spaces = metric_space_for(["rmse_test", "r2_test", "test_loss", "test_r2"])
-
-    assert spaces["rmse_test"] == "original_units"
-    assert spaces["r2_test"] == "original_units"
-    # The LightningModule computes these against the transformed target, and they keep their names
-    # because early stopping, checkpointing and the HPO objective all reference them.
-    assert spaces["test_loss"] == "standardized_log1p"
-    assert spaces["test_r2"] == "standardized_log1p"
-
-
-def test_unknown_metric_names_are_reported_rather_than_dropped() -> None:
-    assert metric_space_for(["something_new"]) == {"something_new": "unknown"}
+@pytest.mark.parametrize(
+    "name, space",
+    [
+        ("rmse_test", "original_units"),
+        ("r2_test", "original_units"),
+        # The LightningModule computes these against the transformed target, and they keep their
+        # names because early stopping, checkpointing and the HPO objective all reference them.
+        ("test_loss", "standardized_log1p"),
+        ("test_r2", "standardized_log1p"),
+        # A per-target suffix resolves to its stem's space, for the point and interval metrics alike.
+        ("rmse_test_clay_pct", "original_units"),
+        ("val_r2_clay_pct", "standardized_log1p"),
+        ("picp_test_clay_pct", "original_units"),
+        ("mpiw_test_clay_pct", "original_units"),
+        # Reported, not dropped: a visible gap rather than a plausible-looking default.
+        ("something_new", "unknown"),
+    ],
+)
+def test_metric_space_for(name, space) -> None:
+    assert metric_space_for([name]) == {name: space}

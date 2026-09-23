@@ -1,7 +1,9 @@
-"""Declarative search spaces: YAML in, Optuna suggestions out.
+"""The YAML :term:`search space`: which settings to try, and between what limits.
 
-A search space is data, not code, and it lives beside the registry it tunes rather than inside any
-model class. Model modules stay completely unaware that HPO exists.
+A search space is data rather than code, and it lives beside the model list it tunes, so the models
+themselves know nothing about tuning. Each entry names a setting by its path in the model-list entry
+(``model.learning_rate``), how to draw it (a range, a choice, a log scale), and optionally a
+condition under which it applies at all.
 """
 
 from __future__ import annotations
@@ -47,7 +49,7 @@ FINGERPRINT_CHARS = 6
 
 
 def describe_derive(entry: Any) -> str:
-    """A stable one-line rendering of a `derive:` entry, options included."""
+    """A one-line rendering of a ``derive:`` entry, for recording with the study."""
     name, options = split_derive_entry(entry)
     if not options:
         return name
@@ -57,12 +59,21 @@ def describe_derive(entry: Any) -> str:
 
 @dataclass(frozen=True)
 class Objective:
-    """What a study optimizes, and the Lightning monitor/mode that must agree with it."""
+    """What a study is trying to make better, and which score it watches.
+
+    Attributes
+    ----------
+    metric : str
+        The score, usually ``val_loss``.
+    direction : str
+        ``"minimize"`` or ``"maximize"``.
+        """
 
     metric: str = DEFAULT_OBJECTIVE_METRIC
     direction: str = DEFAULT_OBJECTIVE_DIRECTION
 
     def __post_init__(self) -> None:
+        """Check the direction is one of the two, and the metric is named."""
         if self.direction not in DIRECTIONS:
             raise ValueError(
                 f"objective.direction must be one of {', '.join(sorted(DIRECTIONS))}; got {self.direction!r}."
@@ -82,11 +93,12 @@ class Objective:
 
     @property
     def mode(self) -> str:
-        """`"min"` or `"max"`, as EarlyStopping and ModelCheckpoint spell it."""
+        """The direction as early stopping spells it: ``"min"`` or ``"max"``."""
         return DIRECTIONS[self.direction]
 
     @classmethod
     def from_mapping(cls, mapping: Mapping[str, Any] | None) -> "Objective":
+        """Read an objective from its YAML block."""
         mapping = mapping or {}
         return cls(
             metric=str(mapping.get("metric", DEFAULT_OBJECTIVE_METRIC)),
@@ -96,7 +108,23 @@ class Objective:
 
 @dataclass(frozen=True)
 class Distribution:
-    """One searched parameter, addressed by its dotted registry path."""
+    """One setting to search, and how to draw it.
+
+    Attributes
+    ----------
+    path : str
+        Where it goes in the model-list entry, such as ``model.dropout``.
+    kind : str
+        How to draw it: a number between limits, a choice from a list, and so on.
+    low, high : float, optional
+        The limits.
+    choices : list, optional
+        The values to choose between.
+    log : bool
+        Draw across orders of magnitude rather than evenly - right for a learning rate.
+    when : dict, optional
+        Draw it only in trials where the named settings took these values.
+        """
 
     dotted: str
     kind: str
@@ -105,6 +133,7 @@ class Distribution:
 
     @classmethod
     def from_mapping(cls, dotted: str, mapping: Mapping[str, Any]) -> "Distribution":
+        """Read one searched setting from its YAML block."""
         if not isinstance(mapping, Mapping):
             raise ValueError(f"Search space entry {dotted!r} must be a mapping, e.g. {{type: float, low: 0, high: 1}}.")
         spec = dict(mapping)
@@ -137,14 +166,14 @@ class Distribution:
         return cls(dotted=dotted, kind=kind, spec=spec, when=when)
 
     def applies(self, chosen: Mapping[str, Any]) -> bool:
-        """True when every `when:` guard matches what has already been drawn.
+        """Whether this setting is drawn in this trial, given what has been drawn already.
 
-        A guard on an undrawn parameter is False, not an error at this point: the referenced
-        parameter may itself have been guarded out this trial.
-        """
+        A condition on a setting that was itself not drawn counts as not applying, rather than as an error.
+                """
         return all(dotted in chosen and chosen[dotted] == expected for dotted, expected in self.when.items())
 
     def suggest(self, trial: optuna.Trial) -> Any:
+        """Draw a value for this trial."""
         if self.kind == "categorical":
             return trial.suggest_categorical(self.dotted, self.spec["choices"])
         low, high, step = self.spec["low"], self.spec["high"], self.spec.get("step")
@@ -156,6 +185,7 @@ class Distribution:
         return trial.suggest_float(self.dotted, float(low), float(high), step=float(step))
 
     def describe(self) -> str:
+        """A one-line rendering of this setting, for recording with the study."""
         if self.kind == "categorical":
             body = "|".join(str(choice) for choice in self.spec["choices"])
         else:
@@ -169,19 +199,19 @@ class Distribution:
 
 
 def load_search_spaces_document(path: str) -> dict:
-    """Load the search spaces at `path`, one entry per registry model.
+    """Read the search spaces, one per model.
 
-    `path` may be any of three things, so where the spaces live is a matter of what you point at
-    rather than a filename the loader insists on:
+    Parameters
+    ----------
+    path : str
+        A file, a folder of files, or a folder containing the file - so where the spaces live is a
+        matter of what you point at.
 
-      a folder          every .yml/.yaml in it is read - configs/lightning/search_spaces/
-      an existing file  it is read, and a folder of the same base name beside it is merged in too
-      a missing file    only that same-base-name folder is read
-
-    The folder is derived from the path as a string, so the file it is named after does not have to
-    exist: pointing at configs/lightning/search_spaces.yml finds configs/lightning/search_spaces/
-    either way, and both forms load the same spaces.
-    """
+    Returns
+    -------
+    dict
+        Model name to its search space, as read from the YAML.
+        """
     document: dict = {}
     if os.path.isdir(path):
         split_dir = path
@@ -217,7 +247,22 @@ def load_search_spaces_document(path: str) -> dict:
 
 @dataclass
 class SearchSpace:
-    """A whole study's declaration: what to optimize, what to pin, and what to search."""
+    """A whole study's declaration: what to improve, what to fix, and what to search.
+
+    Attributes
+    ----------
+    entry : str
+        Which model in the model list it tunes.
+    objective : Objective
+        What to make better.
+    fixed : dict
+        Settings pinned for every trial.
+    params : list of Distribution
+        Settings to search.
+    constraints : list
+        Named hooks for settings that depend on one another; see
+        :mod:`yg_eo_soilnet.hpo.constraints`.
+        """
 
     entry: str
     objective: Objective
@@ -231,6 +276,7 @@ class SearchSpace:
 
     @classmethod
     def from_mapping(cls, entry: str, mapping: Mapping[str, Any]) -> "SearchSpace":
+        """Read a search space from its YAML block."""
         unknown = sorted(set(mapping) - _SPACE_KEYS)
         if unknown:
             raise ValueError(
@@ -285,6 +331,7 @@ class SearchSpace:
 
     @classmethod
     def from_yaml(cls, path: str, entry: str) -> "SearchSpace":
+        """Read one model's search space from a file or folder."""
         document = load_search_spaces_document(path)
         if entry not in document:
             available = ", ".join(sorted(document)) or "(none)"
@@ -292,7 +339,7 @@ class SearchSpace:
         return cls.from_mapping(entry, document[entry] or {})
 
     def suggest(self, trial: optuna.Trial) -> dict[str, Any]:
-        """Draw one full set of overrides: the pinned values, then the searched ones."""
+        """Draw one full set of settings for a trial: the pinned ones, then the searched ones."""
         chosen: dict[str, Any] = dict(self.fixed)
         for distribution in self.distributions:
             if distribution.applies(chosen):
@@ -302,6 +349,7 @@ class SearchSpace:
         return {key: to_builtin(value) for key, value in chosen.items()}
 
     def make_sampler(self) -> optuna.samplers.BaseSampler:
+        """Build the strategy that chooses what to try next."""
         spec = dict(self.sampler_spec)
         name = str(spec.pop("name", "tpe")).lower()
         if name == "tpe":
@@ -311,6 +359,7 @@ class SearchSpace:
         raise ValueError(f"Unknown sampler {name!r}; expected 'tpe' or 'random'.")
 
     def make_pruner(self) -> optuna.pruners.BasePruner:
+        """Build the rule that abandons a trial going nowhere."""
         spec = dict(self.pruner_spec)
         name = str(spec.pop("name", "median")).lower()
         if name == "median":
@@ -322,7 +371,7 @@ class SearchSpace:
         raise ValueError(f"Unknown pruner {name!r}; expected 'median', 'hyperband' or 'none'.")
 
     def describe(self) -> dict[str, str]:
-        """A flat, loggable summary of the space - used as MLflow params on the study run."""
+        """A flat summary of the space, recorded with the study's run."""
         described = {f"space.{distribution.dotted}": distribution.describe() for distribution in self.distributions}
         described.update({f"fixed.{key}": str(value) for key, value in self.fixed.items()})
         if self.derive:
@@ -330,16 +379,11 @@ class SearchSpace:
         return described
 
     def fingerprint(self) -> str:
-        """A digest of everything that makes two trials comparable.
+        """A short digest of everything that makes two trials comparable - the :term:`fingerprint`.
 
-        Optuna resumes a study by name, and the default name is derived from this, so editing a
-        bound, a metric, a pinned value or a derive hook starts a clean study instead of appending
-        incomparable trials to the old leaderboard - which is what `best_trial`, the exported YAML
-        and every plot are read off.
-
-        Sampler and pruner are deliberately excluded. They change HOW the space is searched, not what
-        a recorded value means, so swapping TPE for random or retuning the pruner still resumes.
-        """
+        The study's name ends with it, so editing a limit, the objective or a pinned value starts a new
+        study rather than mixing trials that were not run under the same rules.
+                """
         payload = {
             "metric": self.objective.metric,
             "direction": self.objective.direction,

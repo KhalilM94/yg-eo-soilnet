@@ -1,13 +1,9 @@
-"""Reusable tabular blocks: learned entity embeddings plus a static feature encoder.
+"""The branch that reads a point's covariates, numeric and categorical alike.
 
-Plain ``nn.Module``s, deliberately not ``LightningModule``s, for the same reason
-``temporal_cnn_encoders`` is: a LightningModule cannot be composed into another model, and this block
-is a part of the calendar-grid CNN rather than a model of its own. Everything training-related -
-loss, optimizer, target inversion - stays in ``SoilRegressionLightningBase``.
-
-The counterpart on the data side is ``datamodules.categorical``, which produces the integer codes
-these embeddings look up. The contract between them is narrow on purpose: an ``(B, K)`` int64 tensor
-whose column *i* holds values in ``[0, cardinalities[i])``, with 0 reserved for unknown and missing.
+Each category label becomes an :term:`embedding` - a learned vector, looked up by the label's code -
+which is joined to the standardized numeric covariates and summarized by a few layers. The codes
+come from :mod:`yg_eo_soilnet.datamodules.categorical`, which numbers the labels from the training
+points; code 0 means "unknown or missing".
 """
 
 from __future__ import annotations
@@ -25,14 +21,32 @@ DEFAULT_EMBEDDING_MAX_DIM = 50
 
 
 def embedding_dim_for(cardinality: int, max_dim: int = DEFAULT_EMBEDDING_MAX_DIM) -> int:
-    """Standard entity-embedding heuristic: ``min(max_dim, (cardinality + 1) // 2)``.
+    """Choose how wide the embedding of a category column should be.
 
-    Half the cardinality gives a small column a nearly one-hot-sized space and forces a large one to
-    share structure, which is the whole point of embedding it rather than one-hot encoding it. The
-    cap stops a high-cardinality column from dominating the concatenated static vector.
+    Half its number of codes, capped at ``max_dim``: a column with few labels gets nearly a column
+    per label, while one with many is forced to share structure between them, which is the point of
+    an embedding. The cap stops a column with hundreds of labels dominating everything else.
 
-    ``cardinality`` is the embedding's row count - the fitted vocabulary **plus** its reserved OOV
-    slot - so this matches what ``CategoricalEncoder.cardinalities`` reports.
+    Parameters
+    ----------
+    cardinality : int
+        How many codes the column has: its labels plus the reserved one.
+    max_dim : int, default 50
+        The widest embedding this will return.
+
+    Returns
+    -------
+    int
+
+    Raises
+    ------
+    ValueError
+        If ``cardinality`` is not positive.
+
+    Examples
+    --------
+    >>> embedding_dim_for(5), embedding_dim_for(400)
+    (3, 50)
     """
     cardinality = int(cardinality)
     if cardinality <= 0:
@@ -47,11 +61,36 @@ def resolve_embedding_dims(
     max_dim: int = DEFAULT_EMBEDDING_MAX_DIM,
     feature_names: Optional[Sequence[str]] = None,
 ) -> list[int]:
-    """Per-column embedding widths from ``auto``, a scalar, a per-column sequence or a mapping.
+    """Work out each category column's embedding width from the configured setting.
 
-    Mirrors the ``_per_modality_value`` contract the sequence model already uses for its temporal
-    branch: a scalar applies one width everywhere, and anything per-column must cover every column
-    rather than silently defaulting the ones it forgot.
+    Parameters
+    ----------
+    cardinalities : sequence of int
+        How many codes each column has.
+    embedding_dims : None, "auto", int, sequence or mapping, optional
+        ``None`` or ``"auto"`` chooses each width with :func:`embedding_dim_for`; one number applies
+        the same width everywhere; a list gives one width per column, in order; a mapping gives one
+        per column name, and must name them all.
+    max_dim : int, default 50
+        The cap used by ``"auto"``.
+    feature_names : sequence of str, optional
+        The column names, for the mapping form and for the error messages.
+
+    Returns
+    -------
+    list of int
+
+    Raises
+    ------
+    ValueError
+        If a per-column setting does not cover every column.
+
+    Examples
+    --------
+    >>> resolve_embedding_dims([5, 400])
+    [3, 50]
+    >>> resolve_embedding_dims([5, 400], 8)
+    [8, 8]
     """
     cardinalities = [int(value) for value in cardinalities]
     names = list(feature_names) if feature_names is not None else [str(i) for i in range(len(cardinalities))]
@@ -85,10 +124,28 @@ def resolve_embedding_dims(
 
 
 class EntityEmbeddingBlock(nn.Module):
-    """One ``nn.Embedding`` per categorical feature, concatenated into a single vector.
+    """One :term:`embedding` table per category column, joined into a single vector.
 
-    Individual tables rather than one shared one: the columns have unrelated vocabularies, and a
-    shared table would force ``texture_20cm`` and ``landform_class`` to compete for the same rows.
+    A table each, not one shared table: the columns have unrelated labels, and sharing would make a
+    soil texture and a landform class compete for the same rows.
+
+    Parameters
+    ----------
+    cardinalities : sequence of int
+        How many codes each column has.
+    embedding_dims : optional
+        The widths; see :func:`resolve_embedding_dims`.
+    dropout : float, default 0.0
+        Dropout applied to the joined vector.
+    max_dim : int, default 50
+        The cap used when the widths are chosen automatically.
+    feature_names : sequence of str, optional
+        The column names, used in the error messages.
+
+    Raises
+    ------
+    ValueError
+        If a column has no codes, or there are not as many names as columns.
     """
 
     def __init__(
@@ -123,18 +180,33 @@ class EntityEmbeddingBlock(nn.Module):
             nn.Embedding(cardinality, dim)
             for cardinality, dim in zip(self.cardinalities, self.embedding_dims)
         )
-        # Dropout on the concatenated vector, not per table: zeroing whole coordinates of the joint
-        # categorical representation is the regularizer this is meant to be, whereas dropping inside
-        # a single lookup just adds noise to one feature's code.
+        # On the joined vector, not inside one table: dropping parts of the whole categorical
+        # representation regularizes, while dropping inside one lookup only adds noise to it.
         self.dropout = nn.Dropout(float(dropout))
         self.output_dim = int(sum(self.embedding_dims))
 
     @property
     def num_features(self) -> int:
+        """How many category columns this block embeds."""
         return len(self.embeddings)
 
     def forward(self, x_categorical: torch.Tensor) -> torch.Tensor:
-        """``(B, K)`` int64 indices -> ``(B, sum(embedding_dims))``."""
+        """Look up each column's code and join the vectors.
+
+        Parameters
+        ----------
+        x_categorical : torch.Tensor of shape (batch, n_columns)
+            The codes.
+
+        Returns
+        -------
+        torch.Tensor of shape (batch, sum of the widths)
+
+        Raises
+        ------
+        ValueError
+            If the shape is not the one this block was built for.
+        """
         if self.num_features == 0:
             return x_categorical.new_zeros((x_categorical.size(0), 0), dtype=torch.float32)
 
@@ -148,9 +220,8 @@ class EntityEmbeddingBlock(nn.Module):
                 f"{self.num_features} feature(s) ({', '.join(self.feature_names)})"
             )
 
-        # Values are guaranteed in range by CategoricalEncoder (0 is the reserved slot), so there is
-        # no bounds check here: it would cost a device sync on every batch to re-verify an invariant
-        # the producing side already holds.
+        # The codes are in range by construction, so they are not checked again here: doing so
+        # would cost time on every batch.
         indices = x_categorical.long()
         embedded = [
             embedding(indices[:, column]) for column, embedding in enumerate(self.embeddings)
@@ -159,6 +230,7 @@ class EntityEmbeddingBlock(nn.Module):
 
 
 def _build_continuous_norm(kind: str, num_features: int) -> nn.Module:
+    """Build the normalization applied to the numeric covariates: none, batch or layer."""
     key = str(kind).lower()
     if key == "none":
         return nn.Identity()
@@ -170,19 +242,44 @@ def _build_continuous_norm(kind: str, num_features: int) -> nn.Module:
 
 
 class TabularStaticEncoder(nn.Module):
-    """Entity embeddings + scaled continuous features -> one static representation.
+    """Summarize a point's covariates: category embeddings joined to the numeric columns.
 
-    Replaces the near-identical private ``_build_static_encoder`` in the sequence and CNN modules.
-    The two differ only in activation family and in whether they project to a separate fusion width,
-    both of which are parameters here, so each keeps its current output shape exactly.
+    Parameters
+    ----------
+    num_continuous : int
+        How many numeric covariates come in, the measured-or-filled flags included.
+    hidden_dims : sequence of int
+        Widths of the summarizing layers: ``[64]`` is one layer, ``[128, 64]`` two.
+    output_dim : int, optional
+        Width of a final layer. Left out, the summary is ``hidden_dims[-1]`` wide.
+    cardinalities : sequence of int, optional
+        How many codes each category column has.
+    embedding_dims : optional
+        The embedding widths; see :func:`resolve_embedding_dims`.
+    embedding_dropout : float, default 0.0
+        Dropout on the joined embeddings.
+    embedding_max_dim : int, default 50
+        Cap on an automatically chosen embedding width.
+    feature_names : sequence of str, optional
+        The category column names.
+    dropout : float, default 0.1
+        Dropout in the summarizing layers.
+    activation : {"relu", "gelu"}, default "relu"
+        The activation function.
+    use_layer_norm : bool, default True
+        Normalize inside each layer.
+    continuous_norm : {"none", "batch", "layer"}, default "none"
+        Extra normalization of the numeric columns. They are already standardized by the datamodule,
+        so ``"none"`` is the default.
+    mlp : bool, default True
+        With ``False`` the covariates are passed on unsummarized, one value per column, which is
+        what attention :term:`fusion` reads.
 
-    ``output_dim=None`` means "no projection": the representation is ``hidden_dims[-1]`` wide. Passing
-    an int appends a final ``Linear`` to that width.
-
-    ``hidden_dims`` is a list because this block is an MLP like any other, not a fixed projection: a
-    single width is ``[64]``, and a deeper static branch is ``[128, 64]``. Every block here carries
-    its norm and its dropout, including the last - unlike an output head, nothing downstream is a
-    readout whose magnitude they would erase.
+    Raises
+    ------
+    ValueError
+        If there are no covariates at all, if ``hidden_dims`` is empty while ``mlp`` is true, or if
+        ``output_dim`` is given with ``mlp=False``.
     """
 
     def __init__(
@@ -208,8 +305,8 @@ class TabularStaticEncoder(nn.Module):
             raise ValueError(f"num_continuous must be non-negative, got {num_continuous}")
 
         self.hidden_dims = [int(width) for width in hidden_dims]
-        # mlp=False stops at the raw [continuous_norm(x), embedded] block: what an attention fusion
-        # cuts one token per column from. hidden_dims is then unused, so an empty list is allowed.
+        # mlp=False stops at the joined covariates, which attention fusion splits one per column.
+        # The widths are then unused, so an empty list is allowed.
         self.mlp = bool(mlp)
         if self.mlp and not self.hidden_dims:
             raise ValueError(
@@ -232,9 +329,8 @@ class TabularStaticEncoder(nn.Module):
                 "categorical ones. Callers with no static features should skip this encoder."
             )
 
-        # Applied to the continuous block alone. The datamodule already standardizes it train-only,
-        # so 'none' is the default; 'batch' is the classic entity-embedding recipe and is safe here
-        # because the train loader drops a trailing batch of one.
+        # The numeric columns only. They are already standardized from the training points, so
+        # none is the default.
         self.continuous_norm = (
             _build_continuous_norm(continuous_norm, self.num_continuous)
             if self.num_continuous > 0
@@ -249,8 +345,7 @@ class TabularStaticEncoder(nn.Module):
                 dropout=float(dropout),
                 use_layer_norm=use_layer_norm,
                 activation=activation,
-                # Every block is a full block: this branch feeds a fusion, not a readout, so there is
-                # no magnitude for a trailing norm or dropout to strip.
+                # This branch feeds the fusion, not a prediction, so every layer is a full one.
                 norm_final=True,
                 dropout_final=True,
             )
@@ -258,20 +353,36 @@ class TabularStaticEncoder(nn.Module):
         else:
             if output_dim is not None:
                 raise ValueError("output_dim projects the MLP's output, and mlp=False builds no MLP.")
-            # nn.Identity registers nothing, so this has exactly the state_dict keys of an encoder
-            # whose MLP was swapped for an Identity after construction - what per_feature attention
-            # tokens used to do.
+            # A pass-through adds nothing to the saved weights.
             self.encoder = nn.Identity()
             self.output_dim = self.input_dim
 
     @property
     def embedding_dims(self) -> list[int]:
+        """The width of each category column's embedding."""
         return list(self.embeddings.embedding_dims)
 
     def forward(
         self, x_static: torch.Tensor, x_categorical: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        """``(B, num_continuous)`` float + ``(B, K)`` int64 -> ``(B, output_dim)``."""
+        """Summarize one batch of covariates.
+
+        Parameters
+        ----------
+        x_static : torch.Tensor of shape (batch, num_continuous)
+            The standardized numeric covariates.
+        x_categorical : torch.Tensor of shape (batch, n_categories), optional
+            The category codes; required when the encoder has category columns.
+
+        Returns
+        -------
+        torch.Tensor of shape (batch, output_dim)
+
+        Raises
+        ------
+        KeyError
+            If the batch carries no category codes but the encoder needs them.
+        """
         if self.embeddings.num_features and x_categorical is None:
             raise KeyError(
                 f"This encoder embeds {self.embeddings.num_features} categorical feature(s) "
@@ -285,13 +396,10 @@ class TabularStaticEncoder(nn.Module):
     def forward_with_embedding(
         self, x_static: torch.Tensor, embedded: Optional[torch.Tensor]
     ) -> torch.Tensor:
-        """Same as :meth:`forward` but taking an ALREADY-EMBEDDED categorical block.
+        """Like :meth:`forward`, but given the category vectors instead of their codes.
 
-        Split out for gradient-based attribution. Embedding lookups are indexed by int64 and are
-        not differentiable with respect to their input, so an explainer cannot perturb
-        ``x_categorical`` directly; it perturbs the embedding vectors instead and sums the
-        attribution back over each feature's slice. Passing the embedding in is what makes that
-        possible without duplicating this concatenation.
+        Used by the SHAP explanations: a code is looked up, not computed, so contributions cannot be
+        traced through it. They are traced through the vectors instead and added up per column.
         """
         parts: list[torch.Tensor] = []
         if self.num_continuous > 0:

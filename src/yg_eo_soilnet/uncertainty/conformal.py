@@ -1,19 +1,14 @@
-"""Split-conformal calibration: turning a model's sigma into an interval that actually covers.
+"""Turn a model's spread into an interval that really does contain what it claims.
 
-A raw ensemble standard deviation is not a prediction interval. Five members trained on the same
-data agree with each other far more than they agree with reality, so `mu +- 1.96 sigma` typically
-covers well under the 95% it claims - the number is a measure of disagreement, not of error.
+A raw ensemble spread is not a :term:`prediction interval`. Members trained on the same data agree
+with each other far more than they agree with reality, so "the average, plus or minus twice the
+spread" typically contains far fewer than the 95% of measurements it claims: the spread measures
+disagreement, not error.
 
-Split conformal fixes that with one scalar. Score every calibration point by how many of its own
-sigmas it missed by, take the appropriate order statistic of those scores, and scale every interval
-by it. The result covers at least 1-alpha of future points under exchangeability alone: no
-assumption that the residuals are Gaussian, and no assumption that the model is any good. A badly
-calibrated model gets wide intervals rather than wrong ones.
-
-This is also what makes a sklearn interval and a Lightning interval the same kind of object. The
-two families produce sigma by completely different mechanisms, but both are rescaled against their
-own held-out residuals, so `prediction_lower`/`prediction_upper` mean one thing across the run -
-the same property yg_eo_soilnet.metrics exists to protect for the point metrics.
+:term:`Conformal <conformal>` calibration fixes that by measurement. The model predicts points it
+was not trained on, and the intervals are scaled by whatever factor it takes for the promised share
+of those measurements to fall inside. The guarantee holds as long as new points resemble the
+calibration points.
 """
 
 from __future__ import annotations
@@ -37,11 +32,19 @@ MIN_RELIABLE_CALIBRATION_ROWS = 50
 
 @dataclass(frozen=True)
 class ConformalCalibrator:
-    """The scalar multiplier that makes an interval cover, plus how it was arrived at.
+    """The factor that makes an interval cover, and how it was arrived at.
 
-    Frozen and made of plain floats so it pickles into a model artifact without dragging a fitted
-    estimator or a dataframe along with it.
-    """
+    Attributes
+    ----------
+    q : float
+        What the spread is multiplied by.
+    alpha : float
+        The share of points allowed to fall outside; 0.05 promises 95% coverage.
+    n_calibration : int
+        How many held-back points it was fitted on.
+    target : str
+        Which target it belongs to.
+        """
 
     q: float
     alpha: float
@@ -53,16 +56,14 @@ class ConformalCalibrator:
 
     @property
     def nominal_coverage(self) -> float:
-        """The fraction of observations this interval claims to contain.
+        """The share of measurements this interval claims to contain.
 
-        Read by the metrics so ``coverage_error`` compares picp against what the interval actually
-        claims. Every interval estimator exposes this; for a sigma band it is NOT 1 - alpha, which
-        is the whole reason it is a property rather than a config lookup.
-        """
+        Compared against the share that actually fall inside, which is what ``coverage_error`` reports.
+                """
         return 1.0 - float(self.alpha)
 
     def intervals(self, mean: Any, sigma: Any) -> tuple[np.ndarray, np.ndarray]:
-        """``(lower, upper)`` for predictions in the SAME units the calibrator was fitted on."""
+        """The lower and upper bounds, in the units the calibrator was fitted on."""
         mean_array = np.asarray(mean, dtype=float)
         if self.normalized:
             half_width = self.q * np.maximum(np.asarray(sigma, dtype=float), 0.0)
@@ -71,7 +72,7 @@ class ConformalCalibrator:
         return mean_array - half_width, mean_array + half_width
 
     def to_dict(self) -> dict[str, Any]:
-        """Log-friendly provenance; every value is an MLflow-loggable scalar."""
+        """The calibrator as plain values, to record with the run."""
         return {
             "conformal_q": float(self.q),
             "conformal_alpha": float(self.alpha),
@@ -81,19 +82,11 @@ class ConformalCalibrator:
 
     @classmethod
     def from_dict(cls, payload: Any) -> Optional["ConformalCalibrator"]:
-        """Rebuild a calibrator from what :meth:`to_dict` wrote, or ``None`` if it is not in there.
+        """Rebuild a calibrator from what :meth:`to_dict` wrote, or None if it is not there.
 
-        Every value this class holds is a scalar and all four are written into
-        ``uncertainty/uncertainty_summary.json``, so a finished run carries enough to reconstruct
-        its calibrator exactly - the object itself is never serialised outside the logged model.
-        That is what lets ``replot.py`` redraw a reliability curve that grades the SAME conformal
-        procedure the run used. Without it the curve falls back to Gaussian z-multiples of the raw
-        sigma, which grades a different thing and draws a visibly different line.
-
-        Tolerant of a payload that is not a conformal summary - a run whose interval came from
-        ``SigmaInterval`` writes no ``conformal_q`` - because the caller's alternative is a
-        calibrator-less curve, not a failure.
-        """
+        Everything it holds is a plain number and all of it is written into
+        ``uncertainty/uncertainty_summary.json``, so a finished run carries enough to rebuild it exactly.
+                """
         if not isinstance(payload, dict) or "conformal_q" not in payload:
             return None
         try:
@@ -115,11 +108,26 @@ def fit_conformal(
     alpha: float = 0.05,
     logger: Any = None,
 ) -> ConformalCalibrator:
-    """Fit the calibrator on one target's held-out residuals.
+    """Fit the factor for one target, from how far its predictions actually fell.
 
-    One target at a time, like ``regression_metrics``. Pooling several would mix pH with g/kg into
-    a single multiplier that is correct for neither.
-    """
+    Parameters
+    ----------
+    y_true : array-like
+        The measured values of the held-back points.
+    y_pred : array-like
+        The predictions for them.
+    sigma : array-like
+        The predicted spread for them.
+    alpha : float, default 0.05
+        The share allowed to fall outside.
+    target : str, optional
+        The target's name.
+
+    Returns
+    -------
+    ConformalCalibrator or None
+        None when there are too few usable points to fit one.
+        """
     if not 0.0 < alpha < 1.0:
         raise ValueError(f"alpha must be in (0, 1); got {alpha}")
 
@@ -177,17 +185,11 @@ def fit_conformal(
 
 
 def _conformal_quantile(scores: np.ndarray, alpha: float) -> float:
-    """The ``ceil((n+1)(1-alpha)) / n`` empirical quantile of the conformity scores.
+    """The quantile of the calibration errors the guarantee rests on.
 
-    NOT ``np.quantile(scores, 1 - alpha)``. The finite-sample correction is what the coverage proof
-    rests on: the guarantee is about where a NEW point falls among the n calibration points, so the
-    rank is taken out of n+1, not n. At n=100 and alpha=0.05 the plain quantile takes rank 95 and
-    the corrected one takes rank 96 - a small difference in width, and the difference between a
-    proven bound and an approximation that under-covers slightly and always in the same direction.
-
-    When ``ceil((n+1)(1-alpha))`` exceeds n - too few calibration points to place the bound at all -
-    the level saturates at the maximum observed score, which is the widest honest answer available.
-    """
+    Slightly beyond the plain quantile, because the promise is about where a *new* point falls among
+    the calibration points, not among themselves.
+        """
     n_scores = int(scores.shape[0])
     rank = math.ceil((n_scores + 1) * (1.0 - alpha))
     if rank > n_scores:

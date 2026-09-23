@@ -1,11 +1,14 @@
-"""Model-agnostic Optuna hyperparameter search over the Lightning registry.
+"""Search automatically for a deep-learning model's best settings; the engine behind ``tune.py``.
 
-Nothing here knows about a specific model. A trial deep-copies one registry entry, overwrites its
-``init_args`` / ``datamodule_init_args`` / ``trainer_args``, and hands the result to the unmodified
-LightningConfigFactory - so every model the registry can already build is tunable, including ones
-added later.
+A :term:`study` tries one combination of settings after another - each attempt is a :term:`trial` -
+and keeps what works. Which settings to try, and between what limits, is declared in a YAML
+:term:`search space` beside the model list, so nothing here knows anything about a particular model:
+a trial copies one model-list entry, writes the drawn settings into it, and hands it to the ordinary
+model factory. Any model the project can build can be tuned.
 
-Entry point: ``tune.py`` at the repository root.
+Studies are kept in a small database file, so a search can be stopped, resumed, and run from several
+processes at once. The winner is written back out as a model-list file that ``main.py`` can train
+directly.
 """
 
 from yg_eo_soilnet.hpo.constraints import CONSTRAINTS, constraint

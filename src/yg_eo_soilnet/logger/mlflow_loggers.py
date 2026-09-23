@@ -1,3 +1,21 @@
+"""Record what a trained model produced: its settings, scores, figures, files and the model itself.
+
+Two classes, one per level of the run tree (see :doc:`/outputs`):
+
+:class:`ChildRunLogger`
+    Everything about one trained model: its settings, its scores on the test points, the
+    predicted-versus-measured figure, the table of test predictions, the saved model, and - when
+    they are switched on - the SHAP explanations, the uncertainty diagnostics and the per-point
+    predictions. A model predicting several targets records the model once and each target's
+    results in a :term:`sub-run` of its own.
+:class:`ParentRunLogger`
+    Everything about the run as a whole: the :term:`leaderboard` comparing every model, the
+    combined figures, and the combined per-point predictions.
+
+Both model families record the same things in the same places, so a scikit-learn model and a
+deep-learning model can be compared directly.
+"""
+
 from yg_eo_soilnet.utils import mlflow_rpiq_score
 from yg_eo_soilnet.plot_utils import plot_leaderboard_scatter, pred_obs_panel, create_parent_pred_obs
 from yg_eo_soilnet.artifacts import (
@@ -49,23 +67,19 @@ import tempfile
 from typing import Any, Mapping
 
 
-# Kept as a module constant because callers outside this file import it. It is now sourced from
-# ArtifactLayout so there is one definition of the tree.
+#: Where the table of test predictions is stored inside a run.
 EVAL_RESULTS_ARTIFACT_PATH = ArtifactLayout.EVAL_RESULTS
 
-# Tag marking an ensemble member's run. Members are children of the model run, and the leaderboard
-# prefers a run's grandchildren to the run itself, so without this the model's row would be replaced
-# by one row per member. Defined here as well as in the trainer because this module is the reader.
+#: Tag marking a sub-run as one :term:`ensemble` member. The leaderboard reads a model's sub-runs
+#: in preference to the model's own run, so without this a model would be replaced by its members.
 MEMBER_RUN_KIND = "ensemble_member"
 
 
 def _uncertainty_alpha(config) -> float:
-    """The miscoverage the configured interval actually implies.
+    """The share of points the configured interval expects to fall outside it.
 
-    Not simply UNCERTAINTY_ALPHA. A `sigma` band claims what k implies under a Normal - 0.683 at
-    k=1 - so grading it against 0.95 would report a perfectly good ±1σ band as under-covering by
-    0.27. This is the single funnel for the value, so every metric that compares against a nominal
-    level gets the right one.
+    Not simply ``uncertainty.alpha``: a plus-or-minus one-sigma band only claims to cover about 68%
+    of points, so grading it against a promised 95% would report a good band as far too narrow.
     """
     from yg_eo_soilnet.uncertainty.intervals import effective_alpha
 
@@ -77,30 +91,22 @@ def _uncertainty_alpha(config) -> float:
 
 
 def _scoring_runs(runs):
-    """The child runs that carry a score, with the ensemble members filtered out.
+    """The sub-runs that carry results, leaving out the :term:`ensemble` members.
 
-    Both readers below walk a model run's children and prefer them to the model run itself - which
-    is right for the per-target evaluation runs a joint fit produces, and wrong for ensemble
-    members. Without this filter a single-target model that gained five members would DISAPPEAR
-    from the leaderboard and be replaced by five rows carrying the same target and model name and
-    no test metrics at all. The `or [child]` fallback makes that silent: an empty list falls back
-    to the model run, a list of five members does not.
+    A model predicting several targets keeps each target's results in a sub-run, which is what the
+    leaderboard wants. An ensemble's members are sub-runs too, and are not: without this filter a
+    model would vanish from the leaderboard and be replaced by five member rows with no scores.
     """
     return [run for run in runs if run.data.tags.get("run_kind") != MEMBER_RUN_KIND]
 
 
 def _eval_results_filename(target: str, model_name: str) -> str:
-    """LEGACY per-run name, kept only so readers can resolve pre-rename runs."""
+    """The older name of a run's results table. For reading runs recorded earlier."""
     return ArtifactLayout.eval_results_filename(target, model_name)
 
 
 def _eval_results_artifact_paths(target: str, model_name: str) -> list[str]:
-    """Every path a reader should try for one run's eval CSV, current layout first.
-
-    Three generations coexist in ``mlruns/``: the stable ``eval_results/eval_results.csv`` written
-    now, the per-run ``eval_results/eval_results_<target>_<model>.csv`` written before the rename,
-    and the same file at the run root from older runs still.
-    """
+    """Every place a run's results table might be, newest layout first."""
     return candidate_artifact_paths(
         ArtifactLayout.EVAL_RESULTS,
         ArtifactLayout.EVAL_RESULTS_FILE,
@@ -108,11 +114,30 @@ def _eval_results_artifact_paths(target: str, model_name: str) -> list[str]:
     )
 
 class ChildRunLogger:
+    """Record everything one trained model produced, inside its own :term:`sub-run`.
+
+    Both families call it: :meth:`log_child_run` for a scikit-learn model and
+    :meth:`log_lightning_child_run` for a deep-learning one. Either way the run ends up with the
+    same things - the settings, the scores in the target's own units, the predicted-versus-measured
+    figure, the table of test predictions, and the saved model - so two models can be compared
+    whatever produced them. A model predicting several targets records itself once and opens a
+    sub-run per target for that target's results.
+
+    The run has to be open already; the trainer opens it, so that everything the training itself
+    reports lands in the right place.
+
+    Examples
+    --------
+    >>> with start_child_run("clay_pct_Ridge"):              # doctest: +SKIP
+    ...     ChildRunLogger().log_child_run(config=config, search=search, ...)
+    """
+
     def __init__(self):
         pass
 
     @staticmethod
     def _numeric_summary(series: pd.Series | None) -> dict[str, float]:
+        """Mean, spread, range, median and count of a column, ignoring anything unmeasured."""
         if series is None:
             return {}
 
@@ -131,6 +156,7 @@ class ChildRunLogger:
         }
 
     def _log_split_summary(self, bundle, evaluation_df: pd.DataFrame | None, target: str) -> None:
+        """Record how many points each split holds and how the target is distributed in each."""
         if bundle is None:
             return
 
@@ -150,15 +176,7 @@ class ChildRunLogger:
 
     @staticmethod
     def _as_target_frame(values):
-        """A one-column frame for a Series, the frame itself for a DataFrame.
-
-        The two families genuinely hold the target differently and always will: the Lightning
-        datamodule carries every target column at once, while the sklearn trainer fits one target at
-        a time and hands over that column alone (``data['y_train'][target]``). Normalizing here
-        rather than at the call site means any future caller gets it right for free - assuming the
-        DataFrame shape is exactly what broke every sklearn run with
-        ``'Series' object has no attribute 'columns'``.
-        """
+        """Return the targets as a table, whether one column or several arrived."""
         if isinstance(values, pd.Series):
             return values.to_frame(name=values.name if values.name is not None else "target")
         return values
@@ -169,15 +187,11 @@ class ChildRunLogger:
         evaluation_df: pd.DataFrame | None,
         target: str,
     ) -> None:
-        """One eval_results/split_summary.json shape for BOTH families.
+        """Write ``eval_results/split_summary.json``: the size and target spread of each split.
 
-        This used to be reachable only from the Lightning path - it early-returned without a
-        `bundle.datamodule` - so a sklearn run recorded nothing about what it held out. Now that the
-        two families share a split, the artifact they publish about it has to be comparable too.
-        The sklearn side has no `val` frame of its own: its fit pool is train ∪ val and it validates
-        by k-fold inside that pool, so what it reports under "train" is that whole pool.
-
-        Accepts a Series or a DataFrame per split; see :meth:`_as_target_frame`.
+        The same file for both families. A scikit-learn model has no validation split of its own -
+        it cross-validates inside the :term:`fit pool` - so what it reports under "train" is that
+        whole pool.
         """
         summary: dict[str, Any] = {}
 
@@ -224,6 +238,7 @@ class ChildRunLogger:
 
     @staticmethod
     def _resolve_run_target_label(evaluation_df: pd.DataFrame | None, fallback_target: str) -> str:
+        """The name of the :term:`target group` this run covers, read from its results table."""
         if evaluation_df is not None and "target_names" in evaluation_df.columns and not evaluation_df["target_names"].empty:
             encoded = str(evaluation_df["target_names"].iloc[0]).strip()
             if encoded:
@@ -236,6 +251,7 @@ class ChildRunLogger:
 
     @staticmethod
     def _resolve_target_names(evaluation_df: pd.DataFrame, fallback_target: str) -> list[str]:
+        """The individual targets in a results table, split back out of the group's name."""
         if "target_names" in evaluation_df.columns and not evaluation_df["target_names"].empty:
             encoded = str(evaluation_df["target_names"].iloc[0]).strip()
             if encoded:
@@ -255,12 +271,19 @@ class ChildRunLogger:
         return target_columns[:1] if target_columns else []
 
     def _iter_target_eval_frames(self, evaluation_df: pd.DataFrame, target: str, model_name: str):
+        """Split a results table into one table per target, each with a plain ``prediction`` column.
+
+        Yields
+        ------
+        frame : pandas.DataFrame
+        target_name : str
+        prediction_column : str
+            Which column of the original table the predictions came from.
+        """
         target_names = self._resolve_target_names(evaluation_df, target)
-        # is_prediction_column, not `startswith("prediction_")`. An uncertainty run's frame also
-        # carries prediction_std / prediction_lower / prediction_upper, and counting those as
-        # per-target prediction columns makes a SINGLE-target frame look multi-target: the branch
-        # below then looks for a prediction_<target> that does not exist, finds several candidates,
-        # gives up, and yields nothing - so the run logs no rmse_test and no picp_test at all.
+        # An uncertainty run's table also carries prediction_std, prediction_lower and
+        # prediction_upper; counting those as targets would make a single-target run look like
+        # several and leave it with no scores at all.
         prediction_columns = [
             column for column in evaluation_df.columns if is_prediction_column(column)
         ]
@@ -290,20 +313,20 @@ class ChildRunLogger:
             frame["model_name"] = model_name
             yield frame, target_name, prediction_column
 
-    # --- the shared run tree -------------------------------------------------
-    # One rule for both families: the shape of the tree follows the TARGET GROUP, not the framework.
-    # A group of one is a single flat run. A group of several is a model run - holding the fitted
-    # model, its params and its training curves - with one child per target holding that target's
-    # evaluation. Before this, sklearn was always flat and Lightning grew a third level as soon as a
-    # second target appeared, so the same experiment looked structurally different depending on
-    # which family produced it.
+    # --- the shape of the run tree -------------------------------------------
+    # The same for both families, and it follows the target group rather than the framework. One
+    # target is one flat run. Several targets give a model run - holding the model, its settings
+    # and its training curves - with one sub-run per target holding that target's results.
 
     def _log_per_target_runs(self, evaluation_df, target: str, model_name: str, log_one):
-        """Call ``log_one(frame, target_name)`` once per target, in the right run.
+        """Call ``log_one`` once per target, each inside the run that holds that target.
 
-        A group of one logs into the CURRENT run rather than opening a child: there is nothing to
-        fan out, and an extra level would make a single-target run's tree differ from every other
-        single-target run's. Returns ``[(target_name, log_one(...)), ...]``.
+        One target logs into the current run; several open a sub-run each.
+
+        Returns
+        -------
+        list of tuple
+            ``(target name, what log_one returned)``.
         """
         frames = []
         if evaluation_df is not None:
@@ -326,11 +349,12 @@ class ChildRunLogger:
     def _per_target_metrics(
         self, evaluation_df, target: str, model_name: str, alpha: float | None = None
     ) -> dict:
-        """Suffixed metrics for every target in the frame, plus their means.
+        """Score every target in the table, and average the scores across them.
 
-        The means carry the UNSUFFIXED names, which is what makes a joint run comparable with a
-        per-target one and what the champion promotion reads - it looks for a scalar `rmse_test`
-        and silently promotes nothing when the run has only suffixed keys.
+        Each target's scores are named after it (``rmse_test_clay_pct``); the averages keep the
+        plain names (``rmse_test``), which is what makes a model predicting several targets
+        comparable with one predicting a single target, and what the :term:`champion` decision
+        reads.
         """
         if evaluation_df is None:
             return {}
@@ -389,11 +413,7 @@ class ChildRunLogger:
 
     @staticmethod
     def _block_feature_dims(block):
-        """(in_features, out_features) for a Linear or a Sequential wrapping several.
-
-        Takes the FIRST linear's in_features and the LAST linear's out_features, so an MLP head
-        reports the shape of the whole block rather than logging None.
-        """
+        """How many values a block of the network takes in and gives out."""
         if hasattr(block, "in_features") and hasattr(block, "out_features"):
             return getattr(block, "in_features", None), getattr(block, "out_features", None)
 
@@ -408,6 +428,7 @@ class ChildRunLogger:
         return getattr(linears[0], "in_features", None), getattr(linears[-1], "out_features", None)
 
     def _collect_lightning_architecture_params(self, model, bundle=None) -> dict[str, object]:
+        """The deep-learning model's shape and settings, as values to record with the run."""
         params: dict[str, object] = {}
 
         if model is None:
@@ -416,31 +437,14 @@ class ChildRunLogger:
         scalar_keys = [
             "static_dim",
             "target_dim",
-            "hidden_dim",
             "static_hidden_dims",
-            "head_hidden_dims",
-            "use_layer_norm",
-            "fusion_input_dim",
-            "temporal_hidden_dim",
-            "edge_attr_dim",
             "learning_rate",
             "temporal_enabled",
-            "temporal_steps",
-            "temporal_lstm_hidden_dim",
-            "temporal_lstm_num_layers",
-            "temporal_lstm_dropout",
-            "temporal_lstm_bidirectional",
-            "temporal_pooling",
-            "spatial_graph_enabled",
         ]
         for key in scalar_keys:
             value = getattr(model, key, None)
             if value is not None:
                 params[f"architecture.{key}"] = value
-
-        graph_blocks = getattr(model, "graph_blocks", None)
-        if graph_blocks is not None:
-            params["architecture.num_graph_layers"] = len(graph_blocks)
 
         for attribute_name, param_name in (("static_encoder", "static_encoder"), ("output_head", "output_head")):
             block = getattr(model, attribute_name, None)
@@ -451,15 +455,6 @@ class ChildRunLogger:
                 params[f"architecture.{param_name}_in_features"] = in_features
                 params[f"architecture.{param_name}_out_features"] = out_features
 
-        temporal_encoders = getattr(model, "temporal_encoders", None)
-        if temporal_encoders is not None:
-            for modality_name, encoder in temporal_encoders.items():
-                prefix = f"architecture.temporal_encoder.{modality_name}"
-                params[f"{prefix}.input_size"] = getattr(encoder, "input_size", None)
-                params[f"{prefix}.hidden_size"] = getattr(encoder, "hidden_size", None)
-                params[f"{prefix}.num_layers"] = getattr(encoder, "num_layers", None)
-                params[f"{prefix}.bidirectional"] = getattr(encoder, "bidirectional", None)
-
         modality_dims = getattr(model, "modality_dims", None)
         if isinstance(modality_dims, dict):
             for modality_name, dim in modality_dims.items():
@@ -468,7 +463,7 @@ class ChildRunLogger:
         if bundle is not None:
             datamodule = getattr(bundle, "datamodule", None)
             if datamodule is not None:
-                for key in ("static_dim", "target_dim", "temporal_steps", "edge_attr_dim", "feature_dim"):
+                for key in ("static_dim", "target_dim"):
                     value = getattr(datamodule, key, None)
                     if value is not None:
                         params[f"architecture.datamodule.{key}"] = value
@@ -494,6 +489,7 @@ class ChildRunLogger:
         log_json(payload, filename, artifact_path)
 
     def _log_metric_dict(self, metrics: dict, prefix: str = ""):
+        """Record a dict of scores, skipping anything that is not a number."""
         for metric_name, metric_value in metrics.items():
             if metric_value is None:
                 continue
@@ -503,10 +499,9 @@ class ChildRunLogger:
                 continue
 
     def _uncertainty_metrics(self, frame, target_name: str, *, alpha: float) -> dict:
-        """The interval metrics for one target, empty when the frame carries no sigma.
+        """How well one target's :term:`prediction intervals <prediction interval>` did.
 
-        Empty rather than absent-with-a-check at every call site: most frames reaching here come
-        from runs with uncertainty disabled, and the caller should not have to know that.
+        Empty when the run carries no uncertainty, so callers need not check first.
         """
         sigma = sigma_column(frame, target_name)
         if sigma is None or target_name not in frame.columns or "prediction" not in frame.columns:
@@ -531,11 +526,10 @@ class ChildRunLogger:
         multi_target: bool,
         calibrator=None,
     ) -> dict:
-        """Write the ``uncertainty/`` diagnostics, nesting per target only when there are several.
+        """Write the uncertainty figures: are the intervals the width they claim to be?
 
-        Same failure policy as the SHAP seam: a diagnostic that cannot be drawn records why and
-        leaves the training run standing, because the model and its metrics are the deliverable and
-        a plot is not.
+        A figure that cannot be drawn is reported and skipped: the model and its scores are what
+        matter, and a run is not lost over a plot.
         """
         if frame is None or sigma_column(frame, target) is None:
             return {}
@@ -560,17 +554,11 @@ class ChildRunLogger:
         point_ids,
         n_expected: int | None = None,
     ) -> dict:
-        """Write this child's ``predictions/point_predictions.csv``, keyed on the point id.
+        """Write this model's prediction for every point, not only the test points.
 
-        ``predict`` is a zero-argument callable rather than a model plus data, so the two families
-        can hand over completely different inference paths - a fitted sklearn estimator against a
-        feature frame, or SoilSequencePredictor against a bundle - without this seam knowing which.
-        It is only called once the switch has been checked, so a disabled run pays nothing: the
-        full-population pass is the expensive part and it must not happen speculatively.
-
-        Failure policy matches the SHAP seam - record it and keep the training run, unless the
-        config asks otherwise. A prediction export is a convenience artifact; the model and its
-        metrics are the deliverable.
+        ``predict`` is called only once the export has been found to be switched on: predicting
+        every point is the expensive part and must not happen speculatively. A failure is recorded
+        and the run kept, unless the configuration says otherwise.
         """
         if not export_enabled_for(config, model_name):
             return {}
@@ -606,12 +594,11 @@ class ChildRunLogger:
         bundle,
         full_population_predictions=None,
     ) -> dict:
-        """Full-population predictions for a Lightning entry.
+        """The deep-learning model's prediction for every point.
 
-        Reuses SoilSequencePredictor rather than adding a second inference path: it installs the
-        checkpoint's stored preprocessing state instead of re-fitting scalers on whatever rows it
-        was handed, which is the property that makes a prediction over the whole population mean
-        the same thing as a prediction over the test split.
+        Goes through the same serving path a saved model uses, which installs the statistics the
+        model was trained with rather than measuring new ones - so a prediction for every point
+        means the same thing as a prediction for the test points.
         """
         if not export_enabled_for(config, model_name):
             return {}
@@ -630,6 +617,7 @@ class ChildRunLogger:
         point_ids = list(getattr(sequence_bundle, "point_ids", []) or [])
 
         def predict():
+            """This model's prediction for every point."""
             if full_population_predictions is not None:
                 # An ensemble: the trainer already ran every member and averaged them, because no
                 # single model object represents the mean.
@@ -655,14 +643,7 @@ class ChildRunLogger:
         artifact_path: str | None = None,
         interval_label: str | None = None,
     ) -> bool:
-        """Write plots/pred_obs.png for ONE target, carrying its uncertainty columns.
-
-        The single writer of this plot for both families. The sklearn path used to get a second copy
-        from ``mlflow.models.evaluate``'s custom-artifacts hook, but the evaluator builds the frame
-        it passes that hook from the `targets` and `predictions` columns alone, so the sigma and
-        interval columns never reached it and the bars silently did not appear. The hook is gone;
-        this is the copy that has them.
-        """
+        """Draw ``plots/pred_obs.png`` for one target: predicted against measured, with error bars."""
         if evaluation_df.empty or target not in evaluation_df.columns or "prediction" not in evaluation_df.columns:
             return False
 
@@ -699,13 +680,10 @@ class ChildRunLogger:
         return True
 
     def _log_checkpoint(self, best_model_path: str) -> None:
-        """Log the best checkpoint under a STABLE name.
+        """Save the best epoch's :term:`checkpoint` under the same name in every run, ``best.ckpt``.
 
-        Lightning names its checkpoints ``epoch=NN-step=MMM.ckpt``, so two runs of the same model on
-        the same target still produce different artifact paths and MLflow's compare view finds
-        nothing in common. Copying to ``best.ckpt`` fixes that; the original name is not lost - it
-        goes to the ``checkpoint_filename`` tag and into meta/run_summary.json, where it is still
-        greppable but no longer part of the path.
+        Lightning names its own after the epoch it came from, which differs between runs and leaves
+        two runs nothing to compare. The original name is kept as a tag and in the run summary.
         """
         original_name = os.path.basename(best_model_path)
         mlflow.set_tags({"checkpoint_filename": original_name})
@@ -731,14 +709,11 @@ class ChildRunLogger:
         config=None,
         input_example=None,
     ) -> bool:
-        """Log the model as an mlflow.pyfunc so it can be loaded and served.
+        """Save the deep-learning model in MLflow's generic format, so it can predict new points.
 
-        NOT mlflow.pytorch.log_model: MLflow 3 defaults that to serialization_format="pt2", which
-        traces model.forward from an example input. These models consume a dict batch of ragged,
-        date-stamped sequences, so no example can trace them - the previous run failed with
-        "If serialization_format is set to 'pt2', then input_example is required" and the logged
-        model was left in status FAILED. A pyfunc sidesteps tracing entirely and, unlike a raw
-        checkpoint, arrives with the preprocessing needed to consume raw data.
+        Saved as a :term:`pyfunc` rather than as a raw PyTorch model: it arrives with the
+        preprocessing it needs to read raw data, and PyTorch's own format would have to trace the
+        model from an example, which cannot be done for one that reads ragged dated readings.
         """
         if model is None:
             return False
@@ -800,16 +775,10 @@ class ChildRunLogger:
 
     @staticmethod
     def _save_nested_torch_model(model, best_model_path: str | None, staging: str) -> str:
-        """A real ``mlflow.pytorch`` model directory, nested inside the pyfunc's artifacts.
+        """Store a PyTorch copy of the network inside the saved model.
 
-        Nesting rather than logging a second top-level model keeps one deployable entry per run and
-        stores the weights once, while still making the network recognisable: the nested MLmodel
-        carries the ``pytorch`` flavor and ``mlflow.pytorch.load_model`` works against it.
-
-        ``serialization_format="pickle"`` is forced, not chosen: ``pt2`` traces ``forward`` from a
-        tensor example and this architecture consumes a dict batch of ragged sequences. So this copy
-        is an object pickle. The run's ``checkpoints/best.ckpt`` remains the safe,
-        ``weights_only``-loadable one.
+        So the network is recognisable as a PyTorch model, while the run keeps one deployable entry
+        and one copy of the weights. The run's ``checkpoints/best.ckpt`` is the safest copy to load.
         """
         import mlflow.pytorch
 
@@ -831,11 +800,10 @@ class ChildRunLogger:
 
     @staticmethod
     def _tag_model_logging(target: str, model_name: str, logged: bool, error: str | None) -> None:
-        """Make the outcome of model logging visible on the run itself.
+        """Tag the run with whether the model was saved, and why not when it was not.
 
-        A failure here is not fatal - a fitted model should not be thrown away over a packaging
-        problem - but it must not be silent either, because a run with no servable model looks
-        exactly like a healthy one in the MLflow run list.
+        Failing to save a model does not throw the trained model away, but a run with no usable
+        model must not look identical to a healthy one in the run list.
         """
         tags = {"model_logged": str(bool(logged)).lower()}
         if error:
@@ -859,11 +827,10 @@ class ChildRunLogger:
             )
 
     def _promote_champion(self, target: str, model_name: str, metrics: dict, version) -> dict:
-        """Move the champion alias onto this version when it beats the incumbent.
+        """Make this saved model the :term:`champion` if it beats the current one.
 
-        Reads rmse_test, the metric that means the same thing for both families and is in the
-        target's original units - which is what makes the comparison meaningful at all. Shared by
-        both families so a sklearn model and a Lightning model are promoted on identical evidence.
+        Decided on ``rmse_test``, in the target's own units, so both families are judged on the
+        same evidence. See :func:`~yg_eo_soilnet.tracking.promote_if_better` for the exact rules.
         """
         if version is None:
             return {"promoted": False, "reason": "the model was not registered"}
@@ -880,7 +847,7 @@ class ChildRunLogger:
             # A registry that will not take the alias must not lose a finished training run.
             return {"promoted": False, "reason": f"{type(exc).__name__}: {exc}"}
 
-    # --- SHAP: explained ONCE per fitted model ------------------------------
+    # --- SHAP: the model is explained once, then each target takes its slice ---
     # An explanation is a property of the MODEL, not of a target. A joint fit therefore explains
     # once, at model-run scope, and each target's slice is written into the run that already holds
     # that target's metrics and plots. It used to be explained inside the per-target fan-out, which
@@ -898,11 +865,10 @@ class ChildRunLogger:
 
     @staticmethod
     def _shap_gate(config, model_name: str) -> dict | None:
-        """The SHAP off-switch. ``None`` means go ahead; a dict is the reason not to.
+        """Whether to explain this model: None to go ahead, or a dict saying why not.
 
-        Runs BEFORE anything is imported: ``shap`` pulls in numba and is slow to import, and a run
-        that asked for no explainability must not pay for it, nor risk tripping the
-        ``filterwarnings = ["error"]`` pytest setting on a warning it emits.
+        Checked before anything is imported, so a run that asked for no explanations does not pay
+        to load the library.
         """
         if not bool(getattr(config, "EXPLAIN_ENABLED", True)):
             return {"enabled": False, "reason": "EXPLAIN_ENABLED is false"}
@@ -934,10 +900,10 @@ class ChildRunLogger:
 
     @staticmethod
     def _shap_failure_summary(exc: Exception, config) -> dict:
-        """What an explainer failure puts in the run summary. Shared by the build and log halves.
+        """What a failed explanation records in the run summary.
 
-        A failure here is recorded, not raised, unless ``EXPLAIN_FAIL_ON_ERROR`` - losing a finished
-        training run because an explainer choked is a bad trade.
+        Recorded rather than raised unless ``explain.fail_on_error`` is set: losing a finished
+        training run because an explanation failed is a bad trade.
         """
         # A budget skip is a decision, not a failure: the run is healthy and the explanation was
         # declined on cost. It is reported as "skipped" so it is not mistaken for a crash, and
@@ -957,11 +923,14 @@ class ChildRunLogger:
         backend: str,
         payload: dict,
     ) -> tuple[list | None, dict]:
-        """Explain the fitted model ONCE, for every output it has. Call this on the MODEL run.
+        """Work out the :term:`SHAP` contributions once, for every target the model predicts.
 
-        Returns ``(results, summary)``. ``results`` is ``None`` when nothing was computed, and then
-        ``summary`` says why - disabled, skipped, over budget, or errored - in the exact shape the
-        run summary's ``explain`` key has always had.
+        Returns
+        -------
+        results : object or None
+            None when nothing was computed.
+        summary : dict
+            Why, when nothing was: switched off, skipped by name, too slow, or it failed.
         """
         gate = self._shap_gate(config, model_name)
         if gate is not None:
@@ -979,7 +948,7 @@ class ChildRunLogger:
         return results, {"enabled": True}
 
     def _log_shap_results(self, results, *, config) -> dict:
-        """Write ``explain/`` for the results handed in, into the CURRENTLY ACTIVE run."""
+        """Write the SHAP figures and contributions into the current run."""
         try:
             from yg_eo_soilnet.explain import log_shap_artifacts
 
@@ -999,14 +968,10 @@ class ChildRunLogger:
         backend: str,
         payload: dict,
     ) -> dict:
-        """Explain a model and log every output of it into the current run.
+        """Explain a model and write every target's figures into the current run, in one call.
 
-        The whole seam in one call. Both training families now use the two halves separately - they
-        build on the model run and log each slice in its target's run - so nothing in src calls
-        this; it is kept because it is the smallest thing that exercises the gate, the budget skip
-        and the failure summary end to end, which is what tests/test_explain_switch.py and
-        tests/test_explain_budget.py do with it. It composes the same units production uses, so
-        there is no second copy of that logic to drift.
+        The training code uses the two halves separately - explaining on the model's run and
+        writing each target's slice in that target's run - so this is mostly used by the tests.
         """
         results, summary = self._build_shap_results(config, target, model_name, backend, payload)
         if results is None:
@@ -1015,11 +980,9 @@ class ChildRunLogger:
 
     @staticmethod
     def _shap_result_for(results, target: str, target_names):
-        """This target's slice of an explanation computed for the whole joint model.
+        """One target's part of an explanation computed for a model predicting several.
 
-        By name first, then by position. A name miss is expected rather than a bug: both explainers
-        fall back to synthetic names when the model carries no target names or the wrong number of
-        them, so the position in the group is the only thing left tying an output to a target.
+        Matched by name, or by position when the explanation carries no usable names.
         """
         for result in results:
             if str(result.target_name) == str(target):
@@ -1041,16 +1004,11 @@ class ChildRunLogger:
         config,
         is_model_run: bool,
     ) -> dict:
-        """Log THIS target's slice of the joint explanation, into the run that holds this target.
+        """Write one target's SHAP figures into the run that holds that target.
 
-        The slice goes to the FLAT explain/ path, which is where a single-target run has always
-        written it: the run is now the per-target scope, so there is no second target in this run to
-        nest away from - and a joint fit's explain/ then compares directly against a single-target
-        fit's, which is what ArtifactLayout's flat paths exist for.
-
-        With nothing to log, the reason belongs to the MODEL, not to this target. On the model run
-        itself it is returned in full, as it always was. In a per-target child it becomes a pointer:
-        the full reason is recorded once, on the model run, by _record_model_run_explain.
+        Always under ``explain/``, so one target's figures sit in the same place whether the model
+        predicted one target or several. When there is nothing to write, the reason belongs to the
+        model rather than to this target, and is recorded once on the model's own run.
         """
         if not results:
             if is_model_run:
@@ -1071,14 +1029,10 @@ class ChildRunLogger:
         return self._log_shap_results([result], config=config)
 
     def _record_model_run_explain(self, summary: dict, *, results, target_runs) -> None:
-        """On the model run, say once why a joint fit has no explanation anywhere beneath it.
+        """Say once, on the model's own run, why none of its targets has an explanation.
 
-        Call AFTER the fan-out, with what it returned: the child run contexts have closed by then,
-        so this lands on the model run. Only when the run actually fanned out - a single-target
-        group's model run IS its target run, and _log_shap_slice has already put the full reason in
-        its run summary. Tagged as well as written, for the same reason _tag_model_logging tags its
-        outcome: the absence of a beeswarm is not by itself evidence of why, and a reader should not
-        have to open a JSON to find out.
+        Tagged as well as written to a file: a missing figure does not by itself say why, and a
+        reader should not have to open a file to find out.
         """
         if results is not None or len(target_runs or []) <= 1:
             return
@@ -1097,14 +1051,17 @@ class ChildRunLogger:
         )
 
     def _log_plots(self, plot_functions: dict, target: str, model_name: str):
-        """
-        Helper to log plots as MLflow artifacts.
-    
-        Args:
-            plot_functions (dict):
-                {function: {"args": [...], "kwargs": {...}}}
-                - "args" is a list of positional arguments.
-                - "kwargs" is a dict of keyword arguments.
+        """Draw and upload the figures a caller asked for.
+
+        Parameters
+        ----------
+        plot_functions : dict
+            ``{"module.function": {"args": [...], "kwargs": {...}}}`` - each function is imported by
+            name and called, and whatever figure it returns is uploaded.
+        target : str
+            The target, which decides the folder.
+        model_name : str
+            The model, named in any message.
         """
         if not plot_functions:
             return
@@ -1129,13 +1086,7 @@ class ChildRunLogger:
             )
 
     def _log_cv_results(self, cv_results_df, target, model_name, param_names):
-        """Save cv_results as an artifact for later inspection.
-
-        The per-step ``train_score_*`` / ``test_score_*`` metrics that used to be emitted here when
-        ``param_names`` was a string are gone. That branch was unreachable - ModelTrainer always
-        passes a list - and it carried a second, unguarded ``neg_*`` sign flip, which is exactly the
-        pattern yg_eo_soilnet.metrics exists to keep in one place. The full grid is in the CSV.
-        """
+        """Write ``cv/cv_results.csv``: every combination the search tried, and how it scored."""
         log_table(
             cv_results_df,
             ArtifactLayout.CV_RESULTS_FILE,
@@ -1160,16 +1111,40 @@ class ChildRunLogger:
         targets=None,
         export_data=None,
     ):
-        """Log one fitted sklearn model inside an ALREADY-STARTED run.
+        """Record one trained scikit-learn model, inside the sub-run the trainer has opened.
 
-        The caller opens the run - see ModelTrainer - so that the grid search runs inside it and its
-        progress and system metrics attach to the right place. This used to open its own run, which
-        put the search outside any child run and gave sklearn a different ownership rule from
-        Lightning for no reason.
+        Writes the chosen settings, the search results, the scores on the test points in the
+        target's own units, the predicted-versus-measured figure, the table of test predictions and
+        the saved model; and, where they are switched on, the SHAP figures, the uncertainty
+        diagnostics and the per-point predictions. A model predicting several targets records itself
+        here and each target's results in a sub-run.
 
-        `targets` is the group this model was fitted over. One target logs everything here; several
-        log the model, its params and the CV results here and fan the evaluation out into one child
-        run per target.
+        Parameters
+        ----------
+        config : Config
+            The run configuration.
+        search : sklearn.model_selection.GridSearchCV
+            The finished hyperparameter search.
+        cv_results : pandas.DataFrame
+            Its full results.
+        best_model : estimator
+            The fitted model.
+        X_train, y_train, X_test, y_test : pandas.DataFrame
+            The data it was fitted on, and the test points it is scored against.
+        target : str
+            The :term:`target group`.
+        targets : list of str, optional
+            The targets in that group.
+        param_names : list of str
+            The hyperparameters searched.
+        model_name : str
+            The model's name in the model list.
+        plot_functions : dict, optional
+            Extra figures to draw; see :meth:`_log_plots`.
+        extra_params : dict, optional
+            Extra settings to record.
+        export_data : dict, optional
+            Every point's covariates, for the per-point export.
         """
         target_names = [str(name) for name in (targets or split_target_names(target))] or [str(target)]
         run_name = f"{target}_{model_name}"
@@ -1447,7 +1422,10 @@ class ChildRunLogger:
         self._log_train_fit_metric(config, model_name, best_model, X_train, y_train)
 
     def _log_train_fit_metric(self, config, model_name, best_model, X_train, y_train) -> None:
-        """Log r2_train_fit, unless this model is too expensive to ask. Never raises."""
+        """Record how well the model fits its own training points - a check, not a score.
+
+        Skipped for models too slow to predict twice. Never raises.
+        """
         if not bool(getattr(config, "LOG_TRAIN_FIT_METRIC", True)):
             return
         # Same shape as EXPLAIN_SKIP_MODELS, and for the same reason: the cost of this pass is a
@@ -1468,18 +1446,17 @@ class ChildRunLogger:
         self._log_metric_dict({"r2_train_fit": value})
 
     def _register_sklearn_model(self, config, model_info, logged_model_name):
-        """Enter an already-logged model into the registry. Returns the version, or None.
+        """Enter the saved model in the :term:`model registry` under ``<target>_<model>``.
 
-        Split out of ``log_model`` so registration happens only after this run has produced its
-        metrics - see the caller. The stable name is what lets deployment reference
-        ``models:/<name>/<version>`` rather than a run-scoped URI, and is also why versions
-        accumulate one per run for a given target+model.
+        A registered model can be loaded by name and version rather than by run, which is what
+        deployment uses. Each run of the same model and target adds a version.
 
-        Follows the same rule the Lightning path has had since b9368a1 - record the outcome on the
-        run, escalate only under ``FAIL_ON_MODEL_ERROR`` - but tags it separately from
-        :meth:`_tag_model_logging`. That helper means "this run has no servable model", which is a
-        different and worse thing than what can go wrong here: by this point log_model has already
-        succeeded, so the model IS servable and only its registry entry is missing.
+        Returns
+        -------
+        str or None
+            The version, or None when registration is off or failed. A failure here is recorded on
+            the run, not raised: the model is already saved and usable, only its registry entry is
+            missing.
         """
         if not bool(getattr(config, "MLFLOW_REGISTER_MODELS", True)):
             return None
@@ -1515,15 +1492,9 @@ class ChildRunLogger:
 
     @staticmethod
     def _build_sklearn_evaluation_frame(predictions, X_test, y_test, target_names, model_name):
-        """Test features, observed targets and predictions, in ORIGINAL units.
+        """Build the table of test-point results: covariates, measurements and predictions.
 
-        Takes the predictions rather than the model on purpose: the caller has already computed
-        them for the model signature, and asking an in-context estimator for them twice is a real
-        cost.
-
-        Deliberately the same column convention the Lightning trainer emits - one
-        ``prediction_<target>`` per output when there are several, a plain ``prediction`` when there
-        is one - so a single reader can fan either family's frame out per target.
+        The same columns the deep-learning side produces, so one reader handles both.
         """
         eval_df = pd.concat([X_test, y_test], axis=1)
         predictions = np.asarray(predictions)
@@ -1584,18 +1555,39 @@ class ChildRunLogger:
         calibrators: dict | None = None,
         full_population_predictions=None,
     ):
-        """Log Lightning outputs inside an already-started child run.
+        """Record one trained deep-learning model, inside the sub-run the trainer has opened.
 
-        Supports both the lightweight direct form used by the trainer and the
-        richer bundle-based form for future compatibility.
+        The counterpart of :meth:`log_child_run`, writing the same things in the same places: the
+        settings and the model's shape, the scores on the test points in the target's own units, the
+        predicted-versus-measured figure, the table of test predictions, the best epoch's
+        :term:`checkpoint` and the saved model.
 
-        `calibrators` is passed only on an ensemble run; the evaluation frame already carries the
-        interval columns by then, and these are here so the reliability plot can be drawn against
-        the same q the interval was built with.
-
-        `full_population_predictions` is likewise ensemble-only: the mean over every point, which
-        only the trainer can compute because no single model object represents a Lightning
-        ensemble. A single-model run leaves it None and this method runs the pass itself.
+        Parameters
+        ----------
+        config : Config
+            The run configuration.
+        target : str
+            The :term:`target group`.
+        model_name : str
+            The model's name in the model list.
+        evaluation_df : pandas.DataFrame or None
+            The test-point results.
+        validation_metrics, test_metrics : dict
+            What Lightning reported, on the model's own :term:`training scale`.
+        best_model_path : str or None
+            The checkpoint kept.
+        extra_params : dict, optional
+            Extra settings to record.
+        plot_functions : dict, optional
+            Extra figures to draw.
+        bundle : LightningModelBundle, optional
+            The model bundle, read for the split summary and the settings.
+        model : lightning.pytorch.LightningModule, optional
+            The trained model, saved so it can predict new points.
+        calibrators : dict, optional
+            The interval estimators, on an :term:`ensemble` run.
+        full_population_predictions : numpy.ndarray, optional
+            The ensemble's prediction for every point; a single model predicts them here instead.
         """
         calibrators = calibrators or {}
         if evaluation_df is None:
@@ -1837,22 +1829,42 @@ class ChildRunLogger:
 
 
 class ParentRunLogger:
+    """Record what the run as a whole produced, on the :term:`main run`.
+
+    It reads the sub-runs every model wrote and combines them: the :term:`leaderboard` ranking every
+    model on the same test points, the combined predicted-versus-measured figures, and the combined
+    per-point predictions.
+
+    Examples
+    --------
+    >>> ParentRunLogger().log_parent_summary(parent_run_id, trainer)    # doctest: +SKIP
+    """
+
     def __init__(self):
         pass
 
     @staticmethod
     def _resolve_target_names(evaluation_df: pd.DataFrame, fallback_target: str) -> list[str]:
+        """The individual targets in a results table; see :class:`ChildRunLogger`."""
         return ChildRunLogger._resolve_target_names(evaluation_df, fallback_target)
 
     def _collect_leaderboard(self,parent_run_id: str):
-        """
-        Collects metrics from all child runs of a given parent run.
-        Returns a DataFrame with leaderboard info.
+        """Build the :term:`leaderboard`: one row per model per target, ranked by test score.
+
+        Reads the scores every sub-run recorded. A model predicting several targets keeps its
+        results a level deeper, so those sub-runs are read in preference to the model's own run;
+        :term:`ensemble` members are left out.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per model and target, with the scores in the target's own units.
         """
         client = mlflow.tracking.MlflowClient()  # type: ignore
         experiment_id = client.get_run(parent_run_id).info.experiment_id
 
         def children_of(run_id: str):
+            """The sub-runs of one run."""
             return client.search_runs(
                 experiment_ids=[experiment_id],
                 filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
@@ -1892,16 +1904,12 @@ class ParentRunLogger:
 
     @staticmethod
     def _backfill_legacy_metrics(row: dict) -> dict:
-        """Give a pre-unification run the current metric names so it still plots.
+        """Give a run recorded before the scores were unified something the leaderboard can plot.
 
-        Runs recorded before yg_eo_soilnet.metrics existed logged `mean_test_score`, which meant a
-        POSITIVE cv RMSE on a sklearn run and a NEGATIVE -test_loss on a Lightning one. abs() is
-        what makes those two comparable again on a single axis; it is a best effort for display
-        only, which is why the row is tagged rather than silently patched.
-
-        The Lightning value is still a loss in standardized log1p space, not an RMSE in target
-        units, so a legacy Lightning row is comparable to other legacy Lightning rows and not much
-        else. Re-running the model is the only way to get a real number.
+        A rough conversion for display only, and the row is tagged as such. An old deep-learning row
+        is still on its own :term:`training scale` rather than in the target's units, so it is not
+        really comparable with anything but another old row; re-running the model is the only way to
+        get a real number.
         """
         if "rmse_test" in row:
             return row
@@ -1917,11 +1925,13 @@ class ParentRunLogger:
         return row
 
     def _collect_eval_dfs(self,parent_run_id: str):
+        """Read every model's table of test-point results, for the combined figures."""
         client = mlflow.tracking.MlflowClient() # type: ignore
         parent_run = client.get_run(parent_run_id)
         exp_id = parent_run.info.experiment_id
 
         def children_of(run_id: str):
+            """The sub-runs of one run."""
             return client.search_runs(
                 experiment_ids=[exp_id],
                 filter_string=f"tags.mlflow.parentRunId = '{run_id}'",
@@ -1998,14 +2008,10 @@ class ParentRunLogger:
 
 
     def _collect_point_predictions(self, parent_run_id: str, id_column: str):
-        """``(model_name, frame)`` for every child that exported per-point predictions.
+        """Read each model's per-point predictions, for the combined export.
 
-        DIRECT children only, unlike the leaderboard and eval-frame collectors. Those two want the
-        per-target evaluation runs, which sit a level deeper on a joint fit; this wants the run that
-        holds the MODEL, because that is the one that ran the full-population pass and a joint
-        model writes all of its targets into one file. Ensemble members are children of the model
-        run rather than of the parent, so they never appear at this level - but the filter is
-        applied anyway, so this does not silently depend on that.
+        From the model's own run rather than its per-target sub-runs: the model is what predicted
+        every point, and it writes all of its targets into one file.
         """
         client = mlflow.tracking.MlflowClient()  # type: ignore
         experiment_id = client.get_run(parent_run_id).info.experiment_id
@@ -2037,7 +2043,11 @@ class ParentRunLogger:
         return collected
 
     def _log_point_prediction_export(self, parent_run_id: str, config) -> None:
-        """Combine the children's per-point predictions into the two parent-level files."""
+        """Combine every model's per-point predictions into the run's two combined tables.
+
+        One row per point with a column per model (``point_predictions_wide.csv``), and one row per
+        point per model (``point_predictions_long.csv``).
+        """
         if not bool(getattr(config, "EXPORT_POINT_PREDICTIONS", False)):
             return
 
@@ -2060,13 +2070,16 @@ class ParentRunLogger:
         )
 
     def log_parent_summary(self, parent_run_id: str, trainer):
-        """
-        Collect results from child runs and log a summary to the parent run.
-        Designed to be called at the end of training in the main script.
+        """Write the run's summary: the leaderboard, the combined figures and the combined export.
 
-        Args:
-            experiment_name (str): Name of the MLflow experiment.
-            parent_run_id (str): The active parent MLflow run ID.
+        Called at the end of training, once every model has been recorded.
+
+        Parameters
+        ----------
+        parent_run_id : str
+            The :term:`main run`.
+        trainer : ModelTrainer
+            The scikit-learn trainer, read for the run's configuration.
         """
         mlflow.set_tags({
             "DATA_FILE": trainer.config.DATA_FILE,
@@ -2109,14 +2122,15 @@ class ParentRunLogger:
         self._log_point_prediction_export(parent_run_id, trainer.config)
 
     def log_parent_figures(self, parent_run_id: str) -> None:
-        """The leaderboard CSV and the two parent figures, from MLflow state alone.
+        """Write the leaderboard table and the two combined figures.
 
-        Split out of :meth:`log_parent_summary` because it is the only part of it that needs nothing
-        but the run tree - no live ``trainer``, no config, no source data. That is what lets
-        ``replot.py`` regenerate these figures for a run that finished months ago.
+        Needs nothing but the run itself - no configuration and no source data - which is what lets
+        ``replot.py`` redraw the figures of a run that finished months ago.
 
-        Writes into whatever run is ACTIVE, which is the parent during training and the run reopened
-        by ``mlflow.start_run(run_id=...)`` when replotting.
+        Parameters
+        ----------
+        parent_run_id : str
+            The :term:`main run` to read.
         """
         leaderboard_df = self._collect_leaderboard(parent_run_id)
 

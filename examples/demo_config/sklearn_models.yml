@@ -1,0 +1,11 @@
+# The scikit-learn models the demo trains. configs/sklearn/model_registry.yml lists more.
+# Each entry names the model class, whether it is switched on, and the settings to try: the
+# pipeline tries every value listed under `params` and keeps the one that scores best.
+
+Ridge:
+  enabled: true
+  modeltype: "ml"
+  import_path: sklearn.linear_model.Ridge
+  multi_target: native            # Ridge can predict all three targets from one fit
+  params:
+    model__alpha: [0.1, 1, 10, 100]   # how strongly the model is kept simple

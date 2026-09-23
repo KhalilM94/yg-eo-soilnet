@@ -1,13 +1,12 @@
-"""Builds the one :class:`SplitPlan` a run uses, before any training family touches the data.
+"""Build the one split a run uses, before any model touches the data.
 
-:mod:`yg_eo_soilnet.datamodules.splitting` is deliberately family-neutral - it turns point ids into
-assignments and knows nothing about sklearn or Lightning. This module is where that neutrality is
-paid for: it asks each family which points it can actually use, reconciles the answers under the
-configured ``population_policy``, and hands back a single plan.
+The model families do not agree on which points they can use: the scikit-learn models keep every
+row, while the deep-learning model needs a usable time series. This module asks each family which
+points it can use, decides who is in the split according to ``split.population_policy``, and hands
+back a single :class:`~yg_eo_soilnet.datamodules.splitting.SplitPlan`.
 
-The reconciliation matters because the families genuinely disagree. The tabular preprocessor keeps
-every row, while the sequence builder drops rows with non-finite covariates. Splitting each family's
-own population separately is exactly the bug this replaces.
+With ``intersect`` (the default) only the points every family can use are split, so their test sets
+are identical. With ``assign_all`` every point is assigned and each family uses what it can.
 """
 
 from __future__ import annotations
@@ -23,16 +22,40 @@ from yg_eo_soilnet.datamodules.splitting import (
     UnifiedSplitter,
 )
 
+#: The scikit-learn model family.
 SKLEARN = "sklearn"
+#: The deep-learning family, which reads the time series.
 SEQUENCE = "sequence"
+#: The families a split can be built for.
 KNOWN_FAMILIES = (SKLEARN, SEQUENCE)
 
 
 class SplitPlanProvider:
-    """Memoized source of truth for the run's split.
+    """The run's split: built on first use, then handed to every model.
 
-    `families` names the training families that will actually run, so a sklearn-only run never pays
-    to build the sequence eligibility. Pass ``None`` to infer it from the enabled registry entries.
+    Parameters
+    ----------
+    config : Config
+        The run configuration; reads the ``split:`` settings.
+    logger : logging.Logger
+        Where the population report goes.
+    data_manager : DataManager
+        Reads the data the split is made over.
+    families : iterable of str, optional
+        Which model families will run, ``"sklearn"`` and/or ``"sequence"``. Left out, it is read
+        from the models switched on, so a scikit-learn-only run does not prepare the time series
+        just to find out which points have one.
+
+    Raises
+    ------
+    ValueError
+        If a family name is unknown.
+
+    Examples
+    --------
+    >>> provider = SplitPlanProvider(config, logger, data_manager)   # doctest: +SKIP
+    >>> provider.plan().counts()                                     # doctest: +SKIP
+    {'train': 210, 'val': 45, 'test': 45}
     """
 
     def __init__(self, config, logger, data_manager, families: Optional[Iterable[str]] = None):
@@ -46,7 +69,12 @@ class SplitPlanProvider:
         self._plan: Optional[SplitPlan] = None
 
     def plan(self) -> SplitPlan:
-        """The run's split. Built once; every later call returns the same object."""
+        """The run's split, built on the first call and reused afterwards.
+
+        Returns
+        -------
+        SplitPlan
+        """
         if self._plan is None:
             self._plan = self._build()
         return self._plan
@@ -54,6 +82,7 @@ class SplitPlanProvider:
     # --- internals ------------------------------------------------------------------
 
     def _build(self) -> SplitPlan:
+        """Read the data, work out who is in the split, and make or load the plan."""
         dataset = self.data_manager.load_dataset()
         tabular = dataset.tabular
         point_col = dataset.point_id_column
@@ -81,6 +110,7 @@ class SplitPlanProvider:
         return splitter.build_plan(population, coordinates=coordinates, eligibility=eligibility)
 
     def _eligibility(self, tabular: pd.DataFrame) -> dict[str, frozenset]:
+        """The point ids each model family can actually use, after its own cleaning."""
         builders = {
             SKLEARN: self._sklearn_usable,
             SEQUENCE: self._sequence_usable,
@@ -91,16 +121,19 @@ class SplitPlanProvider:
         return eligibility
 
     def _sklearn_usable(self, tabular: pd.DataFrame) -> pd.Index:
+        """The points the scikit-learn models can use."""
         from yg_eo_soilnet.datamodules.scikit.tabular_preprocessor import TabularPreprocessor
 
         return TabularPreprocessor(self.config, self.logger, self.data_manager).usable_point_ids(tabular)
 
     def _sequence_usable(self, tabular: pd.DataFrame) -> pd.Index:
+        """The points the deep-learning model can use: those with a usable time series."""
         from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 
         return SoilSequenceBuilder(self.config, self.logger, self.data_manager).usable_point_ids(tabular)
 
     def _population(self, all_ids: pd.Index, eligibility: Mapping[str, frozenset]) -> pd.Index:
+        """The points to split, under the configured population policy."""
         policy = str(getattr(self.config, "SPLIT_POPULATION_POLICY", INTERSECT)).lower()
         if policy not in (INTERSECT, ASSIGN_ALL):
             raise ValueError(
@@ -108,14 +141,14 @@ class SplitPlanProvider:
             )
 
         if policy == ASSIGN_ALL or not eligibility:
-            # Every point gets a label; each family later selects the subset it holds. Test sets
-            # then share membership but are not identical row for row.
+            # Every point is assigned and each family takes what it can use, so their test sets
+            # overlap without being identical.
             population = all_ids
         else:
             common: Optional[set] = None
             for ids in eligibility.values():
                 common = set(ids) if common is None else (common & set(ids))
-            # Preserve the source frame's order so the plan is stable under a re-run.
+            # Keep the file's row order, so the same data always gives the same plan.
             population = all_ids[all_ids.isin(common or set())]
 
         self._guard_against_collapse(all_ids, population, eligibility, policy)
@@ -128,16 +161,16 @@ class SplitPlanProvider:
         eligibility: Mapping[str, frozenset],
         policy: str,
     ) -> None:
-        """Refuse to train on a population most of the dataset has fallen out of.
+        """Stop the run when most of the dataset has fallen out of the split.
 
-        Two independent ways that happens, and both used to be silent:
+        Two different things can cause it, and the message says which:
 
-        * **A family's own cleaning is too strict.** Checked per family, on every policy. This is the
-          one that matters on a single-family run and under ``assign_all`` - there is no
-          intersection to notice it, so the family simply trains on what is left and reports metrics
-          as if nothing happened. On one real dataset that was 17 points out of 5761.
-        * **Intersecting handed everyone the narrowest family's population.** Only possible under
-          ``intersect``, and reported separately so the message says which of the two happened.
+        * one family's own cleaning dropped most of the points, usually because a covariate is
+          nearly empty - a data problem, and it happens under either policy;
+        * the families each keep plenty of points but agree on few, so ``intersect`` left little.
+
+        The limit is ``split.min_population_ratio`` (half the dataset unless set); 0 switches the
+        check off.
         """
         minimum_ratio = float(getattr(self.config, "SPLIT_MIN_POPULATION_RATIO", 0.5))
         if minimum_ratio <= 0.0 or not len(all_ids):
@@ -184,6 +217,7 @@ class SplitPlanProvider:
         )
 
     def _coordinates(self, tabular: pd.DataFrame, all_ids: pd.Index) -> Optional[pd.DataFrame]:
+        """The coordinates indexed by point id, or None when the data has none."""
         lat_col = getattr(self.config, "LAT_COLUMN", "lat")
         lon_col = getattr(self.config, "LON_COLUMN", "lon")
         if lat_col not in tabular.columns or lon_col not in tabular.columns:
@@ -203,7 +237,13 @@ class SplitPlanProvider:
         eligibility: Mapping[str, frozenset],
         splitter: UnifiedSplitter,
     ) -> SplitPlan:
-        """Reuse a frozen assignment, so a re-run keeps yesterday's test set."""
+        """Load a saved plan, so a new run keeps an earlier run's test set.
+
+        Raises
+        ------
+        ValueError
+            If the saved plan does not cover every point now in the population.
+        """
         frame = pd.read_parquet(plan_path)
         plan = SplitPlan.from_frame(
             frame,
@@ -243,7 +283,7 @@ class SplitPlanProvider:
         eligibility: Mapping[str, frozenset],
         policy: str,
     ) -> None:
-        """Always report what each family loses. The cost of unification must be visible."""
+        """Report how many points each family can use, and how many the policy then excludes."""
         self.logger.info(
             f"Split population ({policy}): {len(population)} of {len(all_ids)} point(s) from the "
             f"source frame."
@@ -259,7 +299,7 @@ class SplitPlanProvider:
 
     @staticmethod
     def _infer_families(config) -> tuple[str, ...]:
-        """The families with at least one enabled registry entry."""
+        """The families with at least one model switched on."""
         families: list[str] = []
         sklearn_registry = getattr(config, "MODEL_REGISTRY", {}) or {}
         if any(_enabled(entry) for entry in sklearn_registry.values()):
@@ -273,10 +313,11 @@ class SplitPlanProvider:
             if kind == SEQUENCE and kind not in families:
                 families.append(kind)
 
-        # A run with nothing enabled still needs a population to split; sklearn's rule keeps
+        # A run with no model switched on still needs a population: the scikit-learn rule keeps
         # every row, so it is the neutral choice.
         return tuple(families) or (SKLEARN,)
 
 
 def _enabled(entry: Any) -> bool:
+    """Whether a model-list entry says ``enabled: true``."""
     return bool(isinstance(entry, Mapping) and entry.get("enabled", False))

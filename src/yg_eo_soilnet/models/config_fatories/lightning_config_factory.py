@@ -1,3 +1,5 @@
+"""Build a deep-learning model and its data from one model-list entry."""
+
 from __future__ import annotations
 
 import importlib
@@ -14,6 +16,26 @@ from yg_eo_soilnet.targets import split_target_names
 
 @dataclass
 class LightningModelBundle:
+    """One deep-learning model with everything needed to train it - a model :term:`bundle`.
+
+    Attributes
+    ----------
+    name : str
+        The model's name in the model list.
+    target : str
+        The :term:`target group` it predicts.
+    model : lightning.pytorch.LightningModule
+        The built model.
+    datamodule : lightning.pytorch.LightningDataModule
+        Its data, already prepared.
+    trainer_kwargs : dict
+        Training settings: epochs, processor, precision.
+    callback_specs : dict
+        Early-stopping and checkpoint settings.
+    registry_entry : dict
+        The model-list entry it was built from, copied.
+    """
+
     name: str
     target: str
     model: Any
@@ -24,6 +46,36 @@ class LightningModelBundle:
 
 
 class LightningConfigFactory:
+    """Build the deep-learning models a model list asks for, ready to train.
+
+    For each entry switched on it prepares the data, seeds the random generators, builds the model,
+    and fills in everything the model needs but the configuration cannot know: the number of
+    covariates, the data sources and their widths, the category numbering, the target statistics.
+    Those come from the datamodule, which has seen the training points.
+
+    Parameters
+    ----------
+    registry : mapping
+        The deep-learning model list: model name to its settings.
+    config : Config
+        The run configuration.
+    logger : logging.Logger, optional
+        Where progress messages go.
+    data_manager : DataManager, optional
+        Used to prepare the data when the caller supplies none.
+    datamodule_cache : mutable mapping, optional
+        Lets several models share one prepared datamodule. Used by the hyperparameter search, where
+        preparing the data again for every trial would dominate the cost.
+
+    Examples
+    --------
+    >>> factory = LightningConfigFactory(config.LIGHTNING_MODEL_REGISTRY, config,   # doctest: +SKIP
+    ...                                  logger, data_manager)
+    >>> bundles = factory.build_lightning_configs("clay_pct", data)                 # doctest: +SKIP
+    >>> sorted(bundles)                                                             # doctest: +SKIP
+    ['soil_cnn']
+    """
+
     def __init__(
         self,
         registry: Mapping[str, dict],
@@ -36,17 +88,15 @@ class LightningConfigFactory:
         self.config = config
         self.logger = logger
         self.data_manager = data_manager
-        # Opt-in reuse of datamodules across factories, keyed by the arguments that built them.
-        # Off by default, so every existing call site behaves exactly as before. The hyperparameter
-        # search turns it on: SoilSequenceDataModule deep-copies the whole bundle in __init__ and
-        # re-fits normalization and vocabularies in setup(), which dominates the cost of a short
-        # trial. Sharing is safe because setup() is idempotent and a datamodule holds no model state.
+        # Reuse of prepared datamodules, keyed by what built them. Off unless asked for. Safe: a
+        # datamodule holds no model state, and preparing it twice gives the same result.
         self.datamodule_cache = datamodule_cache
-        # Lazily built in _resolve_split_plan, and only when `data` carries no plan of its own.
+        # Built only if the caller passes no split of its own.
         self._split_plan_provider = None
 
     @staticmethod
     def _dynamic_import(import_path: str):
+        """Import a class from its full path, such as the one an entry's ``import_path`` names."""
         module_path, attr_name = import_path.rsplit(".", 1)
         try:
             module = importlib.import_module(module_path)
@@ -61,18 +111,29 @@ class LightningConfigFactory:
         seed: int | None = None,
         entries: Any = None,
     ) -> dict[str, LightningModelBundle]:
-        """Build one bundle per enabled entry.
+        """Build one :class:`LightningModelBundle` per model switched on.
 
-        `entries`, when given, restricts the build to those registry names. Used when entries
-        disagree about target grouping: building the others here only to discard them would pay for
-        a datamodule copy and setup() per discarded entry.
+        Parameters
+        ----------
+        target : str
+            The :term:`target group` these models predict.
+        data : mapping
+            The prepared data and the run's shared split.
+        seed : int, optional
+            Applied just before each model is built, which is when its starting weights are drawn -
+            the only moment at which seeding reaches them. Per model, so a second model does not
+            inherit whatever the first consumed.
+        entries : iterable of str, optional
+            Build only these models.
 
-        `seed`, when given, is applied immediately before each model is constructed. Weight
-        initialization draws from the global torch generator, so this is the only point at which
-        seeding reaches the weights - seeding later leaves them at whatever state the preceding work
-        happened to leave behind, and a tuned configuration cannot then reproduce the trial that
-        selected it. Per entry rather than once for the whole loop, so a second enabled entry does
-        not inherit the stream the first one consumed.
+        Returns
+        -------
+        dict of str to LightningModelBundle
+
+        Raises
+        ------
+        ValueError
+            If an entry is missing a required setting or is not a deep-learning entry.
         """
         wanted = None if entries is None else {str(name) for name in entries}
         bundles: dict[str, LightningModelBundle] = {}
@@ -100,21 +161,23 @@ class LightningConfigFactory:
         return bundles
 
     @staticmethod
-    def _input_kind(spec: Mapping[str, Any]) -> str:
-        """The datamodule shape an entry declares. An explicit `input_kind` wins."""
-        return spec.get("input_kind", spec.get("datamodule_type", "tabular"))
+    def _input_kind(spec: Mapping[str, Any]) -> str | None:
+        """What kind of data an entry needs. Only ``"sequence"`` can be built."""
+        return spec.get("input_kind")
 
     def sequence_spec(self) -> dict[str, Any] | None:
-        """The enabled registry entry that needs a sequence bundle, if any."""
+        """The first model switched on that needs the time series, or None."""
         for spec in self.registry.values():
             if spec.get("enabled", False) and self._input_kind(spec) == "sequence":
                 return spec
         return None
 
     def has_sequence_input(self) -> bool:
+        """Whether any model switched on needs the time series."""
         return self.sequence_spec() is not None
 
     def _validate_entry(self, name: str, spec: Mapping[str, Any]) -> None:
+        """Check an entry has the settings every deep-learning model needs."""
         required_keys = {"enabled", "modeltype", "import_path", "datamodule_import_path"}
         missing = sorted(required_keys - set(spec))
         if missing:
@@ -123,6 +186,7 @@ class LightningConfigFactory:
             raise ValueError(f"Lightning registry entry '{name}' must use modeltype 'dl'.")
 
     def _build_datamodule(self, target: str, spec: Mapping[str, Any], data: Mapping[str, Any]) -> Any:
+        """Prepare this model's data, reusing an already prepared one where that is allowed."""
         input_kind = self._input_kind(spec)
         if input_kind != "sequence":
             raise ValueError(
@@ -139,8 +203,7 @@ class LightningConfigFactory:
 
         datamodule_kwargs = deepcopy(spec.get("datamodule_init_args", {}))
         datamodule_kwargs.setdefault("batch_size", getattr(self.config, "LIGHTNING_BATCH_SIZE", 32))
-        # Fallbacks only. When a split_plan is injected below it decides train/val/test and these
-        # are ignored - they matter only for a datamodule built without the shared plan.
+        # Only used if no shared split reaches the datamodule below.
         datamodule_kwargs.setdefault("val_size", getattr(self.config, "SPLIT_VAL_SIZE", 0.2))
         datamodule_kwargs.setdefault("test_size", getattr(self.config, "SPLIT_TEST_SIZE", 0.2))
         datamodule_kwargs.setdefault("num_workers", getattr(self.config, "LIGHTNING_NUM_WORKERS", 0))
@@ -150,16 +213,14 @@ class LightningConfigFactory:
         )
         datamodule_kwargs.setdefault("seed", fallback_seed)
 
-        # Which targets this run fits, decoded from the run label. The bundle is built over every
-        # configured target and cached across entries, so a per-target run narrows the datamodule
-        # rather than rebuilding the bundle. A joint run names every target and narrows nothing.
+        # The targets this model predicts, read back from the group name. The data is prepared once
+        # for every target, so a single-target model narrows it rather than preparing it again.
         active_targets = split_target_names(target)
         if active_targets and self._accepts_kwarg(datamodule_cls, "active_targets"):
             datamodule_kwargs["active_targets"] = active_targets
 
-        # Built before the payload is attached: the payload is a whole dataset, so it is identified
-        # by object identity rather than by value. `active_targets` is inside these kwargs, so two
-        # target groups over the same payload cannot collide in the cache.
+        # Built before the data itself is attached, which is identified by object rather than by
+        # value. The targets are part of the key, so two target groups cannot share a slot.
         cache_key = (spec["datamodule_import_path"], repr(sorted(datamodule_kwargs.items())))
 
         payload = data.get("sequence_bundle")
@@ -172,8 +233,8 @@ class LightningConfigFactory:
             datamodule_kwargs["split_plan"] = split_plan
 
         if self.datamodule_cache is not None:
-            # The plan joins the payload in the identity part of the key: two runs of the same entry
-            # under different splits are different datamodules, and must not share a cache slot.
+            # The split is part of the key too: the same model under a different split is a
+            # different datamodule.
             cache_key = (*cache_key, id(payload), id(split_plan))
             cached = self.datamodule_cache.get(cache_key)
             if cached is not None:
@@ -186,25 +247,29 @@ class LightningConfigFactory:
         return datamodule
 
     def _build_sequence_bundle(self, spec: Mapping[str, Any]) -> Any:
-        """Build the sequence bundle on demand, when the caller supplied none."""
+        """Prepare the data from scratch, when the caller supplied none.
+
+        Raises
+        ------
+        KeyError
+            If there is neither prepared data nor a data manager to prepare it with.
+        """
         if self.data_manager is None:
             raise KeyError(
                 "Sequence lightning registry entries require either a 'sequence_bundle' payload "
                 "or a data_manager on LightningConfigFactory"
             )
-        # Imported here rather than at module scope, so building a factory does not pay for it.
+        # Imported here, so building a factory does not pay for it.
         from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 
         builder = SoilSequenceBuilder(self.config, self.logger, self.data_manager)
         return builder.build(sequence_data_args=dict(spec.get("sequence_data_args", {}) or {}))
 
     def _resolve_split_plan(self, data: Mapping[str, Any]):
-        """The run's shared split, from the payload dict or from the provider.
+        """The run's shared split, from the data handed in or, failing that, built here.
 
-        Without this the Lightning families split for themselves and their holdout overlapped the
-        sklearn one - which is the whole reason the shared plan exists. Falling back to the provider
-        rather than to a private split matters: `data` carries a plan only when the caller went
-        through main.py or tune.py, and a directly-constructed factory must not quietly diverge.
+        Without it this family would split for itself, and its test points would overlap the ones
+        the scikit-learn models trained on.
         """
         plan = data.get("split_plan")
         if plan is not None:
@@ -219,12 +284,13 @@ class LightningConfigFactory:
 
     @classmethod
     def _accepts_kwarg(cls, target_cls: Any, name: str) -> bool:
+        """Whether a class's constructor takes a setting of this name."""
         accepted = cls._accepted_init_args(target_cls)
         return accepted is None or name in accepted
 
     @staticmethod
     def _accepted_init_args(model_cls: Any) -> set[str] | None:
-        """Keyword names ``model_cls.__init__`` accepts, or None when it takes ``**kwargs``."""
+        """The settings a class's constructor accepts, or None when it accepts anything."""
         try:
             parameters = inspect.signature(model_cls.__init__).parameters
         except (TypeError, ValueError):  # pragma: no cover - builtins and C extensions
@@ -240,17 +306,16 @@ class LightningConfigFactory:
         }
 
     def _build_model(self, spec: Mapping[str, Any], datamodule: Any):
+        """Build the model, filling in the shapes and statistics from the prepared data."""
         model_cls = self._dynamic_import(spec["import_path"])
         init_args = deepcopy(spec.get("init_args", {}))
-        # Several models share one datamodule, so what the datamodule can offer is not what a given
-        # model wants: `grid_years` is meaningful to the calendar-grid CNN and meaningless to the
-        # sequence encoders, yet both read the same SoilSequenceDataModule. Injections the factory
-        # makes on its own initiative are therefore filtered to what the model actually accepts.
-        # Anything the registry names explicitly is still passed through untouched, so a typo in
-        # init_args fails loudly instead of being silently dropped.
+        # One datamodule can serve several models, so what it offers is not what every model
+        # wants: anything offered here is filtered to what the model actually accepts. Whatever the
+        # model list names explicitly is passed through, so a typo there fails loudly.
         accepted = self._accepted_init_args(model_cls)
 
         def offer(key: str, value: Any) -> None:
+            """Pass a setting to the model, but only if its constructor takes one by that name."""
             if accepted is None or key in accepted:
                 init_args[key] = value
 
@@ -258,34 +323,23 @@ class LightningConfigFactory:
             "static_dim": getattr(datamodule, "static_dim", None),
             "target_dim": getattr(datamodule, "target_dim", None),
             "modality_dims": getattr(datamodule, "modality_dims", None),
-            "temporal_steps": getattr(datamodule, "temporal_steps", None),
-            "edge_attr_dim": getattr(datamodule, "edge_attr_dim", None),
-            # Calendar-grid span, inferred from the data by the sequence datamodule. Only the CNN
-            # rasterises, so only it declares this argument.
+            # How many years the calendar grid spans, read from the data.
             "grid_years": getattr(datamodule, "grid_years", None),
-            # 2 when USE_HARMONIC_COORDS put coordinates on the bundle, 0 otherwise. Like grid_years
-            # this is meaningful to the CNN alone, so `offer` filters it away from the models that
-            # do not declare it.
+            # 2 when the data carries coordinates, 0 otherwise.
             "coord_dim": getattr(datamodule, "coord_dim", None),
-            # Entity-embedding contract, fitted train-only by the datamodule's setup(). The
-            # vocabularies travel into the model's hyper_parameters so the checkpoint carries its
-            # own label->index mapping instead of re-deriving one from whatever frame it is given.
+            # The category numbering, learned from the training points. It travels into the model
+            # so a saved model carries its own numbering.
             "categorical_cardinalities": getattr(datamodule, "categorical_cardinalities", None),
             "categorical_vocabularies": getattr(datamodule, "categorical_vocabularies", None),
             "categorical_feature_names": getattr(datamodule, "categorical_feature_names", None),
-            # The lab columns available as auxiliary inputs, and the targets they must not
-            # duplicate. Both are needed at construction: the model resolves the names it was
-            # configured with into positions, and refuses any that is also being fitted.
+            # The lab columns available as auxiliary inputs, and the targets they must not be.
             "auxiliary_available_names": getattr(datamodule, "label_feature_names", None),
             "target_names": getattr(datamodule, "target_names", None),
-            # Every target the RUN fits, not just this model's outputs. Under per-target grouping
-            # target_names holds one name, and checking auxiliary columns against it would let the
-            # model read another configured target as an input - the exact leak the check exists to
-            # stop. The leakage check uses this; the output layer uses target_names.
+            # Every target the run fits, not only this model's: with one model per target,
+            # checking against the narrower list would let another target in as an input.
             "fitted_target_names": list(getattr(self.config, "TARGET_COLUMNS", []) or []),
         }
-        # An empty list is "this dataset has no categoricals", not data worth offering - without it
-        # in the sentinel set a model would be handed [] as though it were a real shape.
+        # An empty list means "this dataset has none", which is not worth offering as a shape.
         unset = (None, 0, "auto", {}, [])
         for key, value in shape_args.items():
             if key in init_args and init_args[key] in (None, 0, "auto", {}):
@@ -299,18 +353,14 @@ class LightningConfigFactory:
             offer("temporal_enabled", getattr(datamodule, "temporal_enabled", False))
         if "output_dim" in init_args and init_args["output_dim"] in (None, 0, "auto"):
             init_args["output_dim"] = getattr(datamodule, "target_dim", 1)
-        # Target standardization stats, so the model can invert them for prediction. Passed as
-        # plain floats: numpy values here end up in the checkpoint's hyper_parameters and make
-        # it unloadable under torch.load's weights_only=True default.
+        # The target statistics, so the model can convert its predictions back. Plain numbers,
+        # because they are saved in the checkpoint.
         for key, attribute in (("target_mean", "target_mean_"), ("target_scale", "target_scale_")):
             value = getattr(datamodule, attribute, None)
             if value is not None and init_args.get(key) in (None, "auto"):
                 offer(key, [float(item) for item in np.asarray(value).ravel()])
-        # Lab standardization stats at the FULL roster width, on the same terms and for the same
-        # reason: only a model that reads a lab column in the target's own units needs them - the
-        # residual architecture, to undo this standardizer before re-expressing its base. Handled
-        # here rather than in shape_args because that loop's `value not in unset` test would run an
-        # elementwise comparison on the array and raise.
+        # The lab-value statistics, which only a model with a residual base needs: they convert
+        # the base back into the target's own units.
         for key, attribute in (
             ("auxiliary_label_mean", "label_mean_"),
             ("auxiliary_label_scale", "label_scale_"),
@@ -319,18 +369,13 @@ class LightningConfigFactory:
             if value is not None and init_args.get(key) in (None, "auto"):
                 offer(key, [float(item) for item in np.asarray(value).ravel()])
             elif init_args.get(key) == "auto":
-                # No lab columns carried, so nothing to offer. A written `auto` left in place would
-                # reach the model as the string "auto"; None is what it reads as "no statistics",
-                # exactly as the shape_args loop above resolves its own sentinels.
+                # No lab columns carried, so there is nothing to fill in.
                 init_args[key] = None
-        # The datamodule owns the choice of target transform; the model only needs to know so it can
-        # invert it. Propagating it here keeps the two from ever disagreeing.
+        # The datamodule decides the target transform; the model is told so it can undo it.
         if init_args.get("target_transform") in (None, "auto"):
             offer("target_transform", getattr(datamodule, "target_transform", None))
-        # Correlation structure of the training targets, for the structure-aware losses. Offered on
-        # the same terms as the statistics above and for the same reason - only the datamodule has
-        # seen the whole training split - and as a nested list of plain floats for the same
-        # weights_only=True reason.
+        # How the training targets vary together, for the losses that read across targets. Only
+        # the datamodule has seen every training point.
         covariance = getattr(datamodule, "target_covariance_", None)
         if covariance is not None and init_args.get("target_covariance") in (None, "auto"):
             offer(
@@ -338,10 +383,8 @@ class LightningConfigFactory:
                 [[float(value) for value in row] for row in np.asarray(covariance)],
             )
 
-        # Heteroscedastic head, from the run's uncertainty block. Offered rather than set, so an
-        # architecture without a predict_variance argument is left alone instead of failing, and
-        # gets ensemble-only uncertainty. A registry entry that names the key wins, so
-        # one model can opt out of the variance head without changing the mode for the rest.
+        # A variance head, when the run asks for one. Offered rather than forced, so a model
+        # without that setting is left alone; an entry naming it wins, so one model can opt out.
         if "predict_variance" not in init_args and self._heteroscedastic_enabled():
             offer("predict_variance", True)
             offer("beta_nll", float(getattr(self.config, "UNCERTAINTY_BETA_NLL", 0.5)))
@@ -349,12 +392,13 @@ class LightningConfigFactory:
         return model_cls(**init_args)
 
     def _heteroscedastic_enabled(self) -> bool:
-        """Whether this run wants variance heads: uncertainty on AND heteroscedastic requested."""
+        """Whether the run asks for a :term:`variance head`: uncertainty on and heteroscedastic set."""
         return bool(getattr(self.config, "UNCERTAINTY_ENABLED", False)) and bool(
             getattr(self.config, "UNCERTAINTY_HETEROSCEDASTIC", False)
         )
 
     def _build_trainer_kwargs(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+        """The training settings: epochs, processor, precision, and how often to report."""
         trainer_kwargs = deepcopy(spec.get("trainer_args", {}))
         trainer_kwargs.setdefault("max_epochs", getattr(self.config, "LIGHTNING_MAX_EPOCHS", 50))
         trainer_kwargs.setdefault("accelerator", getattr(self.config, "LIGHTNING_ACCELERATOR", "auto"))
@@ -370,6 +414,7 @@ class LightningConfigFactory:
         return trainer_kwargs
 
     def _build_callback_specs(self, spec: Mapping[str, Any]) -> dict[str, Any]:
+        """The early-stopping and checkpoint settings, with an entry's own values merged in."""
         callbacks = {
             "early_stopping": {
                 "monitor": getattr(self.config, "LIGHTNING_EARLY_STOPPING_MONITOR", "val_loss"),
@@ -383,9 +428,8 @@ class LightningConfigFactory:
             },
         }
 
-        # Merged group by group, not `callbacks.update(...)`. Replacing a whole group meant an entry
-        # that named only `early_stopping: {patience: 3}` silently lost monitor and mode, i.e. lost
-        # the config.LIGHTNING_EARLY_STOPPING_* defaults this dict was just built from.
+        # Merged setting by setting: an entry naming only `patience` must keep the configured
+        # monitor and mode rather than losing them.
         for group, overrides in deepcopy(spec.get("callbacks") or {}).items():
             if isinstance(overrides, Mapping) and isinstance(callbacks.get(group), MutableMapping):
                 callbacks[group].update(overrides)

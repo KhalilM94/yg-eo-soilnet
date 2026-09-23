@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -24,8 +23,9 @@ def _fake_plan():
     )
 
 
-def test_main_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_trainer = SimpleNamespace(
+def _stub_trainer(**overrides) -> SimpleNamespace:
+    """A stand-in SoilModelTraining: main() loads, preprocesses, splits and trains through it."""
+    trainer = SimpleNamespace(
         config=SimpleNamespace(config_path="config.yml", registry_path="registry.yml"),
         scikit_datamodule=SimpleNamespace(
             load_frame=MagicMock(return_value="raw"),
@@ -39,46 +39,83 @@ def test_main_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
         logger_wrapper=SimpleNamespace(log_file=None),
         train_models=MagicMock(),
     )
-    fake_parent_logger = SimpleNamespace(log_parent_summary=MagicMock())
+    for key, value in overrides.items():
+        setattr(trainer, key, value)
+    return trainer
 
-    monkeypatch.setattr(main_module.mlflow, "enable_system_metrics_logging", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "set_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "create_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "active_run", MagicMock(return_value=None))
-    monkeypatch.setattr(main_module.mlflow, "end_run", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_param", MagicMock())
-    # log_params too, not just log_param: an unstubbed one auto-starts a REAL run against the
-    # default tracking store and never ends it, which surfaces three test files later as
-    # "Run with UUID ... is already active".
-    monkeypatch.setattr(main_module.mlflow, "log_params", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_artifact", MagicMock())
-    monkeypatch.setattr(main_module.datetime, "datetime", SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")))
-    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=fake_trainer))
-    monkeypatch.setattr(main_module, "ParentRunLogger", MagicMock(return_value=fake_parent_logger))
 
-    class FakeRun:
-        info = SimpleNamespace(run_id="run-123")
+class _FakeRun:
+    def __init__(self, info):
+        self.info = info
 
-        def __enter__(self):
-            return self
+    def __enter__(self):
+        return self
 
-        def __exit__(self, exc_type, exc, tb):
-            return False
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
-    monkeypatch.setattr(main_module.mlflow, "start_run", MagicMock(return_value=FakeRun()))
 
-    monkeypatch.setattr("sys.argv", ["main.py", "--config-path", "config.yml"])
+def _stub_main(
+    monkeypatch,
+    trainer,
+    parent_logger=None,
+    *,
+    run_info=None,
+    argv=("main.py", "--config-path", "config.yml"),
+) -> dict:
+    """Stub everything main() reaches outside itself; return the MLflow mocks by name."""
+    mocks = {
+        name: MagicMock()
+        for name in (
+            "enable_system_metrics_logging",
+            "set_experiment",
+            "create_experiment",
+            "end_run",
+            "log_param",
+            # log_params too, not just log_param: an unstubbed one auto-starts a REAL run against
+            # the default tracking store and never ends it, which surfaces three test files later
+            # as "Run with UUID ... is already active".
+            "log_params",
+            "log_artifact",
+            "set_tag",
+        )
+    }
+    mocks["active_run"] = MagicMock(return_value=None)
+    mocks["start_run"] = MagicMock(
+        return_value=_FakeRun(run_info or SimpleNamespace(run_id="run-123"))
+    )
+    for name, mock in mocks.items():
+        monkeypatch.setattr(main_module.mlflow, name, mock)
+    monkeypatch.setattr(
+        main_module.datetime,
+        "datetime",
+        SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")),
+    )
+    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=trainer))
+    monkeypatch.setattr(
+        main_module,
+        "ParentRunLogger",
+        MagicMock(return_value=parent_logger or SimpleNamespace(log_parent_summary=MagicMock())),
+    )
+    monkeypatch.setattr("sys.argv", list(argv))
+    return mocks
+
+
+def test_main_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    trainer = _stub_trainer()
+    parent_logger = SimpleNamespace(log_parent_summary=MagicMock())
+    _stub_main(monkeypatch, trainer, parent_logger)
 
     main_module.main()
 
-    fake_trainer.scikit_datamodule.load_frame.assert_called_once()
-    fake_trainer.scikit_datamodule.preprocess.assert_called_once_with("raw")
+    trainer.scikit_datamodule.load_frame.assert_called_once()
+    trainer.scikit_datamodule.preprocess.assert_called_once_with("raw")
     # The shared plan is handed to the sklearn family rather than each family splitting for itself.
-    fake_trainer.scikit_datamodule.split.assert_called_once_with(
-        "processed", fake_trainer.split_plan_provider.plan.return_value
+    trainer.scikit_datamodule.split.assert_called_once_with(
+        "processed", trainer.split_plan_provider.plan.return_value
     )
-    fake_trainer.train_models.assert_called_once()
-    fake_parent_logger.log_parent_summary.assert_called_once_with("run-123", fake_trainer)
+    trainer.train_models.assert_called_once()
+    parent_logger.log_parent_summary.assert_called_once_with("run-123", trainer)
 
 
 def test_main_survives_a_failing_parent_summary(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -89,183 +126,58 @@ def test_main_survives_a_failing_parent_summary(monkeypatch: pytest.MonkeyPatch)
     left the parent marked FAILED - which is how one truncated meta.yaml elsewhere in the store
     turned a finished run into a crash.
     """
-    fake_trainer = SimpleNamespace(
-        config=SimpleNamespace(config_path="config.yml", registry_path="registry.yml"),
-        scikit_datamodule=SimpleNamespace(
-            load_frame=MagicMock(return_value="raw"),
-            preprocess=MagicMock(return_value="processed"),
-            split=MagicMock(return_value={"X_train": "x"}),
-        ),
-        split_plan_provider=SimpleNamespace(plan=MagicMock(return_value=_fake_plan())),
-        logger=SimpleNamespace(info=MagicMock(), error=MagicMock()),
-        logger_wrapper=SimpleNamespace(log_file="train.log"),
-        train_models=MagicMock(),
-    )
-    fake_parent_logger = SimpleNamespace(
+    trainer = _stub_trainer(logger_wrapper=SimpleNamespace(log_file="train.log"))
+    parent_logger = SimpleNamespace(
         log_parent_summary=MagicMock(side_effect=RuntimeError("leaderboard unreadable"))
     )
-    log_artifact = MagicMock()
-    set_tag = MagicMock()
-
-    monkeypatch.setattr(main_module.mlflow, "enable_system_metrics_logging", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "set_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "create_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "active_run", MagicMock(return_value=None))
-    monkeypatch.setattr(main_module.mlflow, "end_run", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_param", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_params", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_artifact", log_artifact)
-    monkeypatch.setattr(main_module.mlflow, "set_tag", set_tag)
-    monkeypatch.setattr(main_module.datetime, "datetime", SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")))
-    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=fake_trainer))
-    monkeypatch.setattr(main_module, "ParentRunLogger", MagicMock(return_value=fake_parent_logger))
-
-    class FakeRun:
-        info = SimpleNamespace(run_id="run-123")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(main_module.mlflow, "start_run", MagicMock(return_value=FakeRun()))
-    monkeypatch.setattr("sys.argv", ["main.py", "--config-path", "config.yml"])
+    mocks = _stub_main(monkeypatch, trainer, parent_logger)
 
     main_module.main()
 
-    fake_trainer.train_models.assert_called_once()
+    trainer.train_models.assert_called_once()
     # The run still finishes: the log artifact goes up, and nothing propagates out of main().
-    log_artifact.assert_called_once_with("train.log")
+    mocks["log_artifact"].assert_called_once_with("train.log")
     # Not a silent swallow - the run records why its summary is missing.
-    assert set_tag.call_args.args[0] == "parent_summary_error"
-    assert "leaderboard unreadable" in set_tag.call_args.args[1]
-    fake_trainer.logger.error.assert_called_once()
+    assert mocks["set_tag"].call_args.args[0] == "parent_summary_error"
+    assert "leaderboard unreadable" in mocks["set_tag"].call_args.args[1]
+    trainer.logger.error.assert_called_once()
 
 
 def test_main_logs_and_reraises_on_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    failing_trainer = SimpleNamespace(
-        config=SimpleNamespace(config_path="config.yml", registry_path="registry.yml"),
+    trainer = _stub_trainer(
         scikit_datamodule=SimpleNamespace(
             load_frame=MagicMock(side_effect=RuntimeError("load failed")),
             preprocess=MagicMock(),
             split=MagicMock(),
-        ),
-        # main() decides the split once, before either family sees the data, and logs its
-        # provenance - so a stub trainer has to offer the provider.
-        split_plan_provider=SimpleNamespace(plan=MagicMock(return_value=_fake_plan())),
-        logger=SimpleNamespace(info=MagicMock(), error=MagicMock()),
-        logger_wrapper=SimpleNamespace(log_file=None),
-        train_models=MagicMock(),
+        )
     )
-
-    monkeypatch.setattr(main_module.mlflow, "enable_system_metrics_logging", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "set_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "create_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "active_run", MagicMock(return_value=None))
-    monkeypatch.setattr(main_module.mlflow, "end_run", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_param", MagicMock())
-    # log_params too, not just log_param: an unstubbed one auto-starts a REAL run against the
-    # default tracking store and never ends it, which surfaces three test files later as
-    # "Run with UUID ... is already active".
-    monkeypatch.setattr(main_module.mlflow, "log_params", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_artifact", MagicMock())
-    monkeypatch.setattr(main_module.datetime, "datetime", SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")))
-    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=failing_trainer))
-    monkeypatch.setattr(main_module, "ParentRunLogger", MagicMock(return_value=SimpleNamespace(log_parent_summary=MagicMock())))
-
-    class FakeRun:
-        info = SimpleNamespace(run_id="run-123")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(main_module.mlflow, "start_run", MagicMock(return_value=FakeRun()))
-    monkeypatch.setattr("sys.argv", ["main.py"])
+    _stub_main(monkeypatch, trainer, argv=("main.py",))
 
     with pytest.raises(RuntimeError, match="load failed"):
         main_module.main()
 
-    failing_trainer.logger.error.assert_called_once()
+    trainer.logger.error.assert_called_once()
 
 
 def test_main_skips_artifact_upload_when_logger_file_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_trainer = SimpleNamespace(
-        config=SimpleNamespace(config_path="config.yml", registry_path="registry.yml"),
-        scikit_datamodule=SimpleNamespace(
-            load_frame=MagicMock(return_value="raw"),
-            preprocess=MagicMock(return_value="processed"),
-            split=MagicMock(return_value={"X_train": "x"}),
-        ),
-        # main() decides the split once, before either family sees the data, and logs its
-        # provenance - so a stub trainer has to offer the provider.
-        split_plan_provider=SimpleNamespace(plan=MagicMock(return_value=_fake_plan())),
-        logger=SimpleNamespace(info=MagicMock(), error=MagicMock()),
-        logger_wrapper=SimpleNamespace(log_file=None),
-        train_models=MagicMock(),
-    )
-    fake_parent_logger = SimpleNamespace(log_parent_summary=MagicMock())
-
-    monkeypatch.setattr(main_module.mlflow, "enable_system_metrics_logging", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "set_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "create_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "active_run", MagicMock(return_value=None))
-    monkeypatch.setattr(main_module.mlflow, "end_run", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_param", MagicMock())
-    # log_params too, not just log_param: an unstubbed one auto-starts a REAL run against the
-    # default tracking store and never ends it, which surfaces three test files later as
-    # "Run with UUID ... is already active".
-    monkeypatch.setattr(main_module.mlflow, "log_params", MagicMock())
-    log_artifact = MagicMock()
-    monkeypatch.setattr(main_module.mlflow, "log_artifact", log_artifact)
-    monkeypatch.setattr(main_module.datetime, "datetime", SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")))
-    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=fake_trainer))
-    monkeypatch.setattr(main_module, "ParentRunLogger", MagicMock(return_value=fake_parent_logger))
-
-    class FakeRun:
-        info = SimpleNamespace(run_id="run-123")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(main_module.mlflow, "start_run", MagicMock(return_value=FakeRun()))
-    monkeypatch.setattr("sys.argv", ["main.py", "--config-path", "config.yml"])
+    mocks = _stub_main(monkeypatch, _stub_trainer())
 
     main_module.main()
 
-    log_artifact.assert_not_called()
+    mocks["log_artifact"].assert_not_called()
 
 
 def test_main_exports_mlflow_experiment_when_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
-    fake_trainer = SimpleNamespace(
+    trainer = _stub_trainer(
         config=SimpleNamespace(
             config_path="config.yml",
             registry_path="registry.yml",
             MLFLOW_EXPERIMENT_EXPORT_ENABLED=True,
             MLFLOW_EXPERIMENT_EXPORT_PATH=str(tmp_path / "exports"),
-        ),
-        scikit_datamodule=SimpleNamespace(
-            load_frame=MagicMock(return_value="raw"),
-            preprocess=MagicMock(return_value="processed"),
-            split=MagicMock(return_value={"X_train": "x"}),
-        ),
-        # main() decides the split once, before either family sees the data, and logs its
-        # provenance - so a stub trainer has to offer the provider.
-        split_plan_provider=SimpleNamespace(plan=MagicMock(return_value=_fake_plan())),
-        logger=SimpleNamespace(info=MagicMock(), error=MagicMock()),
-        logger_wrapper=SimpleNamespace(log_file=None),
-        train_models=MagicMock(),
+        )
     )
-    fake_parent_logger = SimpleNamespace(log_parent_summary=MagicMock())
     experiment_id = "12345"
     run_id = "67890"
-    experiment_name = "Soil Model Training Experiment"
     run_name = "Run_20260703_120000"
     tracking_root = tmp_path / "mlruns"
     run_dir = tracking_root / experiment_id / run_id
@@ -273,23 +185,15 @@ def test_main_exports_mlflow_experiment_when_enabled(monkeypatch: pytest.MonkeyP
     (run_dir / "meta.yaml").write_text(f"name: {run_name}\n")
     (run_dir / "dummy.txt").write_text("content\n")
 
-    monkeypatch.setattr(main_module.mlflow, "enable_system_metrics_logging", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "set_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "create_experiment", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "active_run", MagicMock(return_value=None))
-    monkeypatch.setattr(main_module.mlflow, "end_run", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_param", MagicMock())
-    # log_params too, not just log_param: an unstubbed one auto-starts a REAL run against the
-    # default tracking store and never ends it, which surfaces three test files later as
-    # "Run with UUID ... is already active".
-    monkeypatch.setattr(main_module.mlflow, "log_params", MagicMock())
-    monkeypatch.setattr(main_module.mlflow, "log_artifact", MagicMock())
+    _stub_main(
+        monkeypatch, trainer, run_info=SimpleNamespace(run_id=run_id, experiment_id=experiment_id)
+    )
     monkeypatch.setattr(main_module.mlflow, "get_tracking_uri", MagicMock(return_value=f"file://{tracking_root}"))
-    monkeypatch.setattr(main_module.mlflow, "get_experiment", MagicMock(return_value=SimpleNamespace(name=experiment_name)))
-    monkeypatch.setattr(main_module.datetime, "datetime", SimpleNamespace(now=lambda: SimpleNamespace(strftime=lambda fmt: "20260703_120000")))
-    monkeypatch.setattr(main_module, "SoilModelTraining", MagicMock(return_value=fake_trainer))
-    monkeypatch.setattr(main_module, "ParentRunLogger", MagicMock(return_value=fake_parent_logger))
-
+    monkeypatch.setattr(
+        main_module.mlflow,
+        "get_experiment",
+        MagicMock(return_value=SimpleNamespace(name="Soil Model Training Experiment")),
+    )
     copied = {}
 
     def fake_copytree(src, dst):
@@ -299,18 +203,6 @@ def test_main_exports_mlflow_experiment_when_enabled(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(main_module.shutil, "copytree", fake_copytree)
     monkeypatch.setattr(main_module.shutil, "rmtree", MagicMock())
-
-    class FakeRun:
-        info = SimpleNamespace(run_id=run_id, experiment_id=experiment_id)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-    monkeypatch.setattr(main_module.mlflow, "start_run", MagicMock(return_value=FakeRun()))
-    monkeypatch.setattr("sys.argv", ["main.py", "--config-path", "config.yml"])
 
     main_module.main()
 

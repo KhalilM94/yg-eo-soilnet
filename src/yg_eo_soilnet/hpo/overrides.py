@@ -1,9 +1,8 @@
-"""Writing suggested hyperparameters back into a Lightning registry entry.
+"""Write the settings a trial drew into a copy of the model-list entry.
 
-This module is the entire coupling between Optuna and the rest of the codebase. A search space names
-its parameters with a dotted prefix, and `apply_overrides` writes each one into the matching section
-of a deep-copied registry entry. The mutated entry then goes to an unmodified LightningConfigFactory,
-so `auto` shape resolution, signature filtering and loud failure on typos all keep working.
+This is the whole connection between the search and the rest of the project. A search space names
+each setting with a path - ``model.dropout``, ``trainer.max_epochs`` - and each one is written into
+the matching part of a copied entry. Nothing else is touched.
 """
 
 from __future__ import annotations
@@ -67,13 +66,10 @@ SPLIT_DEFINING_DATAMODULE_KEYS = frozenset({"val_size", "test_size", "seed", "sp
 
 
 def to_builtin(value: Any) -> Any:
-    """A plain-Python copy of `value`.
+    """A plain-Python copy of a drawn value.
 
-    Every model calls save_hyperparameters(), so anything landing in init_args ends up in the
-    checkpoint's hyper_parameters. A numpy scalar there makes the checkpoint unloadable under
-    torch.load's weights_only=True default - the same reason the model constructors coerce their
-    categorical and target-statistic arguments by hand.
-    """
+    A model's settings are saved in its :term:`checkpoint`, which can only hold plain values.
+        """
     if isinstance(value, (bool, np.bool_)):
         return bool(value)
     if isinstance(value, (str, bytes)) or value is None:
@@ -92,7 +88,13 @@ def to_builtin(value: Any) -> Any:
 
 
 def split_dotted(dotted: str) -> tuple[str, str]:
-    """`("model", "learning_rate")` for `"model.learning_rate"`, validating the prefix."""
+    """Split a setting's path into its section and its name.
+
+    Examples
+    --------
+    >>> split_dotted("model.learning_rate")
+    ('model', 'learning_rate')
+        """
     prefix, _, remainder = dotted.partition(".")
     if not remainder:
         raise ValueError(
@@ -116,11 +118,11 @@ def split_dotted(dotted: str) -> tuple[str, str]:
 
 
 def validate_override_keys(dotted_keys: Iterable[str], *, searched: bool) -> None:
-    """Reject keys that must not be overridden. Raises with every offender, not just the first.
+    """Refuse settings that must not be searched, naming every one of them.
 
-    `searched` distinguishes a tuned parameter from one pinned for the whole study: a fixed
-    `datamodule.val_size` is harmless, a searched one silently invalidates the objective.
-    """
+    Some settings would change what the trials are being compared on - the split, the targets - so a
+    search that touched them would not be measuring what it claims.
+        """
     problems: list[str] = []
     for dotted in dotted_keys:
         prefix, key = split_dotted(dotted)
@@ -148,10 +150,7 @@ def validate_override_keys(dotted_keys: Iterable[str], *, searched: bool) -> Non
 
 
 def apply_overrides(spec: dict[str, Any], overrides: Mapping[str, Any]) -> dict[str, Any]:
-    """Write `overrides` into `spec` in place and return it.
-
-    `spec` is expected to be a deep copy of a registry entry - this mutates it.
-    """
+    """Write the drawn settings into a copied model-list entry, and return it."""
     for dotted, value in overrides.items():
         prefix, remainder = split_dotted(dotted)
         if prefix == "callbacks":

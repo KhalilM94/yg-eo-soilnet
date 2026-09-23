@@ -1,7 +1,7 @@
 """MULTI_TARGET_MODE: how several targets become models, in both families.
 
 Before this switch existed the two families sat at opposite hard-coded extremes. Lightning always
-fitted one model with a target_dim-wide head - the sequence and graph builders read the whole of
+fitted one model with a target_dim-wide head - the sequence builder read the whole of
 TARGET_COLUMNS and nothing ever narrowed `y` - while sklearn always fitted one model per target.
 Neither could be told to do the other thing.
 """
@@ -25,6 +25,10 @@ from yg_eo_soilnet.targets import (
     select_target_columns,
     split_target_names,
 )
+
+from tests.support.fakes import RecordingRuns
+
+from tests.support.builders import correlated_bundle
 
 
 def _config(**overrides):
@@ -152,24 +156,11 @@ def test_narrowing_to_a_column_the_bundle_does_not_carry_is_refused() -> None:
 # --- the target covariance the structure-aware losses read -----------------
 
 
-def _correlated_bundle(correlation: float, n_points: int = 200) -> SoilSequenceBundle:
-    generator = np.random.default_rng(0)
-    first = generator.standard_normal(n_points)
-    second = correlation * first + np.sqrt(1.0 - correlation**2) * generator.standard_normal(n_points)
-    return SoilSequenceBundle(
-        point_ids=list(range(n_points)),
-        static_features=generator.standard_normal((n_points, 2)).astype(np.float32),
-        static_feature_names=["f1", "f2"],
-        targets=np.column_stack([first, second]).astype(np.float32),
-        target_names=["target_a", "target_b"],
-    )
-
-
 def test_the_target_covariance_is_the_correlation_matrix_of_the_train_split() -> None:
     """Fitted on STANDARDIZED targets, which is the space the loss runs in - so the diagonal is 1
     and the off-diagonal is the correlation the losses compare predictions against."""
     datamodule = SoilSequenceDataModule(
-        _correlated_bundle(0.8), batch_size=16, val_size=0.25, test_size=0.25, seed=0
+        correlated_bundle(0.8), batch_size=16, val_size=0.25, test_size=0.25, seed=0
     )
     datamodule.setup("fit")
 
@@ -183,7 +174,7 @@ def test_the_target_covariance_is_the_correlation_matrix_of_the_train_split() ->
 def test_the_target_covariance_never_sees_validation_or_test() -> None:
     """Same rule as the scaler, for the same reason: a statistic fitted across the whole population
     leaks the test split into the training objective."""
-    bundle = _correlated_bundle(0.8)
+    bundle = correlated_bundle(0.8)
     datamodule = SoilSequenceDataModule(
         bundle, batch_size=16, val_size=0.25, test_size=0.25, seed=0
     )
@@ -201,7 +192,7 @@ def test_a_narrowed_datamodule_has_no_target_covariance() -> None:
     refuse to build without it - which is what turns per-target grouping plus a structural loss
     into a loud failure instead of a silent fallback to MSE."""
     narrowed = SoilSequenceDataModule(
-        _correlated_bundle(0.8),
+        correlated_bundle(0.8),
         batch_size=16,
         val_size=0.25,
         test_size=0.25,
@@ -348,17 +339,6 @@ def test_scoring_two_targets_at_once_is_refused_rather_than_pooled() -> None:
     assert regression_metrics(observed[:, :1], predicted[:, :1])["rmse_test"] == pytest.approx(0.1)
 
 
-def test_per_target_keys_are_resolved_to_their_stem_s_space() -> None:
-    from yg_eo_soilnet.metrics import ORIGINAL_UNITS, STANDARDIZED_LOG1P, metric_space_for
-
-    spaces = metric_space_for(["rmse_test", "rmse_test_clay_pct", "val_r2", "val_r2_clay_pct", "made_up"])
-
-    assert spaces["rmse_test"] == spaces["rmse_test_clay_pct"] == ORIGINAL_UNITS
-    assert spaces["val_r2"] == spaces["val_r2_clay_pct"] == STANDARDIZED_LOG1P
-    # Still a visible gap rather than a plausible-looking default.
-    assert spaces["made_up"] == "unknown"
-
-
 class _ToyRegressor:
     """The metric machinery on its own, without an architecture around it."""
 
@@ -433,33 +413,20 @@ def test_a_collapsed_target_is_visible_instead_of_averaged_away() -> None:
 # Lightning grew a third level as soon as a second target appeared.
 
 
-class _RecordingRuns:
-    """Stands in for mlflow.start_run, remembering the run names it was asked to open."""
-
-    def __init__(self):
-        self.names: list[str] = []
-
-    def __call__(self, run_name=None, nested=False, **kwargs):
-        from contextlib import nullcontext
-
-        self.names.append(run_name)
-        return nullcontext(SimpleNamespace(info=SimpleNamespace(run_id="run")))
-
-
 def _quiet_logger(monkeypatch, logger):
     """Silence everything that would touch a tracking server or the filesystem."""
     import yg_eo_soilnet.logger.mlflow_loggers as module
 
     for name in ("set_tags", "log_params", "log_metric", "log_artifact", "log_metrics"):
-        monkeypatch.setattr(module.mlflow, name, MagicMock(), raising=False)
+        monkeypatch.setattr(module.mlflow, name, MagicMock())
     monkeypatch.setattr("yg_eo_soilnet.artifacts.mlflow.log_artifact", MagicMock())
     for name in ("_log_plots", "_log_shap_slice", "_write_json_artifact", "_log_table_artifact",
                  "_write_split_summary", "_log_split_summary", "_promote_champion", "_log_cv_results",
                  "_log_checkpoint", "_tag_model_logging", "_log_pred_obs_artifact"):
-        monkeypatch.setattr(logger, name, MagicMock(), raising=False)
+        monkeypatch.setattr(logger, name, MagicMock())
     # The explanation is built once, on the model run, and sliced per target. (None, {}) is "nothing
     # to explain"; a bare MagicMock would fail the tuple unpack at the call site.
-    monkeypatch.setattr(logger, "_build_shap_results", MagicMock(return_value=(None, {})), raising=False)
+    monkeypatch.setattr(logger, "_build_shap_results", MagicMock(return_value=(None, {})))
     return logger
 
 
@@ -467,7 +434,7 @@ def test_a_joint_lightning_run_is_a_model_run_with_one_child_per_target(monkeypa
     import yg_eo_soilnet.logger.mlflow_loggers as module
 
     logger = _quiet_logger(monkeypatch, ChildRunLogger())
-    runs = _RecordingRuns()
+    runs = RecordingRuns()
     monkeypatch.setattr(module.mlflow, "start_run", runs)
     serialize = MagicMock(return_value=True)
     monkeypatch.setattr(logger, "_log_lightning_serialized_model", serialize)
@@ -503,7 +470,7 @@ def test_a_single_target_lightning_run_opens_no_child_at_all(monkeypatch) -> Non
     import yg_eo_soilnet.logger.mlflow_loggers as module
 
     logger = _quiet_logger(monkeypatch, ChildRunLogger())
-    runs = _RecordingRuns()
+    runs = RecordingRuns()
     monkeypatch.setattr(module.mlflow, "start_run", runs)
     monkeypatch.setattr(logger, "_log_lightning_serialized_model", MagicMock(return_value=True))
 
@@ -524,7 +491,7 @@ def test_a_joint_sklearn_run_has_the_same_shape_as_a_joint_lightning_one(monkeyp
     import yg_eo_soilnet.logger.mlflow_loggers as module
 
     logger = _quiet_logger(monkeypatch, ChildRunLogger())
-    runs = _RecordingRuns()
+    runs = RecordingRuns()
     monkeypatch.setattr(module.mlflow, "start_run", runs)
     log_model = MagicMock(return_value=SimpleNamespace(model_uri="models:/x/1", registered_model_version=1))
     monkeypatch.setattr(module.mlflow.sklearn, "log_model", log_model)

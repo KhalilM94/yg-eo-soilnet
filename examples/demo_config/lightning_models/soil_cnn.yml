@@ -1,0 +1,25 @@
+# A small, quick version of soil_cnn, the project's deep-learning model. It reads the static
+# covariates and, for each data source, lays the monthly readings out on a year-by-month grid that
+# a small convolutional network scans for seasonal patterns.
+# configs/lightning/models/soil_cnn.yml documents every setting; anything not listed here (the
+# number of inputs, the category lists, ...) is worked out automatically from the data.
+
+soil_cnn:
+  enabled: true
+  input_kind: sequence
+  import_path: yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule
+  datamodule_import_path: yg_eo_soilnet.datamodules.sequence.sequence_datamodule.SoilSequenceDataModule
+  init_args:
+    fusion: gated                 # how the static and time-series summaries are combined
+    auxiliary_enabled: false      # no extra lab values as inputs
+    residual_enabled: false       # predict the values directly, not a correction to another prediction
+    temporal_encoder: dilated_tempcnn
+    cnn_hidden_dims: [16]         # one convolution layer, 16 wide
+    modality_embed_dim: 16
+    cnn_norm: group               # suits the small batches of a small dataset
+    static_hidden_dims: [32]
+    head_hidden_dims: [32]
+    dropout: 0.1
+    learning_rate: 0.003
+  tags:
+    architecture: calendar-grid-cnn

@@ -1,8 +1,6 @@
-"""Building the heavy data payload once, outside the study.
+"""Prepare the data once, before the study starts.
 
-LightningConfigFactory rebuilds a sequence bundle from the raw CSVs whenever `data` does not already
-carry one. Doing that per trial would dwarf the training it is meant to feed, so the payload is
-built once here and handed to every trial.
+Preparing it per trial would cost more than the training it feeds.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ def build_lightning_input(
     logger: Any = None,
     data_manager: Any = None,
 ) -> dict[str, Any]:
-    """`split_data` plus the datamodule payload the entry's `input_kind` needs."""
+    """The shared split and the prepared data every trial trains on."""
     data = dict(split_data)
     input_kind = LightningConfigFactory._input_kind(spec)
     payload_key = PAYLOAD_KEYS.get(input_kind)

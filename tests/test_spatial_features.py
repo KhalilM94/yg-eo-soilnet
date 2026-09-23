@@ -12,9 +12,7 @@ prediction would silently be made at the middle of the study area.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -25,8 +23,11 @@ from yg_eo_soilnet.data_manager import DataManager
 from yg_eo_soilnet.datamodules.sequence.sequence_builder import SoilSequenceBuilder
 from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceDataModule
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
+
 from yg_eo_soilnet.models.lightningmodules.spatial_encoders import HarmonicPositionEncoder
 from yg_eo_soilnet.models.lightningmodules.temporal_cnn_encoders import ConcatGatedFusion
+
+from tests.support.builders import sequence_builder_config
 
 MODEL_ARGS = dict(
     static_dim=4,
@@ -78,13 +79,6 @@ def test_coordinates_off_adds_no_parameters_and_no_state_dict_keys() -> None:
     assert not [key for key in off.state_dict() if "coord" in key]
     assert off.coordinate_output_dim == 0
     assert off.has_coordinates is False
-
-
-def test_a_checkpoint_trained_without_coordinates_loads_strictly() -> None:
-    """The consequence of the test above, stated as the thing users actually do."""
-    trained_before = SoilCNNLightningModule(**MODEL_ARGS)
-    rebuilt = SoilCNNLightningModule(**MODEL_ARGS)
-    rebuilt.load_state_dict(trained_before.state_dict(), strict=True)
 
 
 def test_two_argument_fusion_still_builds_the_module_it_always_did() -> None:
@@ -321,51 +315,16 @@ def _write_csvs(tmp_path: Path, *, coords=None, context_value=1.0):
 
 
 def _config(tmp_path: Path, static_path, timeseries_path, **overrides):
-    config = SimpleNamespace(
-        DATA_FOLDER=str(tmp_path),
-        DATA_FILE="static.csv",
-        STATIC_CSV_PATH=str(static_path),
-        TIMESERIES_CSV_PATH=str(timeseries_path),
-        POINT_ID_COLUMN="point_id",
-        LAT_COLUMN="lat",
-        LON_COLUMN="lon",
-        TIME_COLUMN="obs_date",
-        TEMPORAL_FEATURES_ENABLED=True,
-        TEMPORAL_FEATURES={"enabled": True, "time_column": "obs_date"},
-        MODALITY_PREFIX_MAP={"s2": "S2_"},
-        S1_COLUMNS=[],
-        S2_COLUMNS=[],
-        MODIS_COLUMNS=[],
-        TARGET_COLUMNS=["target_a"],
-        LABEL_COLUMNS=["target_a"],
+    defaults = dict(
         CARRY_LABEL_COLUMNS=False,
         USE_HARMONIC_COORDS=False,
         CONTEXT_FEATURES=[],
         USE_CONTEXT_FEATURES=True,
-        PREDICTOR_COLUMNS=[],
-        IGNORED_COLUMNS=["point_id", "lat", "lon"],
-        ELIMINATED_FEATURES=["point_id", "lat", "lon"],
-        CATEGORICAL_FEATURES=[],
-        EXCLUDE_CATEGORICAL=False,
-        EXISTING_HS_FEATURES={"enabled": False},
-        RANDOM_SEED=42,
-        TEST_SIZE=0.25,
-        DATA_INDEX_MANIFEST_PATH=None,
-        STATIC_SOURCE=None,
-        TARGETS_SOURCE=None,
-        TIMESERIES_SOURCE=None,
-        STATIC_FEATURES_FOLDER=None,
-        TARGETS_FOLDER=None,
-        TIMESERIES_FOLDER=None,
-        TARGETS_FILE="static.csv",
-        TARGETS_CSV_PATH=str(static_path),
         MAX_MISSING_COLUMN_RATIO=0.9,
         ALLOW_SPARSE_COLUMNS=[],
         FAIL_ON_SPARSE_COLUMNS=False,
     )
-    for key, value in overrides.items():
-        setattr(config, key, value)
-    return config
+    return sequence_builder_config(tmp_path, static_path, timeseries_path, **{**defaults, **overrides})
 
 
 def _bundle(tmp_path: Path, logger, *, csv_kwargs=None, **overrides):

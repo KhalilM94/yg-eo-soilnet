@@ -1,10 +1,9 @@
-"""Legacy name: SoilCNNLightningModule with ``residual_enabled`` on.
+"""An older name for `soil_cnn` with its :term:`residual base` switched on.
 
-The residual base used to live in this subclass. It is now a switch on SoilCNNLightningModule, and
-this name stays for everything that still resolves it: checkpoints whose hyper_parameters predate the
-switch and so do not carry it, models logged to MLflow as pickles of this class, tuned registry files
-exported before the switch, and ``relog.py``. New configuration should use the ``soil_cnn`` entry
-with ``residual_enabled: true``.
+The residual base was once a class of its own; it is now a switch. This name is kept because saved
+models, checkpoints and tuned configuration files written before the change still name it, and
+loading one has to find the class it was saved as. New configuration should use the ``soil_cnn``
+entry with ``residual_enabled: true``.
 """
 
 from __future__ import annotations
@@ -15,15 +14,16 @@ from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import Soil
 
 
 class SoilResidualCNNLightningModule(SoilCNNLightningModule):
-    """SoilCNNLightningModule with the residual base switched on by default.
+    """`soil_cnn` with the :term:`residual base` switched on.
 
-    See SoilCNNLightningModule for the residual arithmetic, the leakage caveat and the validation.
+    See :class:`~yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule`
+    for what the residual base does and when it is honest to use.
     """
 
-    # What a pickled model of this class reads - see the note on SoilCNNLightningModule's switches.
+    # Read by a saved model of this class that predates the switch.
     residual_enabled = True
 
     def __init__(self, *, residual_enabled: bool = True, **kwargs: Any):
-        # Keyword-only, as this class always was: Lightning's save_hyperparameters drops *args, and a
-        # positional static_dim would then be missing when load_from_checkpoint re-calls __init__.
+        # Keyword-only, as this class always was: a saved model records its settings by name, so a
+        # positional one would be missing when the checkpoint is loaded.
         super().__init__(residual_enabled=residual_enabled, **kwargs)

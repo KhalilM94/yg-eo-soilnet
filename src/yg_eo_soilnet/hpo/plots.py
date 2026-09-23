@@ -1,13 +1,6 @@
-"""Study figures and the artifacts a finished study leaves behind.
+"""The figures a finished study leaves behind, and its table of trials.
 
-These follow plot_utils.py's conventions - build a Figure, style it through plot_style, return it,
-and hand back a figure carrying a message rather than None when there is nothing to draw - but live
-in the hpo package rather than in plot_utils.py itself. plot_utils is imported on the sklearn path by
-mlflow_loggers and sklearn_trainer, neither of which has any reason to import optuna.
-
-Optuna builds these figures itself and returns an Axes, so style is applied by drawing inside
-``style_context()`` and then resizing and recolouring what comes back - there is no hook to pass a
-figsize or a palette into.
+As everywhere else here, each function builds a figure and returns it; the caller saves it.
 """
 
 from __future__ import annotations
@@ -43,15 +36,12 @@ ARTIFACT_PATH = "optuna"
 
 
 def _completed(study: optuna.Study) -> int:
+    """The trials that actually finished."""
     return sum(1 for trial in study.trials if trial.state.name == COMPLETE)
 
 
 def _dress(axes, subtitle: str, *, horizontal_bars: bool = False) -> Figure:
-    """Bring an optuna-built Axes into the house style and hand back its Figure.
-
-    Optuna sizes its figures for a notebook and colours them from matplotlib's default cycle, so
-    both are overridden here. The legend it builds is kept - it names the series - but reframed.
-    """
+    """Bring a figure the tuning library drew into this project's style."""
     figure = axes.figure
     figure.set_size_inches(FIG_WIDTH_FULL, 3.0)
     # Not optional, and not redundant with the style_context around the draw: optuna calls
@@ -86,7 +76,7 @@ def _dress(axes, subtitle: str, *, horizontal_bars: bool = False) -> Figure:
 
 
 def optimization_history(study: optuna.Study) -> Figure:
-    """Objective per trial with the running best."""
+    """Each trial's score, with the best so far - does the search improve?"""
     if _completed(study) < 1:
         return _message_figure("No completed trials yet", figsize=(FIG_WIDTH_FULL, 1.6))
     with style_context():
@@ -96,7 +86,7 @@ def optimization_history(study: optuna.Study) -> Figure:
 
 
 def param_importances(study: optuna.Study) -> Figure:
-    """Which hyperparameters actually moved the objective."""
+    """Which settings actually moved the score, and which made no difference."""
     # fANOVA needs at least two completed trials and something that varies between them; below that
     # get_param_importances raises rather than returning an empty result.
     if _completed(study) < 2:
@@ -121,12 +111,11 @@ def write_study_artifacts(
     log_to_mlflow: bool = True,
     logger: Any = None,
 ) -> list[Path]:
-    """Write trials.csv and the two figures, and attach them to the active MLflow run if any.
+    """Write ``trials.csv`` and the two figures, and attach them to the run when there is one.
 
-    Written to a durable directory first and logged from there, so a --no-mlflow run still leaves
-    the same artifacts on disk. That is also why the tempdir dance used in mlflow_loggers is not
-    needed here.
-    """
+    Written to a real folder first, so a run with recording switched off still leaves the same files
+    behind.
+        """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written: list[Path] = []

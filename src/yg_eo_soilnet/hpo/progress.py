@@ -1,12 +1,8 @@
-"""Two-level progress display for a study: trials outside, epochs inside.
+"""The progress display for a study: trials on the outside, epochs on the inside.
 
-A trial-level bar alone is not enough here. With max_epochs in the low hundreds a single trial runs
-for minutes, so a bar that ticks once per trial still leaves the terminal motionless for long
-stretches - which is the problem this is meant to solve. The inner bar advances every validation
-epoch, driven by a Lightning callback.
-
-Falls back to compact log lines when stderr is not a terminal, so a run under nohup or piped to a
-file stays readable instead of filling with carriage returns.
+A bar that ticks once per trial leaves the terminal motionless for minutes at a time, so there is a
+second bar for the epochs within a trial. ``--progress`` chooses; ``auto`` shows bars only when
+there is a terminal to draw them on.
 """
 
 from __future__ import annotations
@@ -33,7 +29,7 @@ SPARKLINE_EVERY = 10  # trials, in plain mode
 
 
 def resolve_mode(mode: str, stream: Any = None) -> str:
-    """Turn `auto` into a concrete mode by asking whether we are talking to a terminal."""
+    """Turn ``auto`` into a real choice, by asking whether the output is a terminal."""
     if mode not in MODES:
         raise ValueError(f"progress mode must be one of {', '.join(MODES)}; got {mode!r}.")
     if mode != "auto":
@@ -46,9 +42,10 @@ def resolve_mode(mode: str, stream: Any = None) -> str:
 
 
 class TqdmLoggingHandler(logging.StreamHandler):
-    """A console handler that writes through `tqdm.write`, so log lines do not smear a live bar."""
+    """Writes log lines in a way that does not smear a live progress bar."""
 
     def emit(self, record: logging.LogRecord) -> None:
+        """Write one log line above the bars."""
         try:
             tqdm.write(self.format(record), file=self.stream)
             self.flush()
@@ -60,15 +57,7 @@ class TqdmLoggingHandler(logging.StreamHandler):
 
 @contextmanager
 def tqdm_safe_logging(logger: logging.Logger | None):
-    """Swap a logger's console handlers for tqdm-aware ones, and put them back afterwards.
-
-    TrainingLogger writes to stdout while tqdm writes to stderr; different streams, same terminal,
-    so an unbridged logger.info() during optimization corrupts the bars.
-
-    The type check is exact on purpose. logging.FileHandler is a *subclass* of StreamHandler, so an
-    isinstance check would also hijack the file handler and fill the .log file with terminal
-    control characters.
-    """
+    """Make a logger's messages bar-safe for as long as the bars are on screen."""
     if logger is None:
         yield
         return
@@ -92,29 +81,43 @@ def tqdm_safe_logging(logger: logging.Logger | None):
 
 
 class _EpochProgressCallback(LightningCallback):
-    """Drives the inner bar from Lightning's validation loop."""
+    """Moves the inner bar on as each epoch finishes."""
 
     def __init__(self, progress: "StudyProgress"):
+        """Hold the display this reports epochs to."""
         self.progress = progress
 
     def on_fit_start(self, trainer, pl_module) -> None:
+        """Start the inner bar for this trial."""
         self.progress.start_trial(getattr(trainer, "max_epochs", None))
 
     def on_validation_end(self, trainer, pl_module) -> None:
         # on_validation_end for the same reason as OptunaPruningCallback: callback
         # on_validation_epoch_end hooks run before the module's, where `val_r2` is logged, so the
         # reading there is a whole epoch stale.
+        """Move the inner bar on by one epoch."""
         if getattr(trainer, "sanity_checking", False):
             return
         value = metric_to_float(trainer.callback_metrics.get(self.progress.objective.metric))
         self.progress.advance_epoch(int(getattr(trainer, "current_epoch", 0)), value)
 
     def on_fit_end(self, trainer, pl_module) -> None:
+        """Close the inner bar."""
         self.progress.end_trial()
 
 
 class StudyProgress:
-    """Outer bar over trials, inner bar over epochs. `mode="none"` makes every method a no-op."""
+    """The two progress bars. ``mode="none"`` makes every method do nothing.
+
+    Parameters
+    ----------
+    total_trials : int
+        How many trials this session will run.
+    tracker : ObjectiveTracker
+        Where the score shown beside the bar comes from.
+    mode : {"auto", "bar", "plain", "none"}
+        How to display progress.
+        """
 
     def __init__(
         self,
@@ -126,6 +129,7 @@ class StudyProgress:
         logger: Any = None,
         stream: Any = None,
     ):
+        """Set up the display, without drawing anything yet."""
         self.n_trials = int(n_trials)
         self.objective = objective
         self.tracker = tracker
@@ -142,11 +146,13 @@ class StudyProgress:
 
     @property
     def enabled(self) -> bool:
+        """Whether anything is being drawn at all."""
         return self.mode != "none"
 
     # --- lifecycle ---------------------------------------------------------
 
     def __enter__(self) -> "StudyProgress":
+        """Open the bars."""
         if self.mode == "bar":
             self._logging_bridge = tqdm_safe_logging(self.logger)
             self._logging_bridge.__enter__()
@@ -162,6 +168,7 @@ class StudyProgress:
         return self
 
     def __exit__(self, *exc_info) -> None:
+        """Close the bars and put the logging back as it was."""
         self._close_inner()
         if self._outer is not None:
             self._outer.close()
@@ -173,7 +180,7 @@ class StudyProgress:
     # --- outer: trials -----------------------------------------------------
 
     def on_trial_end(self, study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
-        """An Optuna study callback. Registered after the tracker's, so the postfix is current."""
+        """Update the outer bar when a trial finishes; passed to the study as a callback."""
         if not self.enabled:
             return
         # A pruned trial raises out of the Lightning callback, so on_fit_end never runs and the
@@ -189,6 +196,7 @@ class StudyProgress:
             self._log_trial(trial)
 
     def _refresh_outer(self) -> None:
+        """Redraw the outer bar with the current best score beside it."""
         if self._outer is None:
             return
         parts = []
@@ -200,6 +208,7 @@ class StudyProgress:
         self._outer.set_postfix_str(" ".join(parts), refresh=True)
 
     def _log_trial(self, trial: optuna.trial.FrozenTrial) -> None:
+        """Write one finished trial's line above the bars."""
         if self.logger is None:
             return
         duration = getattr(trial, "duration", None)
@@ -228,10 +237,11 @@ class StudyProgress:
     # --- inner: epochs -----------------------------------------------------
 
     def epoch_callback(self):
-        """A lightning.pytorch Callback for TrialRunner's `extra_callbacks`."""
+        """The callback that drives the inner bar, to attach to each trial's training."""
         return _EpochProgressCallback(self)
 
     def start_trial(self, max_epochs: int | None) -> None:
+        """Begin the inner bar for a trial."""
         if not self.enabled:
             return
         self._close_inner()
@@ -249,6 +259,7 @@ class StudyProgress:
             )
 
     def advance_epoch(self, epoch: int, value: float | None) -> None:
+        """Move the inner bar on by one epoch."""
         if not self.enabled:
             return
         if value is not None and (
@@ -271,14 +282,17 @@ class StudyProgress:
             )
 
     def end_trial(self) -> None:
+        """Finish the inner bar for a trial."""
         self._close_inner()
 
     def _close_inner(self) -> None:
+        """Close the inner bar if one is open."""
         if self._inner is not None:
             self._inner.close()
             self._inner = None
 
     def _current_trial_label(self) -> str:
+        """The label shown on the inner bar: which trial is running."""
         if self.tracker is not None and self.tracker.records:
             return str(self.tracker.records[-1].number + 1)
         return str(self._trial_index)

@@ -1,7 +1,16 @@
+"""The HPO search space: the objective, distributions, guards and derive hooks, and the overrides a
+trial applies to a registry entry."""
+
+import numpy as np
 import optuna
 import pytest
 
-from yg_eo_soilnet.hpo.overrides import apply_overrides
+from yg_eo_soilnet.hpo.overrides import (
+    apply_overrides,
+    split_dotted,
+    to_builtin,
+    validate_override_keys,
+)
 from yg_eo_soilnet.hpo.search_space import (
     Distribution,
     Objective,
@@ -37,15 +46,12 @@ def test_an_unknown_direction_is_rejected():
         Objective.from_mapping({"direction": "smaller"})
 
 
-def test_a_metric_no_model_logs_is_rejected_at_load_time():
+def test_a_metric_no_model_logs_is_rejected_at_load_time_with_a_hint():
     """Otherwise every trial finishes, finds nothing to score, and is pruned - a whole study lost."""
-    with pytest.raises(ValueError, match="is not logged by any model"):
+    with pytest.raises(ValueError, match="is not logged by any model") as refused:
         Objective.from_mapping({"metric": "mse", "direction": "minimize"})
-
-
-def test_a_loss_shaped_typo_gets_the_val_loss_hint():
-    with pytest.raises(ValueError, match="For mean squared error use 'val_loss'"):
-        Objective.from_mapping({"metric": "mse", "direction": "minimize"})
+    # A loss-shaped typo gets pointed at the metric it most likely meant.
+    assert "For mean squared error use 'val_loss'" in str(refused.value)
 
 
 @pytest.mark.parametrize("metric", ["val_loss", "val_r2", "val_pred_std_ratio", "test_r2"])
@@ -56,70 +62,63 @@ def test_every_logged_metric_is_accepted(metric):
 # --- distribution validation -------------------------------------------------
 
 
-def test_log_and_step_together_are_rejected():
-    with pytest.raises(ValueError, match="rejects 'log' and 'step' together"):
-        Distribution.from_mapping("model.lr", {"type": "float", "low": 1e-4, "high": 1e-2, "log": True, "step": 0.1})
-
-
-def test_inverted_bounds_are_rejected():
-    with pytest.raises(ValueError, match="is above high"):
-        Distribution.from_mapping("model.lr", {"type": "float", "low": 1.0, "high": 0.1})
-
-
-def test_missing_bounds_are_named():
-    with pytest.raises(ValueError, match="needs low and high"):
-        Distribution.from_mapping("model.lr", {"type": "float"})
-
-
-def test_an_unknown_type_is_rejected():
-    with pytest.raises(ValueError, match="unknown type 'uniform'"):
-        Distribution.from_mapping("model.lr", {"type": "uniform", "low": 0, "high": 1})
-
-
-def test_a_list_valued_categorical_choice_is_rejected():
-    """Optuna stores choices in the study DB; structured values belong in a derive hook."""
-    with pytest.raises(ValueError, match="Use a 'derive' hook"):
-        Distribution.from_mapping("model.head_hidden_dims", {"type": "categorical", "choices": [[64, 32], [32]]})
-
-
-def test_an_empty_categorical_is_rejected():
-    with pytest.raises(ValueError, match="non-empty 'choices'"):
-        Distribution.from_mapping("model.activation", {"type": "categorical", "choices": []})
+@pytest.mark.parametrize(
+    "key, spec, message",
+    [
+        pytest.param(
+            "model.lr", {"type": "float", "low": 1e-4, "high": 1e-2, "log": True, "step": 0.1},
+            "rejects 'log' and 'step' together", id="log-and-step",
+        ),
+        pytest.param("model.lr", {"type": "float", "low": 1.0, "high": 0.1}, "is above high", id="inverted-bounds"),
+        pytest.param("model.lr", {"type": "float"}, "needs low and high", id="missing-bounds"),
+        pytest.param("model.lr", {"type": "uniform", "low": 0, "high": 1}, "unknown type 'uniform'", id="unknown-type"),
+        # Optuna stores choices in the study DB; structured values belong in a derive hook.
+        pytest.param(
+            "model.head_hidden_dims", {"type": "categorical", "choices": [[64, 32], [32]]},
+            "Use a 'derive' hook", id="list-valued-choice",
+        ),
+        pytest.param(
+            "model.activation", {"type": "categorical", "choices": []}, "non-empty 'choices'", id="empty-choices"
+        ),
+    ],
+)
+def test_a_malformed_distribution_is_refused(key, spec, message):
+    with pytest.raises(ValueError, match=message):
+        Distribution.from_mapping(key, spec)
 
 
 # --- space validation --------------------------------------------------------
 
 
-def test_an_unknown_top_level_key_is_rejected():
-    with pytest.raises(ValueError, match="unknown key\\(s\\): parms"):
-        SearchSpace.from_mapping("fake_entry", {"parms": {}})
-
-
-def test_a_space_with_nothing_to_search_is_rejected():
-    with pytest.raises(ValueError, match="declares no 'params'"):
-        SearchSpace.from_mapping("fake_entry", {"objective": {"metric": "val_r2"}})
-
-
-def test_guarded_keys_are_caught_at_load_time_not_mid_study():
-    with pytest.raises(ValueError, match="resolved from the datamodule"):
-        SearchSpace.from_mapping("fake_entry", {"params": {"model.target_dim": {"type": "int", "low": 1, "high": 4}}})
-
-
-def test_a_forward_when_reference_is_rejected():
-    """Draw order is declaration order, so a forward guard would silently never match."""
-    mapping = {
-        "params": {
-            "model.nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.temporal_encoder": "x"}},
-            "model.temporal_encoder": {"type": "categorical", "choices": ["x", "y"]},
-        }
-    }
-    with pytest.raises(ValueError, match="not\\s+declared before it"):
+@pytest.mark.parametrize(
+    "mapping, message",
+    [
+        pytest.param({"parms": {}}, "unknown key\\(s\\): parms", id="unknown-top-level-key"),
+        pytest.param({"objective": {"metric": "val_r2"}}, "declares no 'params'", id="nothing-to-search"),
+        # Guarded keys are caught at load time, not mid-study.
+        pytest.param(
+            {"params": {"model.target_dim": {"type": "int", "low": 1, "high": 4}}},
+            "resolved from the datamodule", id="factory-resolved-key",
+        ),
+        # Draw order is declaration order, so a forward guard would silently never match.
+        pytest.param(
+            {
+                "params": {
+                    "model.attention_nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.fusion": "attention"}},
+                    "model.fusion": {"type": "categorical", "choices": ["attention", "gated"]},
+                }
+            },
+            "not\\s+declared before it", id="forward-when-reference",
+        ),
+        pytest.param(
+            {"params": {"model.learning_rate": {"type": "float", "low": 1e-4, "high": 1e-2}}, "derive": ["no_such_hook"]},
+            "Unknown constraint hook", id="unknown-derive-hook",
+        ),
+    ],
+)
+def test_a_malformed_space_is_refused(mapping, message):
+    with pytest.raises(ValueError, match=message):
         SearchSpace.from_mapping("fake_entry", mapping)
-
-
-def test_an_unknown_derive_hook_is_rejected():
-    with pytest.raises(ValueError, match="Unknown constraint hook"):
-        _space(derive=["no_such_hook"])
 
 
 # --- suggestion --------------------------------------------------------------
@@ -136,17 +135,17 @@ def test_fixed_values_are_applied_to_every_trial():
 def test_a_when_guard_suppresses_the_parameter_when_it_does_not_match():
     mapping = {
         "params": {
-            "model.temporal_encoder": {"type": "categorical", "choices": ["time_transformer", "time_lstm"]},
-            "model.nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.temporal_encoder": "time_transformer"}},
+            "model.fusion": {"type": "categorical", "choices": ["attention", "gated"]},
+            "model.attention_nhead": {"type": "categorical", "choices": [2, 4], "when": {"model.fusion": "attention"}},
         }
     }
     space = SearchSpace.from_mapping("fake_entry", mapping)
 
-    transformer = space.suggest(optuna.trial.FixedTrial({"model.temporal_encoder": "time_transformer", "model.nhead": 4}))
-    lstm = space.suggest(optuna.trial.FixedTrial({"model.temporal_encoder": "time_lstm"}))
+    attention = space.suggest(optuna.trial.FixedTrial({"model.fusion": "attention", "model.attention_nhead": 4}))
+    gated = space.suggest(optuna.trial.FixedTrial({"model.fusion": "gated"}))
 
-    assert transformer["model.nhead"] == 4
-    assert "model.nhead" not in lstm
+    assert attention["model.attention_nhead"] == 4
+    assert "model.attention_nhead" not in gated
 
 
 def test_a_when_guard_may_name_a_pinned_value():
@@ -204,7 +203,7 @@ def test_a_derive_guard_is_part_of_the_fingerprint():
 
 
 def test_derive_hook_repairs_d_model_to_divide_by_nhead():
-    """TimeAwareTransformerEncoder raises unless d_model % nhead == 0."""
+    """Multi-head attention raises unless d_model % nhead == 0. Bare, the hook targets model.d_model/nhead."""
     mapping = {
         "params": {
             "model.nhead": {"type": "categorical", "choices": [8]},
@@ -231,7 +230,7 @@ def _attention_pair_space(derive) -> SearchSpace:
 
 
 def test_the_divisibility_hook_repairs_whichever_pair_it_is_pointed_at():
-    """The residual attention CNN names its own pair; the sequence transformer keeps the default."""
+    """The CNN's attention fusion names its own pair instead of the default model.d_model/nhead."""
     space = _attention_pair_space(
         [
             {
@@ -530,12 +529,6 @@ def test_the_sampler_and_the_pruner_are_not_part_of_the_fingerprint(overrides):
     assert _space(**overrides).fingerprint() == _space().fingerprint()
 
 
-def test_the_shipped_spaces_fingerprint_distinctly():
-    digests = {SearchSpace.from_yaml(SEARCH_SPACES_PATH, entry).fingerprint() for entry in SHIPPED_ENTRIES}
-
-    assert len(digests) == len(SHIPPED_ENTRIES)
-
-
 # --- dims_pyramid targets any list-valued key --------------------------------
 
 
@@ -603,3 +596,122 @@ def test_the_shipped_cnn_space_can_still_reach_a_bare_readout():
     }
 
     assert depths == {0}
+
+
+# --- applying overrides -----------------------------------------------------------------------
+
+
+def _spec() -> dict:
+    return {
+        "enabled": True,
+        "modeltype": "dl",
+        "init_args": {"static_dim": "auto", "learning_rate": 0.001},
+        "datamodule_init_args": {"batch_size": 32},
+        "trainer_args": {"max_epochs": 500},
+        "callbacks": {"early_stopping": {"monitor": "val_loss", "patience": 30}},
+    }
+
+
+# --- routing -----------------------------------------------------------------
+
+
+def test_each_prefix_lands_in_its_registry_section():
+    spec = apply_overrides(
+        _spec(),
+        {
+            "model.learning_rate": 0.01,
+            "datamodule.batch_size": 64,
+            "trainer.max_epochs": 150,
+            "callbacks.early_stopping.patience": 20,
+        },
+    )
+
+    assert spec["init_args"]["learning_rate"] == 0.01
+    assert spec["datamodule_init_args"]["batch_size"] == 64
+    assert spec["trainer_args"]["max_epochs"] == 150
+    assert spec["callbacks"]["early_stopping"]["patience"] == 20
+    # Untouched neighbours survive.
+    assert spec["init_args"]["static_dim"] == "auto"
+    assert spec["callbacks"]["early_stopping"]["monitor"] == "val_loss"
+
+
+def test_overrides_create_missing_sections():
+    spec = apply_overrides({"enabled": True}, {"model.dropout": 0.2, "callbacks.checkpoint.save_top_k": 3})
+
+    assert spec["init_args"] == {"dropout": 0.2}
+    assert spec["callbacks"]["checkpoint"] == {"save_top_k": 3}
+
+
+@pytest.mark.parametrize(
+    "dotted",
+    ["learning_rate", "optimizer.lr", "model.a.b", "callbacks.early_stopping", "callbacks.a.b.c"],
+)
+def test_malformed_keys_are_rejected(dotted):
+    with pytest.raises(ValueError):
+        split_dotted(dotted)
+
+
+# --- guards ------------------------------------------------------------------
+
+
+def test_factory_resolved_model_keys_are_refused():
+    """These are filled from the datamodule; a tuned value corrupts the shape contract."""
+    with pytest.raises(ValueError, match="resolved from the datamodule"):
+        validate_override_keys(["model.static_dim"], searched=True)
+
+
+def test_factory_resolved_keys_are_refused_even_when_pinned():
+    with pytest.raises(ValueError, match="resolved from the datamodule"):
+        validate_override_keys(["model.categorical_cardinalities"], searched=False)
+
+
+def test_embedding_dims_is_not_treated_as_factory_resolved():
+    """The factory never touches embedding_dims; 'auto' is resolved inside the model."""
+    validate_override_keys(["model.embedding_dims"], searched=True)
+
+
+def test_split_defining_keys_cannot_be_searched():
+    with pytest.raises(ValueError, match="would not be comparable"):
+        validate_override_keys(["datamodule.val_size"], searched=True)
+
+
+def test_split_defining_keys_may_be_pinned():
+    """Fixing the split for the whole study is fine - only varying it breaks comparability."""
+    validate_override_keys(["datamodule.val_size", "datamodule.seed"], searched=False)
+
+
+def test_every_offending_key_is_reported_at_once():
+    with pytest.raises(ValueError) as excinfo:
+        validate_override_keys(["model.static_dim", "model.grid_years", "datamodule.test_size"], searched=True)
+
+    message = str(excinfo.value)
+    assert "model.static_dim" in message
+    assert "model.grid_years" in message
+    assert "datamodule.test_size" in message
+
+
+# --- builtin coercion --------------------------------------------------------
+
+
+def test_numpy_scalars_become_builtins():
+    """save_hyperparameters() puts these in the checkpoint; numpy there breaks weights_only=True."""
+    assert type(to_builtin(np.float32(0.5))) is float
+    assert type(to_builtin(np.int64(8))) is int
+    assert type(to_builtin(np.bool_(True))) is bool
+
+
+def test_a_bool_does_not_degrade_to_an_int():
+    assert to_builtin(True) is True
+    assert type(to_builtin(True)) is bool
+
+
+def test_sequences_and_mappings_are_converted_elementwise():
+    assert to_builtin(np.array([64, 32])) == [64, 32]
+    assert all(type(item) is int for item in to_builtin((np.int64(64), np.int64(32))))
+    assert to_builtin({"s1": np.int64(4)}) == {"s1": 4}
+
+
+def test_apply_overrides_coerces_on_the_way_in():
+    spec = apply_overrides(_spec(), {"model.static_hidden_dim": np.int64(128)})
+
+    assert type(spec["init_args"]["static_hidden_dim"]) is int

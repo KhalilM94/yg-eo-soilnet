@@ -1,3 +1,8 @@
+"""Abandon a :term:`trial` that is clearly going nowhere, before it finishes.
+
+The score is reported after every epoch, and a trial well behind the ones already finished is
+stopped there - which is what lets a study try many more combinations in the same time.
+"""
 from __future__ import annotations
 
 from typing import Any
@@ -11,10 +16,7 @@ except ImportError:  # pragma: no cover
 
 
 def metric_to_float(value: Any) -> float | None:
-    """A logged Lightning metric as a plain float, or None when it is not a single number.
-
-    ``trainer.callback_metrics`` holds 0-d tensors; a study stored in SQLite needs builtins.
-    """
+    """A score Lightning reported as a plain number, or None when it is not one."""
     if value is None:
         return None
     if hasattr(value, "detach"):
@@ -29,21 +31,23 @@ def metric_to_float(value: Any) -> float | None:
 
 
 class OptunaPruningCallback(LightningCallback):
-    """Reports the objective metric to an Optuna trial each epoch and prunes hopeless trials.
+    """Reports the score each epoch and stops a trial the study judges hopeless.
 
-    Written here rather than taken from ``optuna-integration`` on purpose: that package's callback
-    is built against the ``pytorch_lightning`` namespace, while this repo drives a
-    ``lightning.pytorch`` Trainer (see LightningTrainer._get_lightning_module). Mixing the two
-    trips Lightning's callback type check, so the twenty lines below buy independence from that
-    coupling and from optuna-integration's release cadence.
+    Written here rather than taken from a library so it follows this project's own settings for which
+    score to watch and which direction is better.
 
-    It also keeps the best value it has seen. ``trainer.callback_metrics`` after ``fit()`` holds the
-    *last* epoch, which under early stopping is `patience` epochs past the best one - scoring a
-    trial on that would systematically understate it and disagree with the checkpoint the production
-    run would select.
-    """
+    Parameters
+    ----------
+    trial : optuna.Trial
+        The trial being run.
+    monitor : str
+        Which score to report, usually ``val_loss``.
+    mode : {"min", "max"}
+        Whether lower or higher is better.
+        """
 
     def __init__(self, trial: optuna.Trial, monitor: str, mode: str = "min", *, report: bool = True):
+        """Hold the trial, the score to watch and which direction is better."""
         if mode not in {"min", "max"}:
             raise ValueError(f"mode must be 'min' or 'max'; got {mode!r}.")
         self.trial = trial
@@ -57,6 +61,7 @@ class OptunaPruningCallback(LightningCallback):
         self._reported_epoch: int | None = None
 
     def _is_better(self, value: float) -> bool:
+        """Whether one score beats another, in the configured direction."""
         if self.best_value is None:
             return True
         return value > self.best_value if self.mode == "max" else value < self.best_value
@@ -68,6 +73,7 @@ class OptunaPruningCallback(LightningCallback):
         # previous epoch's value - None on epoch 0 - so every report, the best value and the best
         # epoch would be off by one. `val_loss` is logged in validation_step and so is current
         # either way, which is what made this easy to miss.
+        """Report this epoch's score, and stop the trial if it is hopeless."""
         if getattr(trainer, "sanity_checking", False):
             return
 

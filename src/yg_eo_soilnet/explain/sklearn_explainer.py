@@ -1,20 +1,13 @@
-"""SHAP for the sklearn path: explain the fitted estimator on POST-preprocessing features.
+"""Explaining a scikit-learn model.
 
-Two things here are easy to get wrong and both change what the plot means.
+The estimator is explained rather than the whole pipeline, so the contributions are per prepared
+input - a one-hot column, not the raw category. The column names come from the pipeline itself, so
+each contribution is labelled with the input it belongs to.
 
-**Explain the estimator, not the pipeline.** One-hot and ordinal encoding happen inside the
-pipeline's ColumnTransformer, so the estimator never sees the raw column names. Feature names have
-to come from ``preprocessor.get_feature_names_out()`` and the data has to be the transformed matrix,
-or a categorical column with eight levels silently gets attributed to whatever numeric column now
-sits at its index.
-
-**Mind the target space.** When the target is log-transformed the pipeline's final step is a
-``TransformedTargetRegressor``, and the thing that can actually be explained is its inner
-``regressor_``, which predicts ``10 * log1p(y)``. The SHAP values are contributions in that space,
-which is why every result carries an ``output_space``.
-
-``import shap`` is deliberately inside the function. The module must stay importable - and cheap -
-when EXPLAIN_ENABLED is false.
+Tree and linear models have exact, fast explanations and are used where possible. Anything else
+falls back to a method that repeatedly re-predicts with inputs hidden, which costs roughly the
+number of points times the number of inputs; ``explain.max_evaluations`` caps that, and a model over
+the cap is skipped with the reason recorded rather than left to run for hours.
 """
 
 from __future__ import annotations
@@ -41,31 +34,32 @@ _AGNOSTIC_EVALS_PER_ROW = lambda n_features: 2 * n_features + 1  # noqa: E731
 
 
 class ExplainBudgetExceeded(RuntimeError):
-    """The model-agnostic explainer would cost more evaluations than the budget allows.
+    """Raised when explaining a model would cost more predictions than allowed.
 
-    Raised rather than silently degrading, so ChildRunLogger records the estimate and the budget in
-    meta/run_summary.json and the skip is visible in the run rather than inferred from a gap.
-    """
+    Raised rather than quietly doing something cheaper, so the estimate and the limit are recorded and
+    the skip is visible in the run.
+        """
 
 
 def _looks_like(estimator: Any, markers: tuple[str, ...]) -> bool:
-    """Same name/module marker test PipelineBuilder._is_tree_based_model uses to pick an encoder.
+    """Whether an estimator is of a given kind, judged by its class name.
 
-    Matched by name rather than by isinstance so that xgboost and catboost, which are not sklearn
-    subclasses, are recognised without importing them.
-    """
+    By name rather than by type, so XGBoost and CatBoost are recognised without importing them.
+        """
     name = estimator.__class__.__name__.lower()
     module = estimator.__class__.__module__.lower()
     return any(marker in name or marker in module for marker in markers)
 
 
 def _densify(matrix: Any) -> np.ndarray:
+    """Return the prepared inputs as an ordinary array, whatever the pipeline produced."""
     if hasattr(matrix, "toarray"):
         matrix = matrix.toarray()
     return np.asarray(matrix, dtype=np.float64)
 
 
 def _subsample(matrix: np.ndarray, limit: int, seed: int) -> np.ndarray:
+    """Take at most this many points, at random, to explain."""
     if limit <= 0 or matrix.shape[0] <= limit:
         return matrix
     generator = np.random.default_rng(seed)
@@ -74,7 +68,7 @@ def _subsample(matrix: np.ndarray, limit: int, seed: int) -> np.ndarray:
 
 
 def _unwrap(fitted_estimator: Any) -> tuple[Any, Any, str]:
-    """``(preprocessor, estimator, output_space)`` from a pipeline built by PipelineBuilder."""
+    """Take a pipeline apart into its input preparation, its estimator, and its output units."""
     from sklearn.compose import TransformedTargetRegressor
 
     named_steps = getattr(fitted_estimator, "named_steps", None)
@@ -97,22 +91,20 @@ def _unwrap(fitted_estimator: Any) -> tuple[Any, Any, str]:
 
 
 def _as_values(raw: Any) -> np.ndarray:
-    """SHAP output as ``(n_samples, n_features)`` or ``(n_samples, n_features, n_outputs)``.
+    """The contributions as an array, keeping the per-target axis when the model has one.
 
-    A multi-output explainer appends an output axis. It is kept: under a joint fit the estimator
-    has one output per target, and taking ``[..., 0]`` - which this used to do unconditionally -
-    reported the first target's attributions for every target. ``shap.Explainer`` returns an
-    Explanation object rather than an array, hence the ``.values`` probe.
-    """
+    Kept, because a model predicting several targets has one set of contributions per target.
+        """
     return np.asarray(getattr(raw, "values", raw), dtype=np.float64)
 
 
 def _output_slice(values: np.ndarray, index: int) -> np.ndarray:
-    """One output's ``(n_samples, n_features)`` block."""
+    """One target's contributions."""
     return values[..., index] if values.ndim == 3 else values
 
 
 def _base_value_at(base_value: Any, index: int) -> float:
+    """The average prediction for one target."""
     array = np.asarray(base_value, dtype=np.float64).reshape(-1)
     if array.size == 0:
         return 0.0
@@ -120,11 +112,11 @@ def _base_value_at(base_value: Any, index: int) -> float:
 
 
 def _agnostic(shap, estimator, background_matrix, explain_matrix, max_evals):
-    """Model-agnostic SHAP, budgeted.
+    """The general explanation method: re-predict with inputs hidden, many times over.
 
-    Used for anything that is neither a tree nor a linear model, and as the fallback when the fast
-    exact explainer refuses a model it should have handled.
-    """
+    Used for anything that is neither a tree nor a linear model. Refuses to start when the cost would
+    exceed ``explain.max_evaluations``.
+        """
     n_rows, n_features = explain_matrix.shape
     evals_per_row = _AGNOSTIC_EVALS_PER_ROW(n_features)
     estimated = n_rows * evals_per_row
@@ -150,17 +142,17 @@ def _agnostic(shap, estimator, background_matrix, explain_matrix, max_evals):
 
 
 def _explain(shap, *, estimator, explain_matrix, background_matrix, max_evals):
-    """``(values, base_value, explainer_name)`` from the cheapest explainer that actually works.
+    """Explain the estimator with the cheapest method that actually works.
 
-    TreeExplainer and LinearExplainer are exact and fast, so they are tried first. The catch is that
-    they can fail on a model they nominally support: shap 0.48 cannot parse xgboost 3.3's
-    ``base_score``, which is now serialized as a bracketed string like ``'[2.7789434E1]'``, and it
-    raises ``ValueError: could not convert string to float`` - **inside shap_values, not at
-    construction**, which is why the call is inside the try and not just the constructor.
+    The exact methods are tried first and can fail on a model they nominally support, so the slower
+    general method is the fallback.
 
-    Falling back keeps XGBoost explainable across that version skew. The explainer actually used is
-    returned and recorded in shap_summary.json, so the downgrade is visible rather than silent.
-    """
+    Returns
+    -------
+    values : numpy.ndarray
+    base_value : float or numpy.ndarray
+    explainer_name : str
+        """
     fast = None
     if _looks_like(estimator, _TREE_MARKERS):
         fast = ("TreeExplainer", lambda: shap.TreeExplainer(estimator))
@@ -183,19 +175,7 @@ def _explain(shap, *, estimator, explain_matrix, background_matrix, max_evals):
 
 
 def _blocks_from_feature_names(feature_names: list[str]) -> list[str]:
-    """Group post-preprocessing features by the ColumnTransformer prefix they already carry.
-
-    ``get_feature_names_out`` emits ``num__clay_pct`` and ``cat__texture_loam`` because
-    PipelineBuilder names its two transformers 'num' and 'cat'. Reusing that split gives the block
-    plot something to say - previously every sklearn feature was labelled "features" and the chart
-    was a single bar.
-
-    Worth having because the two families encode categoricals differently: a tree model ordinal-
-    encodes texture into ONE column while a linear model one-hot encodes it into several, so
-    per-feature bars are not comparable across them but the block totals are. ShapResult
-    .block_mean_abs sums within a block before taking the absolute value, so this answers "how much
-    do the categorical covariates move the prediction, jointly".
-    """
+    """Group the prepared inputs by whether they came from a number or a category."""
     labels = {"num": "continuous", "cat": "categorical"}
     blocks = []
     for name in feature_names:
@@ -205,7 +185,7 @@ def _blocks_from_feature_names(feature_names: list[str]) -> list[str]:
 
 
 def _base_value(explainer):
-    """The explainer's expected value, kept per output when it has several."""
+    """The average prediction the contributions are measured from, per target."""
     expected = getattr(explainer, "expected_value", None)
     if expected is None:
         return 0.0
@@ -224,6 +204,29 @@ def sklearn_shap_results(
     target: str,
     target_names: Any = None,
 ) -> list[ShapResult]:
+    """Explain a fitted scikit-learn model, for every target it predicts.
+
+    Parameters
+    ----------
+    model : sklearn.pipeline.Pipeline
+        The fitted pipeline.
+    X : pandas.DataFrame
+        The points to explain, before preparation.
+    target : str
+        The :term:`target group`, used to name outputs when there is nothing better.
+    config : Config, optional
+        Read for ``explain.max_samples`` and ``explain.max_evaluations``.
+
+    Returns
+    -------
+    list of ShapResult
+        One per target.
+
+    Raises
+    ------
+    ExplainBudgetExceeded
+        If the model would cost more predictions than allowed.
+        """
     import shap
 
     preprocessor, estimator, output_space = _unwrap(fitted_estimator)

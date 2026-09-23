@@ -31,3 +31,9 @@ dist/
 # Datasets
 *.csv
 *.png
+
+# Documentation build output
+docs/_build/
+
+# Generated example data (python examples/make_demo_data.py)
+examples/demo_data/

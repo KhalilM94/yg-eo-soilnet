@@ -1,15 +1,10 @@
-"""Loading a trained deep-learning model and predicting with it, outside a training run.
+"""Use a saved deep-learning model to predict new points, outside a training run.
 
-The sklearn path has had this for free: ``mlflow.sklearn.log_model`` serializes a whole fitted
-``Pipeline``, so the imputers, the scaler and the encoder travel with the estimator and a reloaded
-model can be handed raw data. The Lightning path had only half of it - the checkpoint carried the
-weights and the target inverse-transform, but the INPUT standardization and the categorical
-vocabulary were fitted on the datamodule and thrown away with it, so a restored model could not be
-fed anything it had not already been fed.
-
-:meth:`SoilSequenceDataModule.preprocessing_state` and
-:meth:`SoilRegressionLightningBase.attach_preprocessing_state` close that gap by putting the fitted
-statistics in the checkpoint; :class:`SoilSequencePredictor` is what uses them.
+A saved scikit-learn model carries its own input preparation, so it can be handed raw data as it
+is. A deep-learning model cannot: the standardization statistics, the fill values and the category
+numbering are learned from the training points and live on the datamodule. They are written into the
+:term:`checkpoint`, and this package is what puts them back - which is what makes a saved model
+usable on data it has never seen.
 """
 
 from yg_eo_soilnet.serving.sequence_predictor import SoilSequencePredictor

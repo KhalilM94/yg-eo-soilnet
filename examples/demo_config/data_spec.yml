@@ -1,0 +1,40 @@
+# Which columns of the demo data are what. configs/data_spec.yml explains every setting in detail.
+
+# Every lab-measured column. These are never used as inputs to a model, so a lab value you stop
+# predicting cannot quietly start helping to predict the others.
+LABEL_COLUMNS:
+  - organic_matter_g_kg
+  - clay_pct
+  - ph_water
+CARRY_LABEL_COLUMNS: false
+
+# The lab values the models learn to predict.
+TARGET_COLUMNS:
+  - organic_matter_g_kg
+  - clay_pct
+  - ph_water
+
+# joint: one model predicts all three at once. per_target: one model per property.
+MULTI_TARGET_MODE: joint
+
+USE_HARMONIC_COORDS: false          # true feeds each point's location to the deep-learning model
+USE_CONTEXT_FEATURES: false
+CONTEXT_FEATURES: []
+
+# Columns that are identifiers or coordinates, never inputs.
+IGNORED_COLUMNS: &ignored_columns
+  - uuid
+  - lat
+  - lon
+ELIMINATED_FEATURES: *ignored_columns
+
+# Columns holding categories (text labels) rather than numbers.
+CATEGORICAL_FEATURES:
+  - landform_class
+
+existing_hs_features:
+  enabled: false
+  ignore: false
+  prefix: []
+  band_count: 0
+  band_names: []

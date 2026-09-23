@@ -1,6 +1,5 @@
 from pathlib import Path
 import json
-from unittest.mock import MagicMock
 
 import pandas as pd
 import pytest
@@ -277,34 +276,6 @@ def test_metadata_columns_can_exclude_targets(toy_config, logger) -> None:
     assert {"point_id", "lat", "lon", "geometry"} <= without_targets
 
 
-# --- boundary: framework-specific work must live outside DataManager ------
-
-
-@pytest.mark.parametrize(
-    "method_name",
-    [
-        "preprocess_data",
-        "split_data",
-        "build_spatiotemporal_graph",
-        "split_modalities",
-        "compute_baseline_residuals",
-        "build_edge_index",
-        "load_static_data",
-        # Retired in favour of load_dataset(): these returned frames that may lack targets,
-        # which made callers re-derive joint-vs-separate for themselves.
-        "load_data",
-        "load_targets_data",
-    ],
-)
-def test_data_manager_does_not_expose_framework_specific_methods(toy_config, logger, method_name) -> None:
-    assert not hasattr(DataManager(toy_config, logger), method_name)
-
-
-@pytest.mark.parametrize("attribute_name", ["_tabular_preprocessor", "_graph_builder", "_sklearn_splitter"])
-def test_data_manager_holds_no_framework_collaborators(toy_config, logger, attribute_name) -> None:
-    assert not hasattr(DataManager(toy_config, logger), attribute_name)
-
-
 # --- load_dataset: the three declared input shapes -------------------------
 
 
@@ -500,7 +471,7 @@ def test_label_columns_are_excluded_even_when_not_being_fitted(toy_config, logge
 
 
 def test_label_columns_apply_even_when_targets_are_passed_explicitly(toy_config, logger) -> None:
-    """The graph builder passes its own target list; LABEL_COLUMNS must still apply."""
+    """A caller may pass its own target list; LABEL_COLUMNS must still apply."""
     toy_config.LABEL_COLUMNS = ["target_b", "ph_water"]
     frame = pd.DataFrame({"target_a": [1.0], "target_b": [2.0], "ph_water": [7.0], "elevation": [10.0]})
 

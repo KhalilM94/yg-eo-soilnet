@@ -5,7 +5,7 @@
 #               validated on near-duplicate/related points
 SPLIT_STRATEGY: "kfold" # "groupkfold" or "kfold"
 SKLEARN_FILE_LOGGING_ENABLED: true   # write a log file for sklearn runs, not just console output
-MIN_FEATURE_COUNT: 10   # stop the run with an error if fewer than this many features remain
+MIN_FEATURE_COUNT: 10   # warn if fewer than this many features remain (the run still continues)
 # If more than this fraction of your original columns end up excluded from the feature set
 # (as metadata, labels, etc.), print a warning - a high number here often points to a config
 # mistake, e.g. a genuine feature accidentally listed in IGNORED_COLUMNS.

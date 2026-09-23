@@ -1,7 +1,8 @@
-"""Turning a winning trial into a registry file you can train from.
+"""Write a winning :term:`trial` back out as a model-list file you can train from.
 
-The export goes through the same `apply_overrides` a trial used, so the emitted YAML is provably the
-configuration that produced the recorded value rather than a re-derivation of it.
+The file is built by writing the winning settings into the model-list entry through exactly the
+code a trial used, so what it holds is provably the configuration that produced the score rather
+than a reconstruction of it.
 """
 
 from __future__ import annotations
@@ -30,11 +31,11 @@ INFRASTRUCTURE_DATAMODULE_KEYS = ("num_workers", "pin_memory", "persistent_worke
 
 
 def best_overrides(study: optuna.Study) -> dict[str, Any]:
-    """The overrides the best trial actually ran with.
+    """The settings the best trial actually ran with.
 
-    Read back from the trial rather than replayed through the search space: a conditional draw
-    cannot be reproduced outside a live trial, and `derive` hooks draw parameters of their own.
-    """
+    Read back from the trial rather than drawn again: a conditional setting cannot be reproduced
+    outside a live trial.
+        """
     trial = study.best_trial
     overrides = trial.user_attrs.get(OVERRIDES_ATTR)
     if overrides is None:
@@ -46,7 +47,7 @@ def best_overrides(study: optuna.Study) -> dict[str, Any]:
 
 
 def build_tuned_spec(registry_entry: dict[str, Any], overrides: dict[str, Any], objective: Objective) -> dict[str, Any]:
-    """The pristine registry entry with the winning overrides and production settings restored."""
+    """The original model-list entry with the winning settings written in, ready to train."""
     spec = apply_overrides(deepcopy(registry_entry), overrides)
     spec["enabled"] = True
     spec.setdefault("trainer_args", {})["enable_checkpointing"] = True
@@ -82,6 +83,7 @@ def _header(
     headline_value: float | None = None,
     rerank: Any = None,
 ) -> str:
+    """The comment block at the top of an exported file: which study, which trial, what it scored."""
     number = study.best_trial.number if trial_number is None else trial_number
     value = study.best_value if headline_value is None else headline_value
     lines = [
@@ -144,11 +146,24 @@ def export_best_config(
     registry_path: str | None = None,
     rerank: Any = None,
 ) -> Path:
-    """Write `{entry: tuned_spec}` to `path` and return it.
+    """Write the winner to a model-list file and return what was written.
 
-    `rerank`, when given, is the winning RerankResult: its overrides are exported instead of the
-    study's best trial, because the re-ranked winner is frequently a different configuration.
-    """
+    Parameters
+    ----------
+    study : optuna.Study
+        The finished study.
+    context : ObjectiveContext
+        The shared context the trials ran in.
+    path : str
+        Where to write the file.
+    rerank : RerankResult, optional
+        The :term:`reranked <rerank>` winner, exported in place of the study's headline best.
+
+    Returns
+    -------
+    dict
+        ``{model name: its settings}``, as written.
+        """
     if rerank is None:
         overrides, trial_number, headline = best_overrides(study), None, None
     else:

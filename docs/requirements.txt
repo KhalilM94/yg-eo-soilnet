@@ -1,0 +1,10 @@
+# Packages Read the Docs installs to build the documentation. Locally, the `dev` pixi environment
+# already has everything; see `pixi run -e dev docs`.
+sphinx
+sphinx-rtd-theme
+myst-parser
+numpy
+pandas
+pyyaml
+scipy
+matplotlib

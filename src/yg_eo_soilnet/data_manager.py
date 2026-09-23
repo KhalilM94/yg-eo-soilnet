@@ -1,8 +1,10 @@
+"""Read the configured data files and decide which of their columns are model inputs."""
+
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Iterable, Optional
 
 import pandas as pd
 
@@ -10,15 +12,37 @@ from yg_eo_soilnet.dataset import SoilDataset
 
 
 class DataManager:
-    """Loads raw datasets and filters non-feature columns out of them.
+    """Read the data files and pick out the columns models may use as inputs.
 
-    Each source - static, targets, time-series - is one configured path that may be a file or a
-    folder of files, optionally listed in a manifest. ``load_dataset`` resolves all of them into a
-    single normalized :class:`SoilDataset`.
+    There are three data sources, set under ``common.data`` in ``main_config.yml``: the *static*
+    covariates, the *targets* (lab measurements, with the coordinates) and the *time series*. Each
+    may be a single CSV or Parquet file, a folder of them, or a list of files in a JSON manifest
+    (``data_index_manifest``).
 
-    Everything downstream of that is framework-specific and lives elsewhere:
-    ``datamodules.scikit`` owns preprocessing/splitting, ``datamodules.lightning`` owns graph
-    construction and dataloaders. This class deliberately knows nothing about either.
+    :meth:`load_dataset` reads them into a :class:`~yg_eo_soilnet.dataset.SoilDataset`, joining the
+    targets onto the static covariates; the time series is read only when a model asks for it.
+    :meth:`filter_schema` then drops everything that is not an input - ids, coordinates, lab
+    measurements and the excluded columns. Preparing those inputs for each model family happens
+    later, in :mod:`yg_eo_soilnet.datamodules`.
+
+    Files are read once and kept in memory; :meth:`reload` forgets them.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    logger : logging.Logger
+        Where progress messages go.
+
+    Examples
+    --------
+    >>> import logging
+    >>> from config import Config
+    >>> manager = DataManager(Config("examples/demo_config/main_config.yml"),
+    ...                       logging.getLogger("demo"))
+    >>> dataset = manager.load_dataset()        # doctest: +SKIP
+    >>> dataset.tabular.shape                   # doctest: +SKIP
+    (300, 18)
     """
 
     def __init__(self, config, logger):
@@ -29,12 +53,11 @@ class DataManager:
     # --- schema filtering -------------------------------------------------
 
     def coordinate_columns(self) -> tuple[str, str]:
-        """The ``(lat, lon)`` column names, from the configuration.
+        """Return the latitude and longitude column names, ``"lat"`` and ``"lon"`` unless set.
 
-        One place rather than a ``getattr(config, "LAT_COLUMN", "lat")`` at every call site: the
-        pair is read by the schema filter, the targets join, the unified splitter and - since
-        USE_HARMONIC_COORDS - the sequence builder, and a default that drifted between them would
-        route coordinates to some of those and not others.
+        Returns
+        -------
+        tuple of (str, str)
         """
         return (
             getattr(self.config, "LAT_COLUMN", "lat"),
@@ -42,25 +65,38 @@ class DataManager:
         )
 
     def context_feature_columns(self) -> list[str]:
-        """The declared spatial-context columns, empty when the group is switched off.
+        """Return the spatial-context covariates, or nothing when the group is switched off.
 
-        Deliberately NOT metadata: these are ordinary continuous predictors that happen to be
-        grouped so they can be ablated and attributed together. The group being off is what puts
-        them in :meth:`excluded_columns`, which is where a gated *feature* belongs - putting them
-        in :meth:`metadata_columns` would say they can never be predictors, which is the opposite
-        of what they are.
+        ``CONTEXT_FEATURES`` in ``data_spec.yml`` groups ordinary numeric covariates so they can be
+        switched off together (``USE_CONTEXT_FEATURES: false``), to measure how much they help, and
+        reported together in the SHAP figures. While switched on they are ordinary inputs; switched
+        off they join :meth:`excluded_columns`.
+
+        Returns
+        -------
+        list of str
         """
         if not getattr(self.config, "USE_CONTEXT_FEATURES", True):
             return []
         return [str(column) for column in (getattr(self.config, "CONTEXT_FEATURES", []) or [])]
 
     def metadata_columns(self, target_columns: Optional[list[str]] = None, *, include_targets: bool = True) -> set[str]:
-        """Columns that identify or measure a sample rather than describe it.
+        """Return the columns that identify or measure a point rather than describe it.
 
-        Coordinates stay here whatever USE_HARMONIC_COORDS says. That flag routes lat/lon to the
-        CNN's own coordinate branch by reading them straight off the raw frame, exactly as
-        CARRY_LABEL_COLUMNS routes lab values - it does not promote them to features, and letting
-        them through here would hand raw degrees to every sklearn model as an ordinary predictor.
+        Never model inputs: the point id, the coordinates, ``geometry``, the targets and every
+        :term:`lab column`. The coordinates stay here even with ``USE_HARMONIC_COORDS``, which lets
+        `soil_cnn` read them through its own location branch: they are still not ordinary inputs.
+
+        Parameters
+        ----------
+        target_columns : list of str, optional
+            The targets of this model; ``TARGET_COLUMNS`` unless given.
+        include_targets : bool, default True
+            Whether the targets and lab columns are included.
+
+        Returns
+        -------
+        set of str
         """
         lat_column, lon_column = self.coordinate_columns()
         columns = {
@@ -71,21 +107,26 @@ class DataManager:
         }
         if include_targets:
             active = target_columns if target_columns is not None else list(getattr(self.config, "TARGET_COLUMNS", []))
-            # LABEL_COLUMNS is added regardless of which targets are being fitted: a measured label
-            # is never a feature. Without it, commenting a target out of TARGET_COLUMNS silently
-            # promotes it to a predictor of the remaining targets - which a joint static+targets
-            # file makes live immediately.
+            # Every lab column, not only the targets being predicted: taking a target out of
+            # TARGET_COLUMNS must not turn it into an input for the others.
             columns.update(active)
             columns.update(getattr(self.config, "LABEL_COLUMNS", []) or [])
         return columns
 
     def excluded_columns(self, columns: Iterable[str]) -> set[str]:
-        """Configured non-feature columns: eliminated, excluded categorical and ignored bands.
+        """Return the columns the configuration excludes from the inputs.
 
-        Plus the spatial-context group when it is switched off. Subtracting the live group from the
-        declared one is what makes the switch an ablation rather than a no-op: with the group on
-        this contributes nothing and the columns behave as they always did, and with it off the
-        declared names are dropped even though they are present and numeric.
+        ``ELIMINATED_FEATURES``, ``EXCLUDE_CATEGORICAL``, the ignored bands (see
+        :meth:`hyperspectral_drop_columns`), and the spatial-context group when it is switched off.
+
+        Parameters
+        ----------
+        columns : iterable of str
+            The columns present in the data, needed to match band-name prefixes.
+
+        Returns
+        -------
+        set of str
         """
         declared_context = {str(column) for column in (getattr(self.config, "CONTEXT_FEATURES", []) or [])}
         return (
@@ -96,7 +137,33 @@ class DataManager:
         )
 
     def filter_schema(self, frame: pd.DataFrame, target_columns: Optional[list[str]] = None) -> pd.DataFrame:
-        """Drop metadata and configured non-feature columns, leaving a feature-only frame."""
+        """Return a copy of ``frame`` holding only the columns models may use as inputs.
+
+        Drops :meth:`metadata_columns` and :meth:`excluded_columns`.
+
+        Parameters
+        ----------
+        frame : pandas.DataFrame
+            One row per point.
+        target_columns : list of str, optional
+            The targets of this model; ``TARGET_COLUMNS`` unless given.
+
+        Returns
+        -------
+        pandas.DataFrame
+
+        Examples
+        --------
+        >>> import logging, pandas as pd
+        >>> from types import SimpleNamespace
+        >>> config = SimpleNamespace(POINT_ID_COLUMN="uuid", TARGET_COLUMNS=["clay_pct"],
+        ...                          LABEL_COLUMNS=["clay_pct", "ph_water"])
+        >>> manager = DataManager(config, logging.getLogger("demo"))
+        >>> frame = pd.DataFrame(
+        ...     columns=["uuid", "lat", "lon", "elevation", "slope", "clay_pct", "ph_water"])
+        >>> list(manager.filter_schema(frame).columns)
+        ['elevation', 'slope']
+        """
         drop_columns = self.metadata_columns(target_columns) | self.excluded_columns(frame.columns)
         columns_to_drop = sorted(column for column in frame.columns if column in drop_columns)
         if not columns_to_drop:
@@ -104,6 +171,21 @@ class DataManager:
         return frame.drop(columns=columns_to_drop, errors="ignore")
 
     def hyperspectral_drop_columns(self, columns: Iterable[str]) -> set[str]:
+        """Return the spectral band columns to drop.
+
+        With ``existing_hs_features`` both ``enabled`` and ``ignore``, that is its listed
+        ``band_names`` plus every column starting with its ``prefix`` (one string, not a list).
+        Columns named in the older ``IGNORE_BANDS`` setting are dropped too.
+
+        Parameters
+        ----------
+        columns : iterable of str
+            The columns present in the data.
+
+        Returns
+        -------
+        set of str
+        """
         drop_columns: set[str] = set()
         existing_hs = self.normalize_mapping(getattr(self.config, "EXISTING_HS_FEATURES", {}))
         if existing_hs.get("enabled", False) and existing_hs.get("ignore", False):
@@ -122,11 +204,22 @@ class DataManager:
         return drop_columns
 
     def temporal_config(self) -> dict[str, Any]:
+        """Return the ``temporal:`` settings as a dict (empty when there are none)."""
         return self.normalize_mapping(getattr(self.config, "TEMPORAL_FEATURES", {}) or {})
 
     @staticmethod
     def normalize_mapping(value: Any) -> dict:
-        """Coerce a config value that may be a dict or a JSON string into a dict."""
+        """Return a setting as a dict, whether it arrived as a dict or as JSON text.
+
+        Anything else, unreadable JSON included, gives an empty dict.
+
+        Examples
+        --------
+        >>> DataManager.normalize_mapping('{"enabled": true}')
+        {'enabled': True}
+        >>> DataManager.normalize_mapping(None)
+        {}
+        """
         if value is None:
             return {}
         if isinstance(value, dict):
@@ -143,17 +236,21 @@ class DataManager:
 
     @staticmethod
     def _is_tabular_file(file_name: str) -> bool:
+        """Whether a file name ends in .csv, .parquet or .pq."""
         lower_name = file_name.lower()
         return lower_name.endswith((".csv", ".parquet", ".pq"))
 
     def _resolve_data_path(self, path_value: Optional[str]) -> Optional[str]:
+        """Return an absolute path; a relative one is read inside the data folder."""
         if not path_value:
             return None
         if os.path.isabs(path_value):
             return path_value
-        return os.path.join(self.config.DATA_FOLDER, path_value)
+        # Config hands over absolute paths already, so resolving one twice does no harm.
+        return os.path.abspath(os.path.join(self.config.DATA_FOLDER, path_value))
 
     def _read_tabular_file(self, file_path: str, missing_label: str = "Tabular file") -> pd.DataFrame:
+        """Read one CSV or Parquet file."""
         if not os.path.isfile(file_path):
             raise FileNotFoundError(f"{missing_label} not found: {file_path}")
         lower_path = file_path.lower()
@@ -164,6 +261,7 @@ class DataManager:
         raise ValueError(f"Unsupported tabular file format: {file_path}")
 
     def _load_data_index_manifest(self) -> Optional[dict[str, Any]]:
+        """Read the JSON manifest listing the data files, if one is configured."""
         manifest_path = getattr(self.config, "DATA_INDEX_MANIFEST_PATH", None)
         if not manifest_path:
             return None
@@ -176,6 +274,7 @@ class DataManager:
         return manifest
 
     def _discover_tabular_files_one_level(self, folder_path: str) -> list[str]:
+        """List the data files in a folder and its immediate subfolders, sorted by path."""
         discovered: list[str] = []
         if not os.path.isdir(folder_path):
             return discovered
@@ -193,6 +292,7 @@ class DataManager:
         return sorted(discovered)
 
     def _normalize_manifest_paths(self, paths: Any) -> list[str]:
+        """Return a manifest entry - one path or a list of them - as a list."""
         if paths is None:
             return []
         if isinstance(paths, str):
@@ -202,12 +302,14 @@ class DataManager:
         return []
 
     def _load_tabular_paths(self, paths: list[str]) -> pd.DataFrame:
+        """Read several files and stack their rows into one table."""
         if not paths:
             raise FileNotFoundError("No tabular files were discovered")
         frames = [self._read_tabular_file(path) for path in paths]
         return pd.concat(frames, ignore_index=True, sort=False)
 
     def _load_folder_or_file(self, source_path: Optional[str], manifest_paths: Optional[list[str]] = None) -> pd.DataFrame:
+        """Read a source given as a list of files from the manifest, one file, or a folder."""
         if manifest_paths:
             absolute_paths = [self._resolve_data_path(path) for path in manifest_paths]
             return self._load_tabular_paths([path for path in absolute_paths if path])
@@ -226,6 +328,7 @@ class DataManager:
         return self._load_tabular_paths(discovered_paths)
 
     def _load_manifest_source_paths(self, manifest: dict[str, Any], manifest_key: str) -> list[str]:
+        """Return the manifest's file list for one source, matching the key in any letter case."""
         if not manifest:
             return []
         for key in (manifest_key, manifest_key.lower(), manifest_key.upper()):
@@ -234,10 +337,10 @@ class DataManager:
         return []
 
     def _load_source(self, source_path: Optional[str], manifest_key: str, *, label: str) -> pd.DataFrame:
-        """Resolve one configured source: manifest entry, folder scan, or single file.
+        """Read one source - static covariates or targets - and keep it in memory.
 
-        The manifest is consulted first so it works for file-based configs too, not only when the
-        configured path happens to be a directory.
+        The manifest is consulted first, so its file list is used whether the configured path is a
+        file or a folder.
         """
         cache_key = f"{manifest_key}:{source_path}"
         cached = self._cache.get(cache_key)
@@ -257,10 +360,20 @@ class DataManager:
     # --- loaders ----------------------------------------------------------
 
     def load_dataset(self) -> SoilDataset:
-        """Load the dataset, whatever shape it arrives in.
+        """Read the data and return it as a :class:`~yg_eo_soilnet.dataset.SoilDataset`.
 
-        Static and targets may be one joint file or two separate files/folders; time-series always
-        arrives separately and is loaded lazily. Every framework consumes the returned bundle.
+        The static covariates and the targets may share one file or sit in two; see
+        :meth:`load_tabular_data`. The time series is read the first time a model asks for it.
+
+        Returns
+        -------
+        SoilDataset
+
+        Examples
+        --------
+        >>> dataset = manager.load_dataset()                 # doctest: +SKIP
+        >>> len(dataset.tabular), dataset.target_columns     # doctest: +SKIP
+        (300, ['organic_matter_g_kg', 'clay_pct', 'ph_water'])
         """
         lat_column, lon_column = self.coordinate_columns()
         return SoilDataset(
@@ -274,10 +387,11 @@ class DataManager:
         )
 
     def reload(self) -> None:
-        """Drop cached frames so the next load re-reads from disk."""
+        """Forget the files read so far, so the next load reads them from disk again."""
         self._cache.clear()
 
     def _static_source(self) -> Optional[str]:
+        """The configured path to the static covariates, trying the older setting names too."""
         return (
             getattr(self.config, "STATIC_SOURCE", None)
             or getattr(self.config, "STATIC_FEATURES_FOLDER", None)
@@ -286,8 +400,9 @@ class DataManager:
         )
 
     def _targets_source(self) -> Optional[str]:
-        # Falling back to the static path is safe: load_tabular_data only reaches here when the
-        # static frame lacks the targets, i.e. when the two are genuinely separate.
+        """The configured path to the targets, trying the older setting names too."""
+        # With no targets setting this falls back to the static path, which is only read when the
+        # static file turned out not to hold the targets.
         return (
             getattr(self.config, "TARGETS_SOURCE", None)
             or getattr(self.config, "TARGETS_FOLDER", None)
@@ -298,6 +413,7 @@ class DataManager:
         )
 
     def _timeseries_source(self) -> Optional[str]:
+        """The configured path to the time series, from the ``temporal:`` settings or the older names."""
         temporal_config = self.temporal_config()
         return (
             temporal_config.get("timeseries_folder")
@@ -309,6 +425,11 @@ class DataManager:
         )
 
     def _temporal_enabled(self) -> bool:
+        """Whether the time series is switched on *and* a source is configured.
+
+        With ``temporal.enabled: true`` but no source, it is off and nothing says so: the
+        deep-learning model then sees the static covariates only.
+        """
         temporal_config = self.temporal_config()
         enabled = bool(
             temporal_config.get("enabled", getattr(self.config, "TEMPORAL_FEATURES_ENABLED", False))
@@ -316,14 +437,33 @@ class DataManager:
         return enabled and bool(self._timeseries_source())
 
     def _load_static(self) -> pd.DataFrame:
-        """Static features as configured - targets may or may not be present in this frame."""
+        """Read the static covariates; they may hold the targets as well."""
         return self._load_source(self._static_source(), "static_features", label="static data")
 
     def _load_targets(self) -> pd.DataFrame:
+        """Read the targets file."""
         return self._load_source(self._targets_source(), "targets", label="targets")
 
     def load_tabular_data(self) -> pd.DataFrame:
-        """Static features with targets joined in, whether they arrive together or separately."""
+        """Return one row per point: the static covariates with the targets joined on.
+
+        If the static file already holds every target it is returned as it is. Otherwise the targets
+        file is read and joined on the point id, keeping only points present in both. The
+        coordinates come from the targets file when the static file lacks them, and with
+        ``CARRY_LABEL_COLUMNS: true`` so do the other :term:`lab columns <lab column>`, for models
+        using an :term:`auxiliary lab input`; joining them does not make them ordinary inputs.
+
+        Returns
+        -------
+        pandas.DataFrame
+
+        Raises
+        ------
+        ValueError
+            If no targets are configured.
+        KeyError
+            If the point id column is missing from either file, or a target from the targets file.
+        """
         static_df = self._load_static()
         target_columns = list(getattr(self.config, "TARGET_COLUMNS", []))
         if not target_columns:
@@ -343,8 +483,7 @@ class DataManager:
         if missing_targets:
             raise KeyError(f"Target column(s) missing from targets file: {', '.join(missing_targets)}")
 
-        # Coordinates are per-sample metadata both frameworks need, but a covariates file often
-        # carries only the point id. Carry them across when only the targets file has them.
+        # The coordinates are often filed with the targets and not with the covariates.
         coordinate_columns = [
             column
             for column in self.coordinate_columns()
@@ -353,15 +492,8 @@ class DataManager:
         if coordinate_columns:
             self.logger.info(f"Joining coordinate column(s) {coordinate_columns} from the targets source")
 
-        # Measured lab values beyond the ones being fitted, carried only when CARRY_LABEL_COLUMNS
-        # asks for them. Without this the split-file layout silently offers a model just the active
-        # targets while the joint-file layout offers every label, so the same LABEL_COLUMNS
-        # declaration means different things depending on how the data happens to be filed.
-        #
-        # Joining them does NOT make them predictors: metadata_columns adds every LABEL_COLUMNS
-        # entry to the drop set regardless of which targets are active, and all three paths select
-        # their features through filter_schema. Only a model that names one in
-        # auxiliary_label_columns ever reads it.
+        # The other lab measurements, carried only when asked for. They stay out of the inputs
+        # (metadata_columns drops them); only a model naming one as an auxiliary input reads it.
         label_columns = []
         if getattr(self.config, "CARRY_LABEL_COLUMNS", False):
             label_columns = [
@@ -375,14 +507,22 @@ class DataManager:
                     "as auxiliary inputs; they remain excluded from the feature set"
                 )
 
-        # dict.fromkeys, not a bare list: a column that is both a target and a label - which every
-        # active target is - would otherwise be selected twice, and targets_df[join_columns] would
-        # return a frame with a duplicated column that fails on merge for no legible reason.
+        # dict.fromkeys drops duplicates: every target is also a lab column, and selecting a column
+        # twice would break the merge.
         join_columns = list(dict.fromkeys([point_col, *target_columns, *label_columns, *coordinate_columns]))
         dedup_targets = targets_df[join_columns].drop_duplicates(subset=[point_col])
         return static_df.merge(dedup_targets, on=point_col, how="inner")
 
     def load_timeseries_data(self) -> Optional[pd.DataFrame]:
+        """Read the time series - one row per point per date - or None when it is switched off.
+
+        The source may be one file, or a folder holding one file or subfolder per data source; those
+        tables are merged on the point id and the date. The result is kept in memory.
+
+        Returns
+        -------
+        pandas.DataFrame or None
+        """
         if not self._temporal_enabled():
             return None
 
@@ -404,6 +544,7 @@ class DataManager:
         return frame
 
     def _load_timeseries_folder(self, timeseries_root: str) -> pd.DataFrame:
+        """Read a folder of time-series files, merging the data sources on point id and date."""
         resolved_root = self._resolve_data_path(timeseries_root)
         if not resolved_root or not os.path.isdir(resolved_root):
             raise FileNotFoundError(f"Time-series folder not found: {resolved_root or timeseries_root}")

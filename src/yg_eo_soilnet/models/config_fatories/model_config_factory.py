@@ -1,3 +1,5 @@
+"""Build the scikit-learn estimators named in the model list."""
+
 from yg_eo_soilnet.clustering_utils import BaseSpatialClusterStrategy
 import importlib
 from dataclasses import dataclass
@@ -5,12 +7,35 @@ from typing import Optional
 
 @dataclass
 class ModelConfigFactory:
-    """Factory class to build model configurations dynamically based on a registry."""
+    """Build the scikit-learn estimators a model list asks for.
+
+    Each entry names a class by its import path, so a new model is added by editing YAML rather than
+    code. The class is imported, built with the entry's ``init_args``, and given the run's random
+    seed unless the entry sets its own.
+
+    Attributes
+    ----------
+    registry : dict
+        The model list: model name to its settings. This class is also used with a single
+        clustering-strategy entry, which :meth:`load_splitter_from_config` reads.
+    random_state : int, default 42
+        The run's random seed.
+
+    Examples
+    --------
+    >>> registry = {"Ridge": {"enabled": True, "import_path": "sklearn.linear_model.Ridge",
+    ...                       "params": {"alpha": [0.1, 1.0]}}}
+    >>> configs = ModelConfigFactory(registry).build_model_configs(num_features=12)
+    >>> type(configs["Ridge"]["model"]).__name__, configs["Ridge"]["params"]
+    ('Ridge', {'alpha': [0.1, 1.0]})
+    """
+
     registry:dict
     random_state:int = 42
     
     @staticmethod
     def _dynamic_import(import_path):
+        """Import a class from its full path, such as ``sklearn.linear_model.Ridge``."""
         module_path, class_name = import_path.rsplit(".", 1)
         try:
             module = importlib.import_module(module_path)
@@ -20,14 +45,10 @@ class ModelConfigFactory:
 
     @staticmethod
     def _seed_estimator(model, seed: int) -> None:
-        """Push the run's seed into any estimator that exposes a random_state.
+        """Give the run's seed to any estimator that takes one.
 
-        Entries used to hardcode `random_state: 42` in init_args, which silently outranked
-        RANDOM_SEED in the main config: changing the main seed moved the CV folds but left every
-        estimator on 42. Now a registry entry only mentions a seed to deviate from the run's.
-
-        Goes through get_params rather than inspecting __init__ because XGBRegressor keeps
-        random_state in **kwargs rather than in its signature.
+        So that changing ``RANDOM_SEED`` changes the whole run. An entry names a seed only to depart
+        from it.
         """
         try:
             exposes_seed = "random_state" in model.get_params(deep=False)
@@ -39,7 +60,21 @@ class ModelConfigFactory:
 
 
     def build_model_configs(self, num_features, default_seed: int | None = None):
-        """Build dynamic model configurations from self.config.MODEL_REGISTRY."""
+        """Build every model switched on in the list.
+
+        Parameters
+        ----------
+        num_features : int
+            How many covariates the models will see; passed to entries that need it.
+        default_seed : int, optional
+            The run's seed, used unless an entry sets its own.
+
+        Returns
+        -------
+        dict
+            Model name to ``{"model", "params", "modeltype", "random_seed", "search_n_jobs"}``,
+            where ``params`` is the grid of hyperparameters to search.
+        """
         model_configs = {}
 
         for name, spec in self.registry.items():
@@ -51,13 +86,13 @@ class ModelConfigFactory:
                 print(f"[Warning] Failed to import {name}: {e}")
                 continue
 
-            # Copied because this runs once per target and the assignments below would otherwise
-            # write num_features back into the shared registry dict.
+            # Copied: this runs once per target, and the settings below would otherwise be
+            # written back into the shared model list.
             init_args = dict(spec.get("init_args", {}))
             custom_model_builder = spec.get("custom_model_builder", None)
             model_seed = spec.get("random_seed", default_seed)
 
-            # Handle Keras or other wrappers with custom model builders
+            # Models built by a function of their own rather than by their constructor.
             if custom_model_builder:
                 builder_func = self._dynamic_import(custom_model_builder)
                 model_instance = ModelClass(build_fn=lambda: builder_func(num_features))
@@ -65,8 +100,7 @@ class ModelConfigFactory:
                 if 'input_dim' in init_args:
                     init_args['input_dim'] = num_features
                 model_instance = ModelClass(**init_args)
-                # An explicit init_args.random_state stays an explicit override; otherwise the
-                # estimator inherits the run's seed instead of whatever the entry hardcoded.
+                # A seed in the entry wins; otherwise the estimator takes the run's seed.
                 if 'random_state' not in init_args and model_seed is not None:
                     self._seed_estimator(model_instance, model_seed)
 
@@ -75,15 +109,21 @@ class ModelConfigFactory:
                 "params": spec.get("params", {}),
                 "modeltype": spec.get("modeltype", "ml"),
                 "random_seed": model_seed,
-                # Per-entry GridSearchCV parallelism. Cheap estimators want the default -1; models
-                # that load a large checkpoint per worker (TabICL) have to cap this.
+                # How many searches run at once. -1 uses every processor, which suits cheap
+                # models; one that loads a large file per process (TabICL) has to limit it.
                 "search_n_jobs": spec.get("search_n_jobs", -1),
             }
 
         return model_configs
     
     def load_splitter_from_config(self) -> Optional[BaseSpatialClusterStrategy]:
-        """Load and return the splitter configuration from the registry."""
+        """Build the spatial clustering strategy named by ``split.group.class_path``.
+
+        Returns
+        -------
+        BaseSpatialClusterStrategy or None
+            None when the entry says ``enabled: false``.
+        """
         if self.registry.get("enabled", True) is True:
             class_path = self.registry["class_path"]
             params = self.registry.get("params", {})

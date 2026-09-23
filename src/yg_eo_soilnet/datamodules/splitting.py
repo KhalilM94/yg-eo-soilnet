@@ -1,25 +1,17 @@
-"""One train/val/test split, decided once, consumed by every training family.
+"""Assign every point to the training, validation or test set - once, for every model.
 
-Before this module existed each family split for itself: :class:`SklearnDataSplitter` carved 70/30
-off the tabular frame, while the Lightning datamodules carved 64/16/20 off a bundle built
-independently from the same CSVs. The two holdouts overlapped, so a Lightning *test* point was very
-likely an sklearn *training* point - and ``metrics.py`` publishes ``rmse_test`` under one name for
-both families, which put those two numbers on one leaderboard axis.
+The split is decided before any model is trained and shared by all of them, so every model is scored
+on the same test points and the scores can be compared. It is keyed on the point id rather than on
+row numbers: the model families keep different rows (the deep-learning model needs a time series),
+so only an id means the same thing to both.
 
-The split here is decided over ``POINT_ID_COLUMN`` rather than over row positions, which is what
-makes it shareable: the families disagree about which rows are usable (the sequence builder drops
-non-finite rows the tabular preprocessor keeps), so positional indices into one family's arrays mean
-nothing to the other. A point id means the same thing everywhere.
+``test_size`` and ``val_size`` are fractions of *all* the points, not of what the previous holdout
+left over: 0.15 and 0.15 leave 70% for training. The result is a :class:`SplitPlan` - a table of
+point id to split, saved with the run - rather than copies of the data, so a finished run can be
+matched back to the file it was trained on.
 
-Two conventions differ deliberately from the code this replaces:
-
-* **``test_size`` and ``val_size`` are fractions of the whole population**, not of the remainder.
-  The old sequential carve is why ``lightning_registry.yml`` carried the comment "without this,
-  train was 0.7*0.7=0.49"; asking for 0.2 and getting 0.16 is a footgun, so it is gone.
-* **The split is a plan, not four dataframes.** It is persisted as one
-  ``point_id -> split`` table, so a finished run can be re-keyed to its source data - the previous
-  ``data_splits/*.parquet`` artifacts were written with ``index=False`` and with ``uuid`` already
-  stripped by ``filter_schema``, so they carried no join key at all.
+Two strategies: ``random``, and ``spatial_group``, which groups points by location and holds out
+whole groups, so a test point is not the near neighbour of a training point.
 """
 
 from __future__ import annotations
@@ -30,27 +22,68 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 
+#: The points a model learns from.
 TRAIN = "train"
+#: The points watched during training, to decide when to stop.
 VAL = "val"
+#: The held-back points every model is scored on.
 TEST = "test"
+#: The three split names, in order.
 SPLIT_NAMES = (TRAIN, VAL, TEST)
 
+#: ``split.strategy: random`` - points are held out one by one.
 RANDOM = "random"
+#: ``split.strategy: spatial_group`` - whole groups of nearby points are held out.
 SPATIAL_GROUP = "spatial_group"
+#: The values ``split.strategy`` accepts.
 STRATEGIES = (RANDOM, SPATIAL_GROUP)
 
+#: ``split.population_policy: intersect`` - every family uses only the points all of them can use,
+#: so their test sets are identical.
 INTERSECT = "intersect"
+#: ``split.population_policy: assign_all`` - each family uses every point it can.
 ASSIGN_ALL = "assign_all"
+#: The values ``split.population_policy`` accepts.
 POPULATION_POLICIES = (INTERSECT, ASSIGN_ALL)
 
 
 @dataclass(frozen=True)
 class SplitPlan:
-    """Which split every point belongs to, plus the provenance needed to reproduce it.
+    """Which split each point belongs to, and the settings that produced it.
 
-    ``assignments`` is indexed by point id. A point absent from it belongs to no split and is
-    therefore invisible to every family - that is how ``population_policy: intersect`` excludes the
-    points only one family can use.
+    A point missing from ``assignments`` is in no split and no model sees it: that is how
+    ``population_policy: intersect`` leaves out the points only one model family could use.
+
+    Attributes
+    ----------
+    assignments : pandas.Series
+        One entry per point, indexed by point id, holding ``"train"``, ``"val"`` or ``"test"``.
+    strategy : str
+        ``"random"`` or ``"spatial_group"``.
+    test_size, val_size : float
+        The fractions asked for, of all the points.
+    seed : int
+        The random seed the split was drawn with.
+    population_policy : str
+        ``"intersect"`` or ``"assign_all"``.
+    eligibility : mapping of str to frozenset
+        Per model family, the ids of the points that family can use.
+    clusters : pandas.Series or None
+        For a spatial split, the group each point was put in.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> plan = SplitPlan(
+    ...     assignments=pd.Series(["train", "val", "test"], index=["p1", "p2", "p3"]),
+    ...     strategy="random", test_size=0.15, val_size=0.15, seed=42,
+    ...     population_policy="intersect")
+    >>> plan.counts()
+    {'train': 1, 'val': 1, 'test': 1}
+    >>> list(plan.point_ids_for("train"))
+    ['p1']
+    >>> plan.indices_for(["p3", "p1"], "test")   # "p3" sits first in this caller's own order
+    array([0])
     """
 
     assignments: pd.Series
@@ -63,34 +96,61 @@ class SplitPlan:
     clusters: Optional[pd.Series] = None
 
     def point_ids_for(self, split: str) -> pd.Index:
-        """Every point id assigned to `split`."""
+        """The ids of the points in one split.
+
+        Parameters
+        ----------
+        split : {"train", "val", "test"}
+
+        Returns
+        -------
+        pandas.Index
+        """
         _validate_split_name(split)
         return self.assignments.index[self.assignments.to_numpy() == split]
 
     def labels_for(self, point_ids: Sequence) -> pd.Series:
-        """The split label of each id in `point_ids`, in that order. Unassigned ids give NaN."""
+        """The split of each of these ids, in the order given; an unassigned id gives NaN."""
         return self.assignments.reindex(pd.Index(_as_index(point_ids)))
 
     def indices_for(self, point_ids: Sequence, split: str) -> np.ndarray:
-        """Positional indices into `point_ids` whose assignment is `split`.
+        """Where the points of one split sit in ``point_ids``.
 
-        `point_ids` is the consuming family's own ordering - a bundle's ``point_ids`` list or a
-        frame's id column - so each family resolves the shared plan against its own array layout.
+        ``point_ids`` is the caller's own ordering - the ids of its own rows - so each model family
+        reads the shared plan against its own arrays.
+
+        Parameters
+        ----------
+        point_ids : sequence
+            Point ids in the caller's order.
+        split : {"train", "val", "test"}
+
+        Returns
+        -------
+        numpy.ndarray of int
+            Positions in ``point_ids``.
         """
         _validate_split_name(split)
         labels = self.labels_for(point_ids).to_numpy()
         return np.flatnonzero(labels == split).astype(np.int64)
 
     def split_indices(self, point_ids: Sequence) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """``(train_idx, val_idx, test_idx)`` for `point_ids`, resolved in one pass."""
+        """Where the training, validation and test points sit in ``point_ids``, in one pass.
+
+        Returns
+        -------
+        tuple of numpy.ndarray
+            Positions of the training, validation and test points.
+        """
         labels = self.labels_for(point_ids).to_numpy()
         return tuple(np.flatnonzero(labels == name).astype(np.int64) for name in SPLIT_NAMES)
 
     def counts(self) -> dict[str, int]:
+        """How many points are in each split."""
         return {name: int((self.assignments.to_numpy() == name).sum()) for name in SPLIT_NAMES}
 
     def to_frame(self) -> pd.DataFrame:
-        """The persisted form: one row per point, with a join key and the eligibility flags."""
+        """The saved form: one row per point, with its id, split, group and per-family flags."""
         frame = pd.DataFrame(
             {
                 "point_id": self.assignments.index.to_numpy(),
@@ -104,7 +164,15 @@ class SplitPlan:
         return frame
 
     def describe(self) -> dict[str, Any]:
-        """Flat, log-friendly provenance. Every value is an MLflow-loggable scalar."""
+        """The plan as flat name/value pairs, ready to be recorded with the run.
+
+        Sizes, counts and shares per split, the strategy, the seed, and how many points each model
+        family can use.
+
+        Returns
+        -------
+        dict of str to object
+        """
         counts = self.counts()
         total = sum(counts.values()) or 1
         described: dict[str, Any] = {
@@ -127,7 +195,29 @@ class SplitPlan:
 
     @classmethod
     def from_frame(cls, frame: pd.DataFrame, **provenance: Any) -> "SplitPlan":
-        """Rebuild a plan from :meth:`to_frame` output, for ``split.plan_path``."""
+        """Rebuild a plan from a saved table, so a run can reuse an earlier split.
+
+        Set ``split.plan_path`` to the saved file to reuse it.
+
+        Parameters
+        ----------
+        frame : pandas.DataFrame
+            What :meth:`to_frame` wrote: columns ``point_id`` and ``split``, optionally ``cluster``
+            and ``eligible_<family>``.
+        **provenance
+            Settings to record alongside; unknown ones are filled with placeholders.
+
+        Returns
+        -------
+        SplitPlan
+
+        Raises
+        ------
+        KeyError
+            If the required columns are missing.
+        ValueError
+            If a row carries an unknown split name.
+        """
         missing = {"point_id", "split"} - set(frame.columns)
         if missing:
             raise KeyError(f"A split plan frame needs columns {sorted(missing)}; got {list(frame.columns)}")
@@ -161,10 +251,34 @@ class SplitPlan:
 
 
 class UnifiedSplitter:
-    """Turns a population of point ids into a :class:`SplitPlan`.
+    """Turn a list of point ids into a :class:`SplitPlan`.
 
-    Knows nothing about either training family - it is handed ids and coordinates and returns
-    assignments, which is what lets both families consume the same object.
+    Reads the ``split:`` settings: ``strategy``, ``test_size``, ``val_size``, ``seed`` and
+    ``population_policy``. It is handed ids and coordinates and hands back assignments, which is what
+    lets both model families share one split.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    logger : logging.Logger
+        Where the split sizes are reported.
+
+    Raises
+    ------
+    ValueError
+        If a setting holds an unknown value, or the two holdouts leave no training points.
+
+    Examples
+    --------
+    >>> import logging
+    >>> from types import SimpleNamespace
+    >>> config = SimpleNamespace(SPLIT_HOLDOUT_STRATEGY="random", SPLIT_TEST_SIZE=0.2,
+    ...                          SPLIT_VAL_SIZE=0.2, SPLIT_SEED=42)
+    >>> splitter = UnifiedSplitter(config, logging.getLogger("demo"))
+    >>> plan = splitter.build_plan([f"p{number}" for number in range(10)])
+    >>> plan.counts()
+    {'train': 6, 'val': 2, 'test': 2}
     """
 
     def __init__(self, config, logger):
@@ -200,10 +314,27 @@ class UnifiedSplitter:
         coordinates: Optional[pd.DataFrame] = None,
         eligibility: Optional[Mapping[str, Iterable]] = None,
     ) -> SplitPlan:
-        """Assign every id in `point_ids` to train, val or test.
+        """Assign every id to the training, validation or test set.
 
-        `coordinates` is a frame indexed by point id carrying the lat/lon columns named in the
-        config. It is required for ``spatial_group`` and ignored otherwise.
+        Parameters
+        ----------
+        point_ids : sequence
+            The points to split. Ids must be unique.
+        coordinates : pandas.DataFrame, optional
+            Indexed by point id, holding the configured latitude and longitude columns. Needed for
+            ``spatial_group``; ignored otherwise.
+        eligibility : mapping of str to iterable, optional
+            Per model family, the ids that family can use. Recorded in the plan.
+
+        Returns
+        -------
+        SplitPlan
+
+        Raises
+        ------
+        ValueError
+            If an id repeats, there are no points, or a spatial split was asked for without
+            coordinates.
         """
         ids = _as_index(point_ids)
         duplicated = ids[ids.duplicated()].unique()
@@ -244,6 +375,7 @@ class UnifiedSplitter:
     # --- strategies -----------------------------------------------------------------
 
     def _random_assignments(self, ids: pd.Index) -> pd.Series:
+        """Hold out the test points at random, then the validation points from what is left."""
         test_ids, remainder = _carve(np.asarray(ids), self.test_size, self.seed)
         val_ids, train_ids = _carve(remainder, _remainder_fraction(self.val_size, self.test_size), self.seed)
         return _assignments_from_ids(ids, train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
@@ -251,7 +383,7 @@ class UnifiedSplitter:
     def _spatial_group_assignments(
         self, ids: pd.Index, coordinates: Optional[pd.DataFrame]
     ) -> tuple[pd.Series, pd.Series]:
-        """Cluster spatially, then hold out whole clusters so no cluster straddles two splits."""
+        """Group the points by location, then hold out whole groups, never part of one."""
         from sklearn.model_selection import GroupShuffleSplit
 
         if coordinates is None:
@@ -268,9 +400,8 @@ class UnifiedSplitter:
         )
         self.logger.info(f"Cluster value counts:\n{cluster_series.value_counts().sort_index().to_string()}")
 
-        # A point the clusterer could not place (missing coordinates) has no spatial block, so it
-        # cannot be held out honestly. Putting it in train never inflates a test score; dropping it
-        # would silently shrink the dataset.
+        # A point without coordinates belongs to no group, so it cannot be held out honestly.
+        # Training is the safe place for it; dropping it would shrink the dataset silently.
         unclustered = ids.difference(cluster_series.index)
         if len(unclustered):
             self.logger.warning(
@@ -292,9 +423,8 @@ class UnifiedSplitter:
         val_fraction = _remainder_fraction(self.val_size, self.test_size)
         remaining_groups = len(np.unique(groups[train_val_pos]))
         if val_fraction <= 0.0 or len(train_val_pos) <= 1 or remaining_groups < 2:
-            # A grouped carve cannot split a single remaining cluster without emptying train, and
-            # splitting *within* a cluster would defeat the point of blocking on it. Skip the val
-            # holdout rather than raise: a run with few clusters is unusual, not invalid.
+            # One remaining group cannot be split without emptying training, and splitting inside a
+            # group would defeat the grouping. Skip the validation holdout rather than fail.
             if remaining_groups < 2 and val_fraction > 0.0:
                 self.logger.warning(
                     f"Only {remaining_groups} cluster(s) remain after the test holdout, so no "
@@ -320,6 +450,7 @@ class UnifiedSplitter:
     def _clustering_frame(
         self, ids: pd.Index, coordinates: pd.DataFrame, *, lat_col: str, lon_col: str
     ) -> pd.DataFrame:
+        """Build the table the clustering strategy reads: one row per point, with coordinates."""
         missing = [column for column in (lat_col, lon_col) if column not in coordinates.columns]
         if missing:
             raise KeyError(
@@ -327,8 +458,8 @@ class UnifiedSplitter:
                 f"population frame; got {list(coordinates.columns)}"
             )
         aligned = coordinates.reindex(ids)
-        # A RangeIndex so the strategies' positional plotting helpers line up, plus explicit
-        # `lat`/`lon` aliases because the shipped strategies default to those names.
+        # Numbered rows, for the strategies' plotting helpers, plus `lat`/`lon` copies of the
+        # coordinates, whatever the configured column names are.
         frame = pd.DataFrame(
             {
                 "point_id": ids.to_numpy(),
@@ -341,6 +472,7 @@ class UnifiedSplitter:
         return frame
 
     def _load_cluster_strategy(self):
+        """Build the clustering strategy named by ``split.group.class_path``."""
         from yg_eo_soilnet.clustering_utils import BaseSpatialClusterStrategy
         from yg_eo_soilnet.models import ModelConfigFactory  # local: avoids a circular import
 
@@ -355,8 +487,7 @@ class UnifiedSplitter:
         self.logger.info(f"Clustering the split population with {spec['class_path'].rsplit('.', 1)[-1]}...")
         strategy = ModelConfigFactory(spec, self.seed).load_splitter_from_config()
         if not isinstance(strategy, BaseSpatialClusterStrategy):
-            # Falling through used to produce empty train/test frames and four empty parquet
-            # artifacts, surfacing much later as KeyError('groups_train').
+            # Without this check the run carries on with empty splits and fails much later.
             raise TypeError(
                 "split.group did not resolve to a BaseSpatialClusterStrategy (got "
                 f"{type(strategy).__name__}). Check class_path and 'enabled' in {spec!r}."
@@ -365,7 +496,7 @@ class UnifiedSplitter:
         return strategy
 
     def _plot_split(self, frame, clustered, clustered_ids, test_ids) -> None:
-        """Best-effort split map. A plotting or MLflow failure must not lose the split."""
+        """Draw the map of the spatial split. A drawing failure must not lose the split itself."""
         if self.cluster_strategy_ is None:
             return
         try:
@@ -387,11 +518,13 @@ class UnifiedSplitter:
 
 
 def _validate_split_name(split: str) -> None:
+    """Raise unless this is one of the three split names."""
     if split not in SPLIT_NAMES:
         raise ValueError(f"Unknown split {split!r}; expected one of {list(SPLIT_NAMES)}")
 
 
 def _validated_fraction(value: Any, label: str) -> float:
+    """Return a holdout fraction, refusing anything outside 0 (included) to 1 (excluded)."""
     fraction = float(value)
     if not 0.0 <= fraction < 1.0:
         raise ValueError(f"{label} must be in [0, 1); got {fraction}")
@@ -399,6 +532,7 @@ def _validated_fraction(value: Any, label: str) -> float:
 
 
 def _as_index(point_ids: Sequence) -> pd.Index:
+    """Return point ids of any sequence type as a pandas Index."""
     if isinstance(point_ids, pd.Index):
         return point_ids
     if isinstance(point_ids, pd.Series):
@@ -407,7 +541,7 @@ def _as_index(point_ids: Sequence) -> pd.Index:
 
 
 def _remainder_fraction(val_size: float, test_size: float) -> float:
-    """`val_size` is a fraction of the WHOLE population; convert it to one of what test left over."""
+    """Convert a fraction of all the points into a fraction of what the test holdout left."""
     remaining = 1.0 - test_size
     if remaining <= 0.0:
         return 0.0
@@ -415,10 +549,10 @@ def _remainder_fraction(val_size: float, test_size: float) -> float:
 
 
 def _carve(values: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, np.ndarray]:
-    """Split off `fraction` of `values`, returning ``(held_out, remainder)``.
+    """Hold out ``fraction`` of ``values`` at random, returning ``(held_out, remainder)``.
 
-    A fraction of 0 means "no holdout", which ``train_test_split`` rejects outright rather than
-    treating as empty - so it is handled here, keeping ``val_size=0`` and ``test_size=0`` usable.
+    A fraction of 0 means no holdout, which ``train_test_split`` refuses outright, so it is handled
+    here - that is what keeps ``test_size: 0`` and ``val_size: 0`` usable.
     """
     values = np.asarray(values)
     if fraction <= 0.0 or values.size <= 1:
@@ -432,6 +566,7 @@ def _carve(values: np.ndarray, fraction: float, seed: int) -> tuple[np.ndarray, 
 
 
 def _assignments_from_ids(ids: pd.Index, *, train_ids, val_ids, test_ids) -> pd.Series:
+    """Build the assignment series; any id not named as validation or test is training."""
     assignments = pd.Series(TRAIN, index=pd.Index(ids, name="point_id"), dtype=object)
     assignments.loc[pd.Index(train_ids)] = TRAIN
     assignments.loc[pd.Index(val_ids)] = VAL

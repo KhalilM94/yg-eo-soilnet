@@ -153,7 +153,9 @@ def test_lightning_trainer_disables_default_logger_when_configured(monkeypatch) 
     assert captured_kwargs["logger"] is False
 
 
-def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
+def test_lightning_trainer_leaves_the_rng_stream_untouched_before_fit(monkeypatch) -> None:
+    import torch
+
     datamodule = _tiny_datamodule()
 
     bundle = LightningModelBundle(
@@ -169,7 +171,12 @@ def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
         registry_entry={"modeltype": "dl", "init_args": {}, "datamodule_init_args": {}, "random_seed": 99},
     )
 
-    fake_trainer = FakeTrainer()
+    class RngRecordingTrainer(FakeTrainer):
+        def fit(self, model, datamodule=None):
+            super().fit(model, datamodule)
+            self.rng_state_at_fit = torch.random.get_rng_state()
+
+    fake_trainer = RngRecordingTrainer()
     fake_mlflow_logger = SimpleNamespace(log_lightning_child_run=MagicMock())
     trainer = LightningTrainer(
         config=SimpleNamespace(LIGHTNING_CHECKPOINT_DIR="/tmp/checkpoints"),
@@ -177,8 +184,6 @@ def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
         mlflow_logger=fake_mlflow_logger,
     )
 
-    seed_spy = MagicMock()
-    monkeypatch.setattr(lightning_trainer_module, "seed_everything", seed_spy, raising=False)
     monkeypatch.setattr(trainer, "_build_trainer", lambda bundle: fake_trainer)
     monkeypatch.setattr(trainer, "_resolve_best_checkpoint", lambda trainer_obj: "/tmp/best.ckpt")
 
@@ -187,6 +192,9 @@ def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
     start_run.__exit__.return_value = False
     monkeypatch.setattr(lightning_trainer_module.mlflow, "start_run", MagicMock(return_value=start_run))
 
+    # Any seed but the bundle's own 99, so a reseed inside train() cannot land on the same state.
+    torch.manual_seed(1234)
+    state_before_train = torch.random.get_rng_state()
     trainer.train(
         target="target_a",
         data={},
@@ -197,7 +205,7 @@ def test_lightning_trainer_seeds_each_bundle(monkeypatch) -> None:
     # already - and resetting the stream now starts fit() from a different point than the HPO trial
     # that chose these hyperparameters, so a tuned config could never reproduce its score.
     # LightningConfigFactory.build_lightning_configs(seed=...) owns seeding now.
-    seed_spy.assert_not_called()
+    assert torch.equal(fake_trainer.rng_state_at_fit, state_before_train)
 
 
 def test_lightning_epoch_metrics_callback_logs_train_and_val_losses(monkeypatch) -> None:

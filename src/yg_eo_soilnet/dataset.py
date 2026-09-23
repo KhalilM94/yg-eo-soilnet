@@ -1,3 +1,5 @@
+"""The container for the loaded data: one table per point, plus the time series on demand."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,11 +10,24 @@ import pandas as pd
 
 @dataclass
 class SoilDataset:
-    """A loaded dataset, normalized so no caller has to know how it was stored on disk.
+    """The loaded data, the same whatever way it was stored on disk.
 
-    Static features and targets are already joined into ``tabular``, whether they arrived as one
-    joint file or as separate files/folders. Time-series always arrives separately and is loaded
-    on first access to ``timeseries`` - a sklearn-only run never touches it.
+    Created by :meth:`DataManager.load_dataset <yg_eo_soilnet.data_manager.DataManager.load_dataset>`.
+
+    Attributes
+    ----------
+    tabular : pandas.DataFrame
+        One row per point: the static covariates with the targets (and, if carried, the other lab
+        columns and the coordinates) already joined on.
+    point_id_column, lat_column, lon_column : str
+        Names of the id and coordinate columns.
+    target_columns : list of str
+        The targets being predicted.
+    temporal_enabled : bool
+        Whether a time series is configured.
+    timeseries : pandas.DataFrame or None
+        One row per point per date. Read from disk the first time it is used, so a run with only
+        scikit-learn models never reads it.
     """
 
     tabular: pd.DataFrame
@@ -28,7 +43,7 @@ class SoilDataset:
 
     @property
     def timeseries(self) -> Optional[pd.DataFrame]:
-        """The time-series frame, loaded on first access and memoized after."""
+        """The time-series table, read on first use and kept in memory afterwards."""
         if not self._timeseries_loaded:
             self._timeseries = self._load_timeseries()
             self._timeseries_loaded = True
@@ -36,7 +51,7 @@ class SoilDataset:
 
     @property
     def has_timeseries(self) -> bool:
-        """Whether temporal data is configured - answers without triggering the load."""
+        """Whether a time series is configured, without reading it."""
         return self.temporal_enabled
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

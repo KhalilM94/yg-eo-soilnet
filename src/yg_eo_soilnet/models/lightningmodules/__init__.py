@@ -1,3 +1,5 @@
+"""The deep-learning model and the parts it is built from."""
+
 from yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module import SoilCNNLightningModule
 from yg_eo_soilnet.models.lightningmodules.soil_residual_attention_cnn_lightning_module import (
     SoilResidualAttentionCNNLightningModule,

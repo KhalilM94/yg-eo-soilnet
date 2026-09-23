@@ -1,3 +1,22 @@
+"""Predict lab-measured soil properties from satellite, climate and terrain data.
+
+The pieces of a run, in the order it uses them:
+
+:mod:`~yg_eo_soilnet.data_manager`
+    Reads the three data files and decides which columns models may use.
+:mod:`~yg_eo_soilnet.datamodules`
+    Makes the one split every model shares, and prepares the inputs for each family.
+:mod:`~yg_eo_soilnet.models`
+    Builds the models the configuration asks for.
+:mod:`~yg_eo_soilnet.trainers`
+    Trains them.
+:mod:`~yg_eo_soilnet.metrics` and :mod:`~yg_eo_soilnet.logger`
+    Scores them and records everything in MLflow.
+
+And the optional extras: :mod:`~yg_eo_soilnet.uncertainty`, :mod:`~yg_eo_soilnet.explain`,
+:mod:`~yg_eo_soilnet.hpo` for tuning, and :mod:`~yg_eo_soilnet.serving` for predicting new points
+with a saved model.
+"""
 from yg_eo_soilnet.data_manager import DataManager
 from yg_eo_soilnet.dataset import SoilDataset
 from yg_eo_soilnet.logger import ChildRunLogger, ParentRunLogger, TrainingLogger

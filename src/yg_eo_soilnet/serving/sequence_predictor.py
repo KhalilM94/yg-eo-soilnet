@@ -1,4 +1,4 @@
-"""Predict with a restored sequence/CNN checkpoint, using the statistics it was trained with."""
+"""Predict with a saved deep-learning model, using the statistics it was trained with."""
 
 from __future__ import annotations
 
@@ -12,29 +12,29 @@ from yg_eo_soilnet.datamodules.sequence.sequence_datamodule import SoilSequenceD
 
 
 def _as_array(tensor) -> np.ndarray:
+    """Return a tensor or array as a plain NumPy array."""
     return np.asarray(tensor.detach().cpu(), dtype=np.float64)
 
 
 class SoilSequencePredictor:
-    """A trained model plus its training-time preprocessing, ready to score new points.
+    """A trained model plus its training-time input preparation, ready to score new points.
 
-    Usage after a run::
+    Parameters
+    ----------
+    model : SoilCNNLightningModule
+        A model loaded from a :term:`checkpoint` or from MLflow.
 
-        model = mlflow.pytorch.load_model(model_uri)          # or Module.load_from_checkpoint(path)
-        bundle = SoilSequenceBuilder(...).build(frame)        # raw frames -> a bundle
-        predictions = SoilSequencePredictor(model).predict(bundle)
-
-    The predictions come back in ORIGINAL TARGET UNITS: ``predict_step`` applies
-    ``inverse_transform_targets``, which undoes the standardization and the ``10 * log1p`` transform.
-
-    The one rule this class exists to enforce: **statistics are never re-fitted on the incoming
-    points.** A serving batch is not a training split - it can be a single point - so fitting a
-    scaler on it would standardize each request against itself and make a point's prediction depend
-    on which other points happened to arrive with it. The stored state is installed instead, via
-    :meth:`SoilSequenceDataModule.apply_preprocessing_state`.
-    """
+    Examples
+    --------
+    >>> import mlflow                                                        # doctest: +SKIP
+    >>> model = mlflow.pytorch.load_model(model_uri)                         # doctest: +SKIP
+    >>> predictions = SoilSequencePredictor(model).predict(bundle)           # doctest: +SKIP
+    >>> predictions.shape                                                    # doctest: +SKIP
+    (300, 3)
+        """
 
     def __init__(self, model, preprocessing_state: Mapping[str, Any] | None = None):
+        """Hold the model and read the input statistics out of its checkpoint."""
         self.model = model
         state = preprocessing_state
         if state is None and hasattr(model, "get_preprocessing_state"):
@@ -48,17 +48,18 @@ class SoilSequencePredictor:
         self.preprocessing_state = dict(state)
 
     def _datamodule(self, bundle: SoilSequenceBundle, **datamodule_kwargs) -> SoilSequenceDataModule:
+        """A datamodule over these points, set up with the model's own statistics."""
         datamodule = SoilSequenceDataModule(sequence_bundle=bundle, **datamodule_kwargs)
         datamodule.apply_preprocessing_state(self.preprocessing_state)
         return datamodule
 
     @property
     def predicts_variance(self) -> bool:
-        """Whether this checkpoint's head reports a per-point standard deviation.
+        """Whether this model also predicts a spread per point; see :term:`variance head`.
 
-        Read off the buffer rather than the hyperparameters, because the buffer is what round-trips
-        through ``state_dict`` - a restore that lost its hparams still knows its head is wide.
-        """
+        Read from the saved weights rather than from the settings, because the weights are what a restored
+        model always carries.
+                """
         return bool(getattr(self.model, "predict_variance", False)) or bool(
             getattr(self.model, "head_predicts_variance", False)
         )
@@ -71,7 +72,17 @@ class SoilSequencePredictor:
         batch_size: int = 64,
         **datamodule_kwargs,
     ) -> np.ndarray:
-        """``(n_points, target_dim)`` predictions in the target's original units."""
+        """Predict for every point, in the target's own units.
+
+        Parameters
+        ----------
+        bundle : SoilSequenceBundle
+            The points to predict for.
+
+        Returns
+        -------
+        numpy.ndarray of shape (n_points, n_targets)
+                """
         return self.predict_with_uncertainty(bundle, batch_size=batch_size, **datamodule_kwargs)[0]
 
     @torch.no_grad()
@@ -82,13 +93,14 @@ class SoilSequencePredictor:
         batch_size: int = 64,
         **datamodule_kwargs,
     ) -> "tuple[np.ndarray, np.ndarray | None]":
-        """``(predictions, sigma)``; sigma is None unless the head predicts a variance.
+        """Predict, with the spread beside each value where the model predicts one.
 
-        Both in ORIGINAL TARGET UNITS. ``predict_step`` returns a bare tensor on a point head and a
-        ``(mean, sigma)`` tuple on a heteroscedastic one, so both shapes are unpacked here - calling
-        ``.detach()`` straight on its result, which is what this used to do, raises on a tuple and
-        makes a variance-head checkpoint unservable.
-        """
+        Returns
+        -------
+        predictions : numpy.ndarray
+        sigma : numpy.ndarray or None
+            None unless the model has a :term:`variance head`. Both in the target's own units.
+                """
         bundle = SoilSequenceBundle.from_mapping(bundle)
         if bundle.num_points == 0:
             empty = np.empty((0, int(getattr(self.model, "target_dim", 1))), dtype=np.float64)
@@ -124,7 +136,7 @@ class SoilSequencePredictor:
         return predictions, sigma
 
     def predict_frame(self, bundle, **kwargs):
-        """:meth:`predict` as a DataFrame, one column per target name, indexed by point id."""
+        """Like :meth:`predict`, as a table: one column per target, one row per point."""
         import pandas as pd
 
         bundle = SoilSequenceBundle.from_mapping(bundle)

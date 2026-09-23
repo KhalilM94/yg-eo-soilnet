@@ -1,3 +1,5 @@
+"""Train the deep-learning models: fit, score, and record the results."""
+
 from __future__ import annotations
 
 import importlib
@@ -36,17 +38,20 @@ from yg_eo_soilnet.uncertainty import (
     uncertainty_enabled_for,
 )
 
-# Mirrors the sklearn trainer's constant. See ParentRunLogger._collect_leaderboard for why a member
-# run has to be distinguishable from a per-target evaluation run.
+#: Tag marking a sub-run as one :term:`ensemble` member rather than one target's results, as on
+#: the scikit-learn side. The leaderboard reads it.
 MEMBER_RUN_KIND = "ensemble_member"
 
 
 class _LightningMlflowEpochMetricCallback(LightningCallback):
+    """Record the training, validation and test loss once per epoch, so the curves can be plotted."""
+
     def __init__(self):
         self._last_logged_epoch: dict[str, int] = {}
 
     @staticmethod
     def _to_float(value: Any) -> float | None:
+        """Return a score as a plain number, or None when it is not a single value."""
         if value is None:
             return None
         if hasattr(value, "detach"):
@@ -61,6 +66,7 @@ class _LightningMlflowEpochMetricCallback(LightningCallback):
             return None
 
     def _log_metrics(self, trainer, metric_names: tuple[str, ...]) -> None:
+        """Record these scores for the current epoch, once each."""
         if getattr(trainer, "sanity_checking", False):
             return
 
@@ -76,17 +82,35 @@ class _LightningMlflowEpochMetricCallback(LightningCallback):
             self._last_logged_epoch[metric_name] = current_epoch
 
     def on_train_epoch_end(self, trainer, pl_module) -> None:
+        """Record the training loss."""
         self._log_metrics(trainer, ("train_loss",))
 
     def on_validation_epoch_end(self, trainer, pl_module) -> None:
+        """Record the validation loss."""
         self._log_metrics(trainer, ("val_loss",))
 
     def on_test_epoch_end(self, trainer, pl_module) -> None:
+        """Record the test loss."""
         self._log_metrics(trainer, ("test_loss",))
 
 
 @dataclass
 class LightningRunResult:
+    """What one trained deep-learning model left behind.
+
+    Attributes
+    ----------
+    model_name : str
+        The model's name in the model list.
+    target : str
+        The :term:`target group` it predicts.
+    validation_metrics, test_metrics : dict of str to float
+        Its scores. Note these are on the model's own :term:`training scale`, not the target's
+        units; the scores in the target's units are computed by the logger.
+    best_model_path : str or None
+        The :term:`checkpoint` file kept - the best epoch, not the last.
+    """
+
     model_name: str
     target: str
     validation_metrics: dict[str, float]
@@ -95,6 +119,29 @@ class LightningRunResult:
 
 
 class LightningTrainer:
+    """Train every deep-learning model switched on, one :term:`target group` at a time.
+
+    Each model is trained inside a sub-run of its own, early-stopped on the validation points, then
+    scored on the test points using its best epoch. With uncertainty on it trains an
+    :term:`ensemble` of differently seeded models instead and calibrates the intervals.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    logger : logging.Logger, optional
+        Where progress messages go.
+    mlflow_logger : ChildRunLogger, optional
+        What records the results; a new one unless given.
+
+    Examples
+    --------
+    >>> trainer = LightningTrainer(config, logger=logger)                  # doctest: +SKIP
+    >>> results = trainer.train("clay_pct", data, bundles)                 # doctest: +SKIP
+    >>> results["soil_cnn"].test_metrics["test_loss"]                      # doctest: +SKIP
+    0.41
+    """
+
     def __init__(self, config, logger=None, mlflow_logger=None):
         self.config = config
         self.logger = logger
@@ -107,13 +154,26 @@ class LightningTrainer:
         model_bundles: Mapping[str, LightningModelBundle],
         bundle_builder: Any = None,
     ):
-        """Fit every bundle for one target group.
+        """Train every model :term:`bundle` for one :term:`target group`.
 
-        ``bundle_builder(seed) -> {model_name: bundle}`` is what makes an ensemble possible here.
-        A Lightning model's weights are constructed by the factory, seeded immediately beforehand,
-        so a second member cannot be made from an existing bundle - it needs the factory to build a
-        new one at a new seed. Absent (or with uncertainty off) every entry takes the single-fit
-        path below, unchanged.
+        Parameters
+        ----------
+        target : str
+            The group's name.
+        data : mapping
+            The prepared data and the run's shared split.
+        model_bundles : mapping of str to LightningModelBundle
+            The built models, from
+            :meth:`LightningConfigFactory.build_lightning_configs
+            <yg_eo_soilnet.models.config_fatories.lightning_config_factory.LightningConfigFactory.build_lightning_configs>`.
+        bundle_builder : callable, optional
+            ``builder(seed) -> {model name: bundle}``. Needed for an :term:`ensemble`: a model's
+            starting weights are drawn when it is built, so each member has to be built afresh at
+            its own seed.
+
+        Returns
+        -------
+        dict of str to LightningRunResult
         """
         results: dict[str, LightningRunResult] = {}
 
@@ -125,21 +185,15 @@ class LightningTrainer:
                     bundle_builder=bundle_builder,
                 )
                 continue
-            # Deliberately no seeding here. Seeding at this point is too late to reach the weights -
-            # the factory built them already - and resetting the stream now would start fit() from a
-            # different place than the HPO trial that chose these hyperparameters, so a tuned config
-            # could never reproduce its score. LightningConfigFactory.build_lightning_configs seeds
-            # per entry instead, immediately before it constructs each model.
-            # Named for the target GROUP, not bare. A joint run used to be called just "soil_cnn"
-            # while every other run in the experiment carried its target, which made the one run
-            # spanning several targets the hardest to identify.
+            # No seeding here: it would be too late to reach the weights, which were drawn when
+            # the model was built, and would make a tuned configuration miss the trial that chose
+            # it. The factory seeds just before building each model instead.
             run_name = f"{target}_{model_name}"
             with start_child_run(run_name):
                 trainer = self._build_trainer(bundle)
                 bundle.datamodule.setup("fit")
-                # After setup (the scalers and vocabulary are fitted there) and before fit, so the
-                # state is inside every checkpoint the run writes. Without it a restored model has
-                # its weights but no way to standardize raw input, which makes it unservable.
+                # After the statistics are fitted and before training, so every checkpoint the
+                # run writes carries them and the saved model can read raw data by itself.
                 self._attach_preprocessing_state(bundle)
                 trainer.fit(bundle.model, datamodule=bundle.datamodule)
 
@@ -166,11 +220,9 @@ class LightningTrainer:
 
                 evaluation_df = self._build_evaluation_frame(bundle, trainer, target, ckpt_path=best_model_path)
 
-                # One call, whatever the target count. The logger owns the run tree now: it keeps
-                # the model, the curves and the aggregate metrics here and opens one child per
-                # target when there is more than one. This used to fan out here and hand each
-                # child empty metric dicts, which is why val_loss and test_loss never reached
-                # MLflow at all on a multi-target run.
+                # One call whatever the number of targets: the logger keeps the model, the curves
+                # and the overall scores here, and opens one sub-run per target when there are
+                # several.
                 self.mlflow_logger.log_lightning_child_run(
                     config=self.config,
                     target=target,
@@ -204,16 +256,15 @@ class LightningTrainer:
         model_name: str,
         bundle_builder: Any,
     ) -> LightningRunResult:
-        """Fit n_members independently seeded models and log them as one ensemble.
+        """Train ``n_members`` models from different seeds and record them as one :term:`ensemble`.
 
-        Each member is a fresh bundle from the factory at its own seed, which is the only way to get
-        a different weight initialization - the factory seeds immediately before it constructs the
-        model, precisely so that a run is reproducible from its seed.
+        The members keep every training row: unlike a linear model, two networks started from
+        different weights already end up in different places, so resampling the rows would cost
+        accuracy to buy a spread they have anyway.
 
-        The members do NOT resample their training rows. Bootstrapping is what gives a deterministic
-        estimator its diversity; a neural network trained from a different initialization on a
-        non-convex loss surface already lands somewhere else, and taking 36.8% of its rows away as
-        well would cost accuracy to buy spread it already has.
+        Returns
+        -------
+        LightningRunResult
         """
         n_members = int(getattr(self.config, "UNCERTAINTY_N_MEMBERS", 5))
         stride = int(getattr(self.config, "UNCERTAINTY_SEED_STRIDE", 1000))
@@ -257,13 +308,16 @@ class LightningTrainer:
             )
 
     def _fit_member(self, *, bundle: LightningModelBundle, index: int, seed: int) -> dict:
-        """Fit one member and collect everything the ensemble needs from it.
+        """Train one ensemble member and collect everything the ensemble needs from it.
 
-        Predictions are taken on BOTH the test split and the val split. The val predictions are the
-        calibration set: unlike the sklearn side, where val had to be carved out of the fit pool,
-        Lightning has always early-stopped on val and never fitted on it, so it is available here
-        at no cost in training rows. It is not perfectly held out either - early stopping read it -
-        so the calibration is mildly optimistic, which is worth knowing and not worth a third split.
+        It predicts on the test points and on the validation points, the latter being what the
+        intervals are calibrated against. Those points cost nothing here - this family never trains
+        on them - though early stopping did read them, so the calibration is slightly optimistic.
+
+        Returns
+        -------
+        dict
+            The member's model, scores, checkpoint and predictions.
         """
         trainer = self._build_trainer(bundle)
         bundle.datamodule.setup("fit")
@@ -286,17 +340,12 @@ class LightningTrainer:
             {
                 "ensemble_member": index,
                 "ensemble_seed": seed,
-                # The local path Lightning wrote to. Only the model run used to record one, and only
-                # for the reference member, so a member's weights could be found afterwards solely
-                # by scavenging lightning_logs and matching on val_loss.
+                # Where this member's checkpoint was written.
                 "best_model_path": best_model_path,
             }
         )
-        # Each member keeps its OWN checkpoint. Without this the run logs one checkpoint for the
-        # whole ensemble - the reference member's - and the other n-1 exist only as local files
-        # under lightning_logs, which nothing records and any cleanup removes. That is what made
-        # export_predictions.py unable to reconstruct a Lightning ensemble's mean from MLflow alone.
-        # Costs n_members checkpoints per entry instead of one; see uncertainty.n_members.
+        # Every member keeps its own checkpoint, so the ensemble can be rebuilt later from the run
+        # alone. That is one checkpoint per member rather than one per model.
         if best_model_path:
             self.mlflow_logger._log_checkpoint(best_model_path)
 
@@ -321,11 +370,15 @@ class LightningTrainer:
         }
 
     def _predict_full_population(self, bundle) -> np.ndarray | None:
-        """This member's prediction for EVERY point, or None when the export is off.
+        """This member's prediction for every point, for the per-point export.
 
-        Only an ensemble needs this at member level: the exported number is the mean across
-        members, and there is no single model object that computes it. Gated on the switch because
-        it is a whole extra inference pass over the full dataset, per member.
+        Only an ensemble needs this per member: the exported number is the members' average, which
+        no single model computes. Skipped when the export is switched off, since it is a full extra
+        pass over the data per member.
+
+        Returns
+        -------
+        numpy.ndarray or None
         """
         if not export_enabled_for(self.config, bundle.name):
             return None
@@ -348,11 +401,13 @@ class LightningTrainer:
             return None
 
     def _predict_split(self, bundle, trainer, ckpt_path, split: str):
-        """``(means, sigmas)`` over one split, in original target units; sigmas None without a head.
+        """Predict over one split, in the target's own units.
 
-        ``predict`` uses the datamodule's own predict_dataloader, which is the test split and is
-        never shuffled - the frame is aligned positionally with y_test_frame_. The val loader is
-        passed explicitly because there is no predict-style hook for it.
+        Returns
+        -------
+        means : numpy.ndarray or None
+        sigmas : numpy.ndarray or None
+            Only from a model with a :term:`variance head`.
         """
         predict_method = getattr(trainer, "predict", None)
         if predict_method is None:
@@ -376,7 +431,7 @@ class LightningTrainer:
         return self._flatten_predictions_with_sigma(predictions)
 
     def _log_ensemble(self, *, target, model_name, members, seeds) -> LightningRunResult:
-        """Aggregate the members, calibrate, and hand one frame to the logger."""
+        """Average the members, calibrate the intervals, and record the ensemble as one model."""
         reference = members[0]
         bundle = reference["bundle"]
         datamodule = bundle.datamodule
@@ -391,13 +446,11 @@ class LightningTrainer:
             bundle, reference["trainer"], target, ckpt_path=reference["best_model_path"]
         )
         if evaluation_df is not None and prediction is not None and target_names:
-            # The ensemble MEAN replaces the reference member's predictions: the frame builder wrote
-            # one member's numbers, and what the run reports must be what the ensemble predicts.
+            # What the run reports must be what the ensemble predicts, not one member's numbers.
             self._overwrite_predictions(evaluation_df, prediction, target_names)
             attach_uncertainty_columns(evaluation_df, prediction, target_names, calibrators)
 
-        # Metrics are averaged across members so val_loss and test_loss describe the ensemble rather
-        # than whichever member happened to be built first.
+        # Averaged across members, so the losses describe the ensemble rather than one member.
         validation_metrics = self._average_metrics([m["validation_metrics"] for m in members])
         test_metrics = self._average_metrics([m["test_metrics"] for m in members])
 
@@ -426,10 +479,15 @@ class LightningTrainer:
         )
 
     def _calibrate_ensemble(self, members, datamodule, target_names) -> dict:
-        """One interval estimator per target, of whichever kind the config asked for.
+        """Build one :term:`prediction interval` estimator per target.
 
-        Only conformal reaches the val split below; gaussian and sigma are arithmetic on the sigma
-        the ensemble already produced, so they need no held-out predictions at all.
+        ``sigma`` and ``gaussian`` need no data. ``conformal`` compares the ensemble's predictions
+        for the validation points with their measurements; without usable validation predictions the
+        run reports a spread but no interval, and says so.
+
+        Returns
+        -------
+        dict of str to object
         """
         method = normalize_method(getattr(self.config, "UNCERTAINTY_INTERVAL_METHOD", "conformal"))
         if not needs_calibration_set(method):
@@ -470,12 +528,10 @@ class LightningTrainer:
 
     @staticmethod
     def _ensemble_full_population(members) -> np.ndarray | None:
-        """The ensemble MEAN over every point, or None when any member could not produce one.
+        """The ensemble's average prediction for every point, or None if any member is missing one.
 
-        All-or-nothing: averaging over the subset of members that happened to succeed would export
-        a number that is neither one member's prediction nor the ensemble's, under a column name
-        claiming to be the ensemble's. The sigma is discarded here - the export carries estimates
-        only.
+        All or nothing: averaging over the members that happened to work would export a number that
+        is neither one member's prediction nor the ensemble's.
         """
         full = [
             member["full_predictions"]
@@ -488,11 +544,10 @@ class LightningTrainer:
 
     @staticmethod
     def _stack_member_outputs(members, split: str):
-        """``(means, sigmas)`` across members for one split, sigmas None unless EVERY member has one.
+        """Collect every member's predictions for one split.
 
-        All-or-nothing on the sigmas because ``aggregate`` averages variances across members: a
-        partial list would average the aleatoric term over the members that reported one and
-        silently treat the rest as noiseless, understating it by exactly the fraction missing.
+        The spreads are returned only if every member reported one: averaging over some of them
+        would treat the rest as certain and understate the uncertainty.
         """
         means = [
             member[f"{split}_predictions"]
@@ -508,7 +563,7 @@ class LightningTrainer:
 
     @staticmethod
     def _overwrite_predictions(evaluation_df, prediction, target_names) -> None:
-        """Replace the frame's prediction columns with the ensemble mean, in place."""
+        """Put the ensemble's average into the results table, in place of one member's."""
         multi_target = len(target_names) > 1
         for index, target_name in enumerate(target_names):
             column = f"prediction_{target_name}" if multi_target else "prediction"
@@ -517,7 +572,7 @@ class LightningTrainer:
 
     @staticmethod
     def _average_metrics(metric_dicts: list[dict]) -> dict[str, float]:
-        """Mean of each metric across the members, over the keys they all report."""
+        """Average each score across the members, over the scores they all report."""
         if not metric_dicts:
             return {}
         shared = set(metric_dicts[0])
@@ -529,11 +584,7 @@ class LightningTrainer:
 
     @staticmethod
     def _attach_preprocessing_state(bundle: LightningModelBundle) -> None:
-        """Copy the datamodule's fitted input statistics onto the model, when both support it.
-
-        Both sides are optional on purpose: a model or datamodule that does not implement this pair
-        should train exactly as before rather than fail.
-        """
+        """Copy the fitted input statistics onto the model, so its checkpoint carries them."""
         state_source = getattr(bundle.datamodule, "preprocessing_state", None)
         attach = getattr(bundle.model, "attach_preprocessing_state", None)
         if not callable(state_source) or not callable(attach):
@@ -541,6 +592,7 @@ class LightningTrainer:
         attach(state_source())
 
     def _build_trainer(self, bundle: LightningModelBundle):
+        """Build Lightning's trainer from this bundle's training settings."""
         lightning = self._get_lightning_module()
         callbacks = self._build_callbacks(bundle.callback_specs)
 
@@ -551,6 +603,7 @@ class LightningTrainer:
         return lightning.Trainer(**trainer_kwargs)
 
     def _build_callbacks(self, callback_specs: Mapping[str, Any]):
+        """Build the per-epoch recording, the early stopping and the checkpoint saving."""
         lightning = self._get_lightning_module()
         callbacks = [_LightningMlflowEpochMetricCallback()]
 
@@ -560,13 +613,14 @@ class LightningTrainer:
 
         checkpoint = callback_specs.get("checkpoint")
         if checkpoint:
-            # dirpath comes from the registry's checkpoint block if set; Lightning defaults it
-            # otherwise. (The old LIGHTNING_CHECKPOINT_DIR lookup was never defined anywhere.)
+            # Where checkpoints are written comes from the model list if it says; otherwise
+            # Lightning chooses.
             callbacks.append(lightning.callbacks.ModelCheckpoint(**dict(checkpoint)))
 
         return callbacks
 
     def _get_lightning_module(self):
+        """Import PyTorch Lightning, with a clear message when it is not installed."""
         try:
             return importlib.import_module("lightning.pytorch")
         except ImportError as exc:  # pragma: no cover - exercised only when lightning is absent
@@ -575,6 +629,7 @@ class LightningTrainer:
             ) from exc
 
     def _call_trainer_method(self, trainer, method_name: str, model, datamodule, ckpt_path: str | None = None):
+        """Call ``validate`` or ``test`` on the trainer, whichever arguments its version takes."""
         method = getattr(trainer, method_name, None)
         if method is None:
             return []
@@ -588,6 +643,7 @@ class LightningTrainer:
             return method(model, datamodule=datamodule)
 
     def _resolve_best_checkpoint(self, trainer) -> str | None:
+        """Where the best epoch's :term:`checkpoint` was written, or None if none was kept."""
         checkpoint_callback = getattr(trainer, "checkpoint_callback", None)
         best_model_path = getattr(checkpoint_callback, "best_model_path", None)
         if best_model_path:
@@ -607,6 +663,13 @@ class LightningTrainer:
         target: str,
         ckpt_path: str | None = None,
     ) -> pd.DataFrame | None:
+        """Build the table of test-point results: covariates, measurements and predictions.
+
+        Returns
+        -------
+        pandas.DataFrame or None
+            One row per test point. Saved with the run as ``eval_results/eval_results.csv``.
+        """
         datamodule = bundle.datamodule
         if getattr(datamodule, "X_test_frame_", None) is None or getattr(datamodule, "y_test_frame_", None) is None:
             return None
@@ -651,9 +714,8 @@ class LightningTrainer:
             for column_index in range(prediction_values.shape[1]):
                 column_name = target_columns[column_index] if column_index < len(target_columns) else str(column_index)
                 eval_df[f"prediction_{column_name}"] = prediction_values[:, column_index]
-            # No plain `prediction` column here. It used to alias target 0, so anyone reading
-            # eval_results.csv from a joint run got the first target's predictions under a name
-            # that claims to be the run's. Readers fan out over prediction_<target> instead.
+            # No plain `prediction` column with several targets: it would hold the first target's
+            # predictions under a name that claims to be the run's. Readers use prediction_<target>.
 
         if len(target_names) > 1:
             encoded = join_target_names(target_names)
@@ -664,17 +726,19 @@ class LightningTrainer:
         return eval_df
 
     def _flatten_predictions(self, predictions) -> np.ndarray | None:
-        """Just the means, for every caller that only wants predictions."""
+        """The predictions alone, for callers that do not need the spread."""
         return self._flatten_predictions_with_sigma(predictions)[0]
 
     def _flatten_predictions_with_sigma(
         self, predictions
     ) -> tuple[np.ndarray | None, np.ndarray | None]:
-        """``(means, sigmas)`` from a list of predict_step outputs, sigmas None on a point head.
+        """Join a list of per-batch predictions into one array, with the spreads when there are any.
 
-        A heteroscedastic ``predict_step`` returns a ``(mean, sigma)`` tuple per batch and a point
-        head returns a bare tensor, so both shapes have to be unpacked here rather than at each
-        call site.
+        Returns
+        -------
+        means : numpy.ndarray or None
+        sigmas : numpy.ndarray or None
+            None unless every batch reported one.
         """
         means, sigmas = [], []
         for batch in predictions:
@@ -693,8 +757,8 @@ class LightningTrainer:
             return None, None
 
         stacked_means = np.concatenate(means, axis=0)
-        # All-or-nothing: a partial sigma would silently pair some rows' uncertainty with other
-        # rows' predictions once the arrays were concatenated to different lengths.
+        # All or nothing: a partial set would pair some points' uncertainty with other points'
+        # predictions.
         stacked_sigmas = (
             np.concatenate(sigmas, axis=0) if len(sigmas) == len(means) else None
         )
@@ -702,6 +766,7 @@ class LightningTrainer:
 
     @staticmethod
     def _as_2d_array(batch) -> np.ndarray:
+        """Return one batch of predictions as a rows-by-targets array."""
         if hasattr(batch, "detach"):
             batch = batch.detach().cpu().numpy()
         else:
@@ -714,6 +779,7 @@ class LightningTrainer:
         return batch
 
     def _normalize_metrics(self, metrics) -> dict[str, float]:
+        """Return what Lightning reported as a plain dict of numbers."""
         if not metrics:
             return {}
 
@@ -730,6 +796,7 @@ class LightningTrainer:
         return normalized
 
     def _serialize_params(self, bundle: LightningModelBundle) -> dict[str, Any]:
+        """The settings to record with the run: the model's, its data's and its training's."""
         params = {
             "model_name": bundle.name,
             "target": bundle.target,

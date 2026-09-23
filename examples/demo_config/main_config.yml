@@ -1,0 +1,75 @@
+# Demo configuration: runs the whole pipeline on the made-up dataset in examples/demo_data/.
+#
+#   pixi run -e core demo-data    # writes examples/demo_data/ (a few seconds)
+#   pixi run -e core demo         # = python main.py --config-path examples/demo_config/main_config.yml
+#
+# It is a trimmed copy of configs/main_config.yml, which explains every setting in detail. Run the
+# commands from the repository root: the data folder below is relative to where you run them.
+
+common:
+  data:
+    root: "examples/demo_data"      # folder holding the three files below
+    static: "static.csv"            # one row per point: covariates that do not change over time
+    targets: "targets.csv"          # one row per point: lat/lon and the lab values to predict
+    timeseries: "timeseries.csv"    # one row per point per date: satellite and climate readings
+    manifest: null
+
+  POINT_ID_COLUMN: "uuid"           # the column that identifies each sample point in all three files
+  LAT_COLUMN: "lat"
+  LON_COLUMN: "lon"
+  RANDOM_SEED: 42                   # the same seed gives the same split and the same results
+
+  # One train / validation / test split, shared by every model so their scores are comparable.
+  split:
+    strategy: random                # or spatial_group, to hold out whole clusters of nearby points
+    test_size: 0.15                 # 15% of the points are kept aside to score the models
+    val_size: 0.15                  # 15% are used during training to decide when to stop
+    seed: 42
+    population_policy: intersect    # every model is trained and scored on the same points
+    min_population_ratio: 0.5
+    plan_path: null
+    group:
+      class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+      params:
+        n_clusters: 8
+
+  # A covariate blank on more than 20% of the points stops the run; below that, gaps are filled.
+  data_quality:
+    max_missing_column_ratio: 0.2
+    allow_sparse_columns: []
+    fail_on_sparse_columns: true
+
+  FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET: true
+  FAIL_ON_MODEL_ERROR: true         # the demo should fail loudly rather than skip a model
+
+  # The other configuration files, relative to this file's folder. The demo has its own column
+  # list and model lists, and reuses the project's general scikit-learn and Lightning settings.
+  DATA_SPEC_PATH: "data_spec.yml"
+  SKLEARN_CONFIG_PATH: "../../configs/sklearn/config.yml"
+  LIGHTNING_CONFIG_PATH: "../../configs/lightning/config.yml"
+  SKLEARN_REGISTRY_PATH: "sklearn_models.yml"
+  LIGHTNING_REGISTRY_PATH: "lightning_models/defaults.yml"
+
+  # The time-series file: which column holds the date, and which column-name prefix belongs to
+  # which data source.
+  temporal:
+    enabled: true
+    time_column: "observation_date"
+    modality_prefix_map:
+      s2: "S2_"                     # Sentinel-2 columns
+      clim: "CLIM_"                 # climate columns
+
+  # Results are recorded by MLflow in the repository's mlruns/ folder, under their own name so
+  # they never mix with real runs. Open them with `pixi run -e core mlflow`.
+  MLFLOW_TRACKING_URI: ""
+  MLFLOW_EXPERIMENT_NAME: "Soil_Demo"
+  MLFLOW_REGISTER_MODELS: false     # keep the demo models out of the model registry
+  MLFLOW_EXPERIMENT_EXPORT_ENABLED: false
+  MAIN_FILE_LOGGING_ENABLED: true
+
+  # Optional extras, off in the demo to keep it quick. See docs/examples.md to switch them on.
+  EXPLAIN_ENABLED: false
+  uncertainty:
+    enabled: false
+  export_point_predictions:
+    enabled: true                   # also write every model's prediction for every point

@@ -1,49 +1,70 @@
-"""How a run's targets are grouped, and how a group is named.
+"""Decide which targets each model predicts, and name the resulting groups.
 
-One question, asked the same way by both families: given the configured TARGET_COLUMNS and a
-registry entry, which targets does a single fitted model cover? The answer is a list of GROUPS.
+With several targets, one model can predict them all at once or each target can get its own model.
+``MULTI_TARGET_MODE`` in ``data_spec.yml`` chooses, for both model families, and a model-list entry
+can override it. The answer is a list of :term:`target groups <target group>`, one model per group::
 
-  joint       -> [[a, b, c]]        one model with a 3-wide head
-  per_target  -> [[a], [b], [c]]    three independent models
+    joint       -> [[a, b, c]]        one model predicting three targets
+    per_target  -> [[a], [b], [c]]    three models, one target each
 
-Before this module the answer was implicit and family-specific. Lightning was ALWAYS joint - the
-sequence and graph builders read config.TARGET_COLUMNS wholesale and nothing ever narrowed `y` to
-the run's target - while sklearn was always per-target. The `run_lightning_once` predicate in
-main.py looked like the switch but only controlled how many times that same multi-output model was
-trained. Grouping is now an explicit choice, and both families obey it.
-
-The "__" encoding of a joint group's name also lives here. It was copy-pasted in four places and a
-target name containing "__" broke the round trip silently; join_target_names refuses that name
-instead.
+A group is named by joining its target names with ``__`` (``clay_pct__ph_water``). That name labels
+the MLflow runs and the saved files, so a target name may not itself contain ``__``.
 """
 
 from __future__ import annotations
 
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
+#: One model predicts every target.
 JOINT = "joint"
+#: One model per target.
 PER_TARGET = "per_target"
+#: The values ``MULTI_TARGET_MODE`` accepts.
 VALID_MODES = (JOINT, PER_TARGET)
 
-# sklearn entries declare capability with the same key: "native" means the estimator fits a 2-D y
-# itself. Anything that is not a mode and not "native" is a configuration error.
+#: A scikit-learn model list entry says ``multi_target: native`` when the estimator can predict
+#: several targets at once. That is a capability, not a mode: such an entry still follows
+#: ``MULTI_TARGET_MODE``.
 NATIVE = "native"
 
+#: Joins target names into a group name.
 TARGET_NAME_SEPARATOR = "__"
 
 
 def join_target_names(names: Sequence[str]) -> str:
-    """The run label for a group of targets.
+    """Name a group of targets by joining their names with ``__``.
 
-    A single target is its own name, so single-target runs keep the labels they have always had.
+    A group of one is named after its target.
+
+    Parameters
+    ----------
+    names : sequence of str
+        The targets in the group.
+
+    Returns
+    -------
+    str
+        The group name, used to label runs and files.
+
+    Raises
+    ------
+    ValueError
+        If ``names`` is empty, or a group of several contains a name with ``__`` in it.
+
+    Examples
+    --------
+    >>> join_target_names(["clay_pct", "ph_water"])
+    'clay_pct__ph_water'
+    >>> join_target_names(["clay_pct"])
+    'clay_pct'
     """
     names = [str(name) for name in names]
     if not names:
         raise ValueError("Cannot build a run label from an empty target group.")
     if len(names) == 1:
         return names[0]
-    # The separator is also the decoder, so a name containing it would split into pieces that name
-    # no column. Better to refuse the config than to emit a label that cannot be read back.
+    # The separator is also how the name is read back, so a target name containing it would split
+    # into pieces naming no column.
     offenders = [name for name in names if TARGET_NAME_SEPARATOR in name]
     if offenders:
         raise ValueError(
@@ -54,17 +75,63 @@ def join_target_names(names: Sequence[str]) -> str:
 
 
 def split_target_names(encoded: Any) -> list[str]:
-    """The targets behind a run label. Inverse of :func:`join_target_names`."""
+    """Split a group name back into its target names; the reverse of :func:`join_target_names`.
+
+    Parameters
+    ----------
+    encoded : str or None
+        A group name such as ``"clay_pct__ph_water"``.
+
+    Returns
+    -------
+    list of str
+
+    Examples
+    --------
+    >>> split_target_names("clay_pct__ph_water")
+    ['clay_pct', 'ph_water']
+    >>> split_target_names(None)
+    []
+    """
     if encoded is None:
         return []
     return [name for name in str(encoded).split(TARGET_NAME_SEPARATOR) if name]
 
 
 def resolve_mode(config: Any, spec: Optional[Mapping[str, Any]] = None) -> str:
-    """The grouping mode in force, entry override first, then the global default.
+    """Return the grouping mode for one model: ``"joint"`` or ``"per_target"``.
 
-    A registry entry declaring ``multi_target: native`` is stating an sklearn capability rather than
-    asking for a mode, so it falls through to the global default.
+    A model-list entry's own ``multi_target`` setting wins over the configuration's
+    ``MULTI_TARGET_MODE`` (``"joint"`` unless set). ``multi_target: native`` is a capability, not a
+    mode, so it leaves the configured mode in force.
+
+    Parameters
+    ----------
+    config : Config
+        The run configuration.
+    spec : mapping, optional
+        The model's entry in the model list.
+
+    Returns
+    -------
+    str
+        ``"joint"`` or ``"per_target"``.
+
+    Raises
+    ------
+    ValueError
+        If either setting holds an unknown value.
+
+    Examples
+    --------
+    >>> from types import SimpleNamespace
+    >>> config = SimpleNamespace(MULTI_TARGET_MODE="joint")
+    >>> resolve_mode(config)
+    'joint'
+    >>> resolve_mode(config, {"multi_target": "per_target"})
+    'per_target'
+    >>> resolve_mode(config, {"multi_target": "native"})
+    'joint'
     """
     if spec is not None:
         declared = spec.get("multi_target")
@@ -83,11 +150,27 @@ def resolve_mode(config: Any, spec: Optional[Mapping[str, Any]] = None) -> str:
 
 
 def supports_joint(spec: Optional[Mapping[str, Any]] = None) -> bool:
-    """Whether an sklearn registry entry can fit a 2-D y itself.
+    """Whether a scikit-learn model-list entry can predict several targets at once.
 
-    Lightning entries do not use this: every Lightning head is a Linear(..., target_dim) and is
-    joint-capable by construction. sklearn estimators are not - GradientBoostingRegressor and
-    TabICLRegressor are single-output - so an entry has to opt in.
+    Only if the entry says ``multi_target: native``. Several estimators predict one target at a time
+    (gradient boosting, TabICL), so an entry has to declare the capability. Deep-learning models
+    always have it and do not use this check.
+
+    Parameters
+    ----------
+    spec : mapping, optional
+        The model's entry in the model list.
+
+    Returns
+    -------
+    bool
+
+    Examples
+    --------
+    >>> supports_joint({"multi_target": "native"})
+    True
+    >>> supports_joint({"params": {"alpha": [1.0]}})
+    False
     """
     return spec is not None and str(spec.get("multi_target", "")).lower() == NATIVE
 
@@ -100,11 +183,36 @@ def resolve_target_groups(
     logger: Any = None,
     entry_name: str = "",
 ) -> list[list[str]]:
-    """The target groups one registry entry is fitted over.
+    """List the target groups one model is trained on - one trained model per group.
 
-    ``require_joint_support`` is for the sklearn side: an entry that has not declared itself
-    multi-output falls back to per-target with a warning rather than failing. One unsupported
-    estimator must not take the whole run down.
+    Parameters
+    ----------
+    config : Config
+        The run configuration; reads ``TARGET_COLUMNS`` and ``MULTI_TARGET_MODE``.
+    spec : mapping, optional
+        The model's entry in the model list.
+    require_joint_support : bool, default False
+        Set for scikit-learn models. In joint mode, an entry that has not declared
+        ``multi_target: native`` gets one model per target instead, with a warning: one estimator
+        that cannot predict several targets must not stop the run.
+    logger : logging.Logger, optional
+        Where that warning goes.
+    entry_name : str, optional
+        The model's name, named in the warning.
+
+    Returns
+    -------
+    list of list of str
+        One list of target names per model. Empty if no targets are configured.
+
+    Examples
+    --------
+    >>> from types import SimpleNamespace
+    >>> config = SimpleNamespace(TARGET_COLUMNS=["clay_pct", "ph_water"], MULTI_TARGET_MODE="joint")
+    >>> resolve_target_groups(config)
+    [['clay_pct', 'ph_water']]
+    >>> resolve_target_groups(config, {}, require_joint_support=True)   # not multi-target
+    [['clay_pct'], ['ph_water']]
     """
     targets = [str(name) for name in (getattr(config, "TARGET_COLUMNS", []) or [])]
     if not targets:
@@ -126,7 +234,13 @@ def resolve_target_groups(
 
 
 def group_label(group: Iterable[str]) -> str:
-    """Convenience: the run label for a group, in the shape callers actually hold it."""
+    """Name a target group held as any iterable; see :func:`join_target_names`.
+
+    Examples
+    --------
+    >>> group_label(("clay_pct", "ph_water"))
+    'clay_pct__ph_water'
+    """
     return join_target_names(list(group))
 
 
@@ -135,12 +249,44 @@ def select_target_columns(
     target_names: Sequence[str],
     active_targets: Optional[Sequence[str]],
 ) -> tuple[Any, list[str], Optional[list[int]]]:
-    """Narrow an ``(n_points, n_targets)`` block to the targets this run actually fits.
+    """Keep only the columns of the targets one model predicts.
 
-    Returns the narrowed array, its names, and the column indices taken (None when nothing was
-    narrowed, so callers can skip work). The bundle is built once over every configured target and
-    cached across registry entries, so per-target runs slice here rather than rebuilding it - the
-    build is the expensive half and would otherwise be repaid once per target.
+    The deep-learning data is prepared once for every configured target and reused, so a model that
+    predicts one target takes its column here instead of preparing the data again.
+
+    Parameters
+    ----------
+    targets : array-like of shape (n_points, n_targets)
+        Target values, one column per name in ``target_names``.
+    target_names : sequence of str
+        The names of those columns.
+    active_targets : sequence of str or None
+        The targets to keep, in the order wanted. None or empty keeps everything.
+
+    Returns
+    -------
+    values : array-like
+        The selected columns, or ``targets`` unchanged when nothing was removed.
+    names : list of str
+        Their names.
+    indices : list of int or None
+        Where the selected columns sat in ``targets``; None when nothing was removed.
+
+    Raises
+    ------
+    ValueError
+        If a wanted target is not among ``target_names``.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> values, names, indices = select_target_columns(
+    ...     np.array([[1, 2, 3], [4, 5, 6]]), ["a", "b", "c"], ["c", "a"])
+    >>> values
+    array([[3, 1],
+           [6, 4]])
+    >>> names, indices
+    (['c', 'a'], [2, 0])
     """
     import numpy as np
 
@@ -161,8 +307,7 @@ def select_target_columns(
 
     indices = [names.index(name) for name in wanted]
     array = np.asarray(targets)
-    # An empty block (no targets built at all) has nothing to take columns from; leaving it alone
-    # keeps the (0, 0) shape the dataclasses default to rather than raising on the index.
+    # An empty block has no columns to take: leave its (0, 0) shape alone.
     if array.ndim != 2 or array.shape[1] == 0:
         return targets, wanted, indices
     return array[:, indices], wanted, indices
