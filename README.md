@@ -3,6 +3,7 @@
 <div align="center">
 
 [![Checks](https://img.shields.io/github/actions/workflow/status/KhalilM94/yg-eo-soilnet/ci.yml?branch=main&label=checks)](https://github.com/KhalilM94/yg-eo-soilnet/actions/workflows/ci.yml)
+[![Coverage](https://img.shields.io/endpoint?url=https://khalilm94.github.io/yg-eo-soilnet/coverage.json)](https://github.com/KhalilM94/yg-eo-soilnet/actions/workflows/docs.yml)
 [![Documentation](https://img.shields.io/badge/docs-github%20pages-blue)](https://khalilm94.github.io/yg-eo-soilnet/)
 [![License](https://img.shields.io/github/license/KhalilM94/yg-eo-soilnet)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.12-blue)](pyproject.toml)

@@ -47,6 +47,28 @@ jobs:
       - name: Build the documentation
         run: pixi run -e ci docs
 
+      # How much of the code the tests actually run. Published beside the documentation as a
+      # small file that shields.io reads, because a badge needs a number on the open web and this
+      # is the only place the project publishes to. The whole suite runs here, not the quick
+      # subset, so the figure covers everything.
+      - name: Measure how much of the code the tests cover
+        run: |
+          pixi run -e ci python -m pytest --cov=yg_eo_soilnet ./tests -q
+          pixi run -e ci python -m coverage json -o coverage-raw.json
+
+      - name: Write the coverage badge
+        run: |
+          pixi run -e ci python - <<'PY'
+          import json, pathlib
+          total = json.load(open("coverage-raw.json"))["totals"]["percent_covered"]
+          colour = ("brightgreen" if total >= 90 else "green" if total >= 80
+                    else "yellow" if total >= 60 else "red")
+          badge = {"schemaVersion": 1, "label": "coverage",
+                   "message": f"{total:.0f}%", "color": colour}
+          pathlib.Path("docs/_build/html/coverage.json").write_text(json.dumps(badge))
+          print("coverage:", badge["message"])
+          PY
+
       - uses: actions/configure-pages@v6
 
       - name: Package the built site
