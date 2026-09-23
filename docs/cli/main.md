@@ -15,6 +15,10 @@ python main.py --config-path examples/demo_config/main_config.yml
 
 # Train a tuned deep-learning configuration without editing any file.
 LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_cnn-e6c9f8_best.yml python main.py
+
+# Check that the whole pipeline still runs, in a couple of minutes, without training
+# anything worth keeping. This is what the automated checks run on every change.
+python main.py --config-path examples/demo_config/main_config.yml --dev-mode
 ```
 
 ## Options
@@ -22,6 +26,7 @@ LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_cnn-e6c9f8_best.yml p
 | Option | Default | What it does |
 |---|---|---|
 | `--config-path` | `configs/main_config.yml` | The main configuration file. Every other file - the column definitions, the two model lists - is named inside it, so this one option chooses the whole run. |
+| `--dev-mode` | off | Runs everything once, as fast as it will go: one pass over the training points, two batches of them, one setting per classic model, and explanations, uncertainty and model registration all switched off. It is there to show the pipeline runs from end to end without an error - the scores it produces mean nothing, and the run is tagged `dev_mode` in MLflow so it cannot be mistaken for a real one. |
 
 Everything else is set in the configuration files; see the [configuration guide](../configuration/index.md).
 Any setting can also be overridden for one run by an environment variable of the same name:
