@@ -29,8 +29,8 @@ soil_residual_attention_cnn:
   modeltype: dl
   trainer_args:
     max_epochs: 100
-    accelerator: cuda
-    devices: 1
+    accelerator: auto
+    devices: auto
     precision: 32-true
     accumulate_grad_batches: 1
     gradient_clip_val: 1.0

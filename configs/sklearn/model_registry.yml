@@ -82,7 +82,9 @@ TabICL:
   init_args:
     n_estimators: 8      # how many internal models to average together; fewer = faster but
                           # noisier. 4 is usually enough for a quick comparison.
-    device: "cuda"     # "cuda" to use the GPU; leave unset (None) to auto-detect
+    # device: left unset on purpose - TabICL then uses the GPU when the machine has one and
+    # the CPU when it does not. It has no "auto" setting, and naming a device that is not
+    # there fails, so unset is the only choice that works everywhere.
     # batch_size: 2        # lower this if you run out of memory with many features
     offload_mode: "disk"   # move the memory-heavy part to disk rather than RAM/GPU
     disk_offload_dir: "/tmp/tabicl_offload"

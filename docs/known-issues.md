@@ -13,10 +13,6 @@ the files in use are `configs/main_config.yml` and the two model lists it names.
 
 ## Runs and results
 
-**The GPU is assumed.** `configs/lightning/models/defaults.yml` has `accelerator: cuda`, and TabICL
-in the scikit-learn model list has `device: "cuda"`. On a machine without an NVIDIA card both have
-to be set to `cpu`. The demo configuration already does.
-
 **A run's log file is written to a temporary folder.** It is uploaded to the run when training
 finishes, so it survives there; but a run that is killed partway leaves its log in the system
 temporary folder, which is cleaned up eventually.

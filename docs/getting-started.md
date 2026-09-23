@@ -142,8 +142,8 @@ Run it both ways: the gap between the two is how much of your score was proximit
 `enabled: true` on one or two - `Ridge` is a good first choice, `XGBoost` a good second - and
 `configs/lightning/models/soil_cnn.yml` for the deep-learning model.
 
-On a machine without an NVIDIA card, also set `accelerator: cpu` in
-`configs/lightning/models/defaults.yml`, and `device: "cpu"` for TabICL.
+Nothing to change for the processor: both model lists detect a graphics card and fall back to
+the CPU when there is none.
 
 ## 7. Run it
 

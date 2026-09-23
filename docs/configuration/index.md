@@ -154,8 +154,8 @@ soil_cnn:
 ```
 
 Settings shared by every deep-learning model - the processor, the epochs, early stopping - are in
-`configs/lightning/models/defaults.yml`. On a machine without an NVIDIA card, set
-`accelerator: cpu` there.
+`configs/lightning/models/defaults.yml`. The processor is `auto`, which means the graphics card
+when the machine has one; set `accelerator: cpu` there to insist on the CPU.
 
 The full meaning of every `soil_cnn` setting is in
 {class}`~yg_eo_soilnet.models.lightningmodules.soil_cnn_lightning_module.SoilCNNLightningModule`,

@@ -133,14 +133,6 @@ LIGHTNING_DEFAULT_SETTINGS = {
 }
 
 LIGHTNING_INTENTIONAL_DIVERGENCES = {
-    "LIGHTNING_ACCELERATOR": (
-        "The code is right and the file is not: auto picks the GPU when there is one and still "
-        "runs on a machine without a card. Fixed in the model list separately."
-    ),
-    "LIGHTNING_DEVICES": (
-        "As LIGHTNING_ACCELERATOR: asking for one device of a kind the machine does not have "
-        "fails, and auto asks for whatever is there."
-    ),
     "LIGHTNING_NUM_WORKERS": (
         "11 is the core count of the machine the shipped file was written on. 0 loads data in the "
         "training process, which is the value that works everywhere."
@@ -277,6 +269,21 @@ def test_every_disagreement_with_the_model_list_is_written_down(minimal_config):
             for setting, (path, listed, fallback) in sorted(unexplained.items())
         )
         + "\nEither align the two, or add the setting to LIGHTNING_INTENTIONAL_DIVERGENCES."
+    )
+
+
+def test_the_model_list_divergence_table_has_no_stale_entries(minimal_config):
+    """As for the other table: an entry that no longer describes a disagreement is misleading."""
+    defaults = _lightning_defaults()
+    stale = [
+        setting
+        for path, setting in LIGHTNING_DEFAULT_SETTINGS.items()
+        if setting in LIGHTNING_INTENTIONAL_DIVERGENCES
+        and _at(defaults, path) == getattr(minimal_config, setting)
+    ]
+    assert not stale, (
+        f"These settings now agree with their fallback: {sorted(stale)}. Remove them from "
+        "LIGHTNING_INTENTIONAL_DIVERGENCES."
     )
 
 
