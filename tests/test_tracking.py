@@ -1102,3 +1102,40 @@ def test_a_failed_model_log_warns(monkeypatch, caplog) -> None:
     assert any("NO servable model" in record.getMessage() for record in caplog.records)
     # The actual cause must be in the line, not just "something failed".
     assert any("Batch carries 0 lab column" in record.getMessage() for record in caplog.records)
+
+
+# --- tuning records where training does ---------------------------------------------------------
+# set_hpo_experiment used to call configure_tracking with no config, so resolve_tracking_uri could
+# only return the default location - and set_tracking_uri then overrode the MLFLOW_TRACKING_URI the
+# user had set. Tuning wrote somewhere other than training.
+
+
+def test_set_hpo_experiment_honours_the_configured_tracking_uri(monkeypatch) -> None:
+    from yg_eo_soilnet.hpo.study import set_hpo_experiment
+
+    seen: list[str] = []
+    monkeypatch.setattr(tracking.mlflow, "set_tracking_uri", lambda uri: seen.append(uri))
+    monkeypatch.setattr(tracking.mlflow, "set_experiment", MagicMock())
+    monkeypatch.setattr("yg_eo_soilnet.hpo.study.mlflow.active_run", lambda: None)
+
+    set_hpo_experiment(config=SimpleNamespace(MLFLOW_TRACKING_URI="sqlite:///elsewhere.db"))
+
+    assert seen == ["sqlite:///elsewhere.db"]
+
+    # And without a config it still falls back to the default root, as every other caller does.
+    seen.clear()
+    set_hpo_experiment()
+    assert seen == [tracking.default_tracking_uri()]
+
+
+def test_set_hpo_experiment_still_uses_the_tuning_experiment(monkeypatch) -> None:
+    from yg_eo_soilnet.hpo.study import HPO_EXPERIMENT_NAME, set_hpo_experiment
+
+    seen: list[str] = []
+    monkeypatch.setattr(tracking.mlflow, "set_tracking_uri", MagicMock())
+    monkeypatch.setattr(tracking.mlflow, "set_experiment", lambda name: seen.append(name))
+    monkeypatch.setattr("yg_eo_soilnet.hpo.study.mlflow.active_run", lambda: None)
+
+    set_hpo_experiment(config=SimpleNamespace(MLFLOW_EXPERIMENT_NAME="Soil_Model_Training_v2"))
+
+    assert seen == [HPO_EXPERIMENT_NAME]

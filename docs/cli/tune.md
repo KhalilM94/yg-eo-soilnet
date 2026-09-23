@@ -77,7 +77,7 @@ LIGHTNING_MODEL_REGISTRY_PATH=configs/lightning/tuned/soil_cnn-e6c9f8_best.yml p
 | `--fail-fast` | off | Stop with the error when a trial fails, instead of marking it failed and going on. |
 | `--progress` | `auto` | How progress is shown: `bar`, `plain` (one line per trial), `none`, or `auto` - bars in a terminal, plain lines when the output is redirected. |
 | `--verbose` | off | Show Lightning's own training output for every trial. |
-| `--no-mlflow` | off | Do not record the study in MLflow; the trials are still saved in the study database. Note the data-preparation run is still recorded - see [Known issues](../known-issues.md). |
+| `--no-mlflow` | off | Record nothing in MLflow; the trials are still saved in the study database. |
 
 ## What it writes
 

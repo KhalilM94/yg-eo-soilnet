@@ -23,9 +23,12 @@ Studies are stored in ``optuna_studies/soilnet.db`` and logged to the MLflow exp
 from __future__ import annotations
 
 import argparse
+import tempfile
 import time
+from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import mlflow
 
@@ -151,8 +154,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--no-mlflow",
         action="store_true",
-        help="Do not log the study to MLflow; trials are still saved in the study storage. The "
-        "data-preparation run is still logged.",
+        help="Do not log anything to MLflow; trials are still saved in the study storage.",
     )
     parser.add_argument(
         "--export-only",
@@ -223,17 +225,28 @@ def main() -> None:
         return
 
     # Data preparation logs the split to MLflow, so it is done inside a named run of the tuning
-    # experiment.
-    set_hpo_experiment()
+    # experiment. Under --no-mlflow it still has somewhere to write - the splitter logs the split
+    # whoever calls it - so tracking is pointed at a scratch directory instead of being skipped:
+    # skipping it left the split's own artifacts to open an unnamed run in the real store, which is
+    # the thing the flag is meant to prevent. The directory is left for the OS to reap, as the run
+    # logs are.
+    record = not args.no_mlflow
+    if record:
+        set_hpo_experiment(config=config)
+    else:
+        scratch = Path(tempfile.mkdtemp(prefix="yg_eo_soilnet_no_mlflow_"))
+        logger.info(f"--no-mlflow: nothing is recorded; MLflow calls go to {scratch}")
+        set_hpo_experiment(config=SimpleNamespace(MLFLOW_TRACKING_URI=scratch.as_uri()))
 
     # Load and split the data exactly as main.py does, once; every trial reuses it.
     stage_start = time.perf_counter()
-    with mlflow.start_run(run_name=f"{study_name}_data"):
+    with mlflow.start_run(run_name=f"{study_name}_data") if record else nullcontext():
         scikit_datamodule = ScikitDataModule(config, logger, DataManager(config, logger))
         split_data = scikit_datamodule.prepare()
         # Every trial uses this same split, so trials are compared on the same validation points.
         # (That is also why the search space may not change the split.)
-        mlflow.log_params(split_data["split_plan"].describe())
+        if record:
+            mlflow.log_params(split_data["split_plan"].describe())
         data = build_lightning_input(
             args.entry, registry_entry, config, split_data, logger=logger, data_manager=scikit_datamodule.data_manager
         )
@@ -284,6 +297,7 @@ def main() -> None:
             tracker=tracker,
             progress=progress,
             artifact_dir=Path("optuna_studies") / study_name,
+            config=config,
         )
     except BaseException as error:
         # Also on Ctrl-C: the best trial so far is still exported.

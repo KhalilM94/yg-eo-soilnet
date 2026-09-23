@@ -6,13 +6,6 @@ how the code behaves changed underneath you. None of them affects a model's scor
 
 ## Command-line tools
 
-**`tune.py --no-mlflow` still records one run.** It switches off the per-study recording, but the
-data-preparation step opens a run before that takes effect, so an empty
-`Soil_HPO_Experiment` run is left behind.
-
-**`tune.py` ignores `MLFLOW_TRACKING_URI`.** Tuning always records to the default location, even
-when that environment variable points somewhere else. Training and the other tools honour it.
-
 ## Configuration
 
 **Some settings default differently in code and in YAML.** The code's own default is used when a
