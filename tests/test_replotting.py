@@ -185,3 +185,33 @@ def test_only_narrows_what_gets_drawn():
 
 def test_a_run_without_sigma_plans_no_uncertainty_figures():
     assert _planned(has_sigma=False, cv_results=None, only=None) == ["plots/pred_obs.png"]
+
+
+# --- the --since filter ----------------------------------------------------
+# A run's start time is milliseconds since the epoch. Passing the date through as a quoted string
+# made every `--experiment ... --since` run end in an MLflow parse error.
+
+
+def test_since_is_converted_to_the_timestamp_mlflow_expects():
+    import datetime
+
+    import replot
+
+    expected = int(datetime.datetime(2026, 9, 1).timestamp() * 1000)
+    assert replot._since_filter("2026-09-01") == f"attributes.start_time >= {expected}"
+    # Unquoted: a quoted value is what MLflow refuses for a numeric attribute.
+    assert "'" not in replot._since_filter("2026-09-01")
+
+
+def test_no_since_means_no_filter():
+    import replot
+
+    assert replot._since_filter(None) == ""
+    assert replot._since_filter("") == ""
+
+
+def test_a_malformed_since_is_reported_before_mlflow_sees_it():
+    import replot
+
+    with pytest.raises(SystemExit, match="YYYY-MM-DD"):
+        replot._since_filter("01/09/2026")

@@ -6,11 +6,6 @@ how the code behaves changed underneath you. None of them affects a model's scor
 
 ## Command-line tools
 
-**`replot.py --since` stops with an error.** The date is compared against a timestamp in a form
-MLflow does not accept, so any run of `--experiment ... --since 2026-09-01` ends with
-`MlflowException: Expected numeric value type for numeric attribute: start_time`. Redraw the whole
-experiment, or name the runs you want with `--parent-run-id`.
-
 **`tune.py --no-mlflow` still records one run.** It switches off the per-study recording, but the
 data-preparation step opens a run before that takes effect, so an empty
 `Soil_HPO_Experiment` run is left behind.
