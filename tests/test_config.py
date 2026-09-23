@@ -732,13 +732,14 @@ def test_active_targets_are_declared_as_labels() -> None:
 # The uncertainty interval block: read from the config, legacy spellings included.
 
 
-def _config_with(tmp_path, uncertainty_yaml: str):
+def _config_with(tmp_path, uncertainty_yaml: str, *, data_spec: str = BASE_DATA_SPEC_CONTENT):
     """A real Config over a minimal tree, reusing this file's fixture content.
 
     Building the whole tree matters: Config resolves its sub-configs relative to the main file, so
-    a one-key stub raises before it ever reaches the uncertainty block.
+    a one-key stub raises before it ever reaches the uncertainty block. `data_spec` replaces the
+    column declarations for tests about those.
     """
-    (tmp_path / "data_spec.yml").write_text(BASE_DATA_SPEC_CONTENT.strip())
+    (tmp_path / "data_spec.yml").write_text(data_spec.strip())
     (tmp_path / "sklearn.yml").write_text(BASE_SKLEARN_CONFIG_CONTENT.strip())
     (tmp_path / "lightning.yml").write_text(BASE_LIGHTNING_CONFIG_CONTENT.strip())
     (tmp_path / "registry.yml").write_text("enabled: true\n")
@@ -803,3 +804,51 @@ def test_the_interval_block_wins_over_the_legacy_key(tmp_path):
 def test_the_default_is_conformal_when_nothing_is_configured(tmp_path):
     config = _config_with(tmp_path, "")
     assert normalize_method(config.UNCERTAINTY_INTERVAL_METHOD) == "conformal"
+
+
+# --- a column may not be both a lab column and a category ------------------
+# A lab column is removed from the feature set before the category handling sees it, so a column in
+# both lists reaches no model. That was silent until Config started refusing it.
+
+
+def test_a_column_in_both_label_and_categorical_stops_the_run(tmp_path):
+    with pytest.raises(ValueError) as raised:
+        _config_with(
+            tmp_path,
+            "",
+            data_spec="""
+TARGET_COLUMNS: [clay_pct]
+LABEL_COLUMNS: [clay_pct, texture_20cm]
+CATEGORICAL_FEATURES: [texture_20cm]
+""",
+        )
+
+    message = str(raised.value)
+    assert "texture_20cm" in message
+    assert "LABEL_COLUMNS" in message and "CATEGORICAL_FEATURES" in message
+    # Both ways out are named, because which one is right depends on the column.
+    assert "Remove each one from CATEGORICAL_FEATURES" in message
+
+
+def test_a_category_that_is_not_a_lab_column_is_fine(tmp_path):
+    config = _config_with(
+        tmp_path,
+        "",
+        data_spec="""
+TARGET_COLUMNS: [clay_pct]
+LABEL_COLUMNS: [clay_pct]
+CATEGORICAL_FEATURES: [landform_class]
+""",
+    )
+    assert config.CATEGORICAL_FEATURES == ["landform_class"]
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [CONFIGS_ROOT / "main_config.yml", PROJECT_ROOT / "examples" / "demo_config" / "main_config.yml"],
+    ids=["shipped", "demo"],
+)
+def test_the_shipped_configurations_pass_every_check(config_path):
+    """Both must construct: a check that rejects the project's own configuration is a broken check."""
+    config = Config(config_path=str(config_path))
+    assert not set(config.CATEGORICAL_FEATURES) & set(config.LABEL_COLUMNS)

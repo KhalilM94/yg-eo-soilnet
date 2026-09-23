@@ -24,11 +24,6 @@ is exported. `--skip-models` and the configuration's skip list do work.
 
 ## Configuration
 
-**A column listed as both a lab column and a category is never used.** `texture_20cm` and
-`landform_class` are in both `LABEL_COLUMNS` and `CATEGORICAL_FEATURES` in the shipped
-`data_spec.yml`. A lab column is removed from the inputs before the category handling sees it, so
-the models never receive either of them. To use one as a category, take it out of `LABEL_COLUMNS`.
-
 **Some settings default differently in code and in YAML.** The code's own default is used when a
 setting is absent from your configuration file, and two of them disagree with the shipped file:
 explanations default to on in code and are `false` in `main_config.yml`; early-stopping patience

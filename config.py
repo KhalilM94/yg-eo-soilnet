@@ -545,6 +545,44 @@ class Config:
         self.MODEL_REGISTRY = self._load_model_registry()
         self.LIGHTNING_MODEL_REGISTRY = self._load_lightning_model_registry()
 
+        self._validate()
+
+    # --- checks -------------------------------------------------------------
+
+    def _validate(self) -> None:
+        """Refuse a configuration whose settings contradict each other.
+
+        Checked here, before any data is read, so the message names the setting rather than
+        surfacing as a missing column or a missing key somewhere inside training.
+
+        Raises
+        ------
+        ValueError
+            If a column is declared both as a lab column and as a category.
+        """
+        self._validate_categorical_not_label()
+
+    def _validate_categorical_not_label(self) -> None:
+        """Refuse a column declared as both a lab column and a category.
+
+        A lab column is removed from the inputs before the category handling sees it, so a column in
+        both lists reaches no model at all - and did so silently until this check existed.
+        """
+        both = [
+            column
+            for column in dict.fromkeys(str(name) for name in (self.CATEGORICAL_FEATURES or []))
+            if column in {str(name) for name in (self.LABEL_COLUMNS or [])}
+        ]
+        if not both:
+            return
+        raise ValueError(
+            f"Column(s) {sorted(both)} are declared in both LABEL_COLUMNS and CATEGORICAL_FEATURES "
+            f"in {self.data_spec_path}. A lab column is removed from the feature set before the "
+            "category handling sees it, so no model would receive them. Remove each one from "
+            "CATEGORICAL_FEATURES to keep it out of the inputs, or from LABEL_COLUMNS to make it a "
+            "real categorical input."
+        )
+
     def _get_config(self, key: str, default: Any) -> Any:
         """Return a setting: environment variable, then each config file, then ``default``.
 

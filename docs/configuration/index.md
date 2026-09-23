@@ -86,7 +86,7 @@ common:
 |---|---|
 | `TARGET_COLUMNS` | What to predict. |
 | `LABEL_COLUMNS` | **Every** lab measurement, targets included. These are never inputs, so a property you stop predicting cannot leak into predicting the others. |
-| `CATEGORICAL_FEATURES` | Columns holding categories rather than numbers. A column that is also in `LABEL_COLUMNS` is used by nothing - see [Known issues](../known-issues.md). |
+| `CATEGORICAL_FEATURES` | Columns holding categories rather than numbers. A column cannot also be in `LABEL_COLUMNS` - a lab column never reaches a model, so the run stops and names it. |
 | `IGNORED_COLUMNS` | Ids, coordinates, geometry - anything identifying a point rather than describing it. |
 | `MULTI_TARGET_MODE` | `joint` (one model predicts every target) or `per_target`. |
 | `COLUMNS_TO_TRANSFORM` | Targets trained on a log scale, which suits skewed properties. |

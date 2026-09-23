@@ -103,9 +103,10 @@ IGNORED_COLUMNS:
   - lon
 ```
 
-:::{warning}
-A column in both `LABEL_COLUMNS` and `CATEGORICAL_FEATURES` is used by no model at all - see
-[Known issues](known-issues.md). Pick one.
+:::{note}
+A column cannot be in both `LABEL_COLUMNS` and `CATEGORICAL_FEATURES`: a lab column is removed from
+the inputs before the category handling sees it, so no model would receive it. The run stops and
+names the column, rather than dropping it quietly.
 :::
 
 Everything not set aside and not too empty becomes a model input. You do not list the inputs.
