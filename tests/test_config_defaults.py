@@ -68,9 +68,17 @@ INTENTIONAL_DIVERGENCES = {
         "A per-dataset experiment switch, not a project-wide constant: the real configuration "
         "carries the lab columns and the demo does not. Off is the choice that needs no data."
     ),
+    "EXPLAIN_ENABLED": (
+        "Opt-in: SHAP adds minutes per model and loads a library an ordinary run does not need. "
+        "The shipped file asks for it explicitly for the paper runs."
+    ),
     "EXPORT_POINT_PREDICTIONS_SKIP_MODELS": (
         "Protective. The fallback skips TabICL because predicting for every point with it takes "
         "hours; the shipped file re-includes it deliberately, having accepted that cost."
+    ),
+    "MLFLOW_EXPERIMENT_NAME": (
+        "Names one campaign of runs, not a project-wide constant: the shipped file records the "
+        "paper runs apart from the earlier ones, which the fallback still names."
     ),
     "SPLIT_TEST_SIZE": (
         "The fallback is only reached when the whole split: block is absent, which the shipped "
@@ -80,9 +88,6 @@ INTENTIONAL_DIVERGENCES = {
     "TEMPORAL_FEATURES_ENABLED": (
         "Off unless a time series is configured. A dataset of static covariates alone is a "
         "legitimate run, and it has no dates to build sequences from."
-    ),
-    "UNCERTAINTY_ENABLED": (
-        "Opt-in: training an ensemble multiplies the cost of every model. The shipped file asks for it explicitly."
     ),
     "UNCERTAINTY_N_MEMBERS": (
         "Cost scales linearly with it. The fallback of 5 is the YAML's own 'for a report' value; "
@@ -98,10 +103,6 @@ INTENTIONAL_DIVERGENCES = {
     "USE_CONTEXT_FEATURES": (
         "The fallback keeps every declared feature, which is what an unconfigured run should do. "
         "The shipped file switches the context group off to measure what it is worth."
-    ),
-    "USE_HARMONIC_COORDS": (
-        "A per-dataset switch like CARRY_LABEL_COLUMNS, and one that needs coordinates: off is "
-        "the only fallback that works for a dataset without them."
     ),
 }
 
