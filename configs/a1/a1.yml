@@ -1,0 +1,61 @@
+# Paper A1: soil organic matter from static covariates and time-series percentiles, with predicted
+# CaCO3 and CEC as extra inputs, broken down by carbonate class, and transferred between regions.
+#
+# The data, the column lists and the split all come from the main configuration named below - the
+# same file main.py reads - so A1 sees exactly the inputs main.py would. This file only adds what A1
+# needs on top. configs/a1/a1_demo.yml is the same for the made-up demo data.
+
+# The main configuration, relative to this file's folder.
+main_config: ../main_config.yml
+# The lab column being predicted.
+som_target: organic_matter_g_kg
+# The scikit-learn model-list entries (configs/sklearn/model_registry.yml) trained for SOM. An entry
+# does not need `enabled: true` there to be used here.
+models: [XGBoost, TabICL]
+# Seeds everything A1 adds: the folds of the auxiliary predictions and the per-region splits.
+seed: 42
+
+# Each time-series variable is summarised by percentiles over a point's whole record, whenever and
+# however often it was observed. Columns are named ts_<variable>_p<percentile>, plus ts_n_obs.
+timeseries_percentiles:
+  quantiles: [10, 25, 50, 75, 90]
+  # null summarises every numeric column of the time-series file.
+  variables: null
+  # Acquisition geometry describes the satellite rather than the soil.
+  exclude: [S2_SZA, S1_asc_angle, S1_desc_angle]
+
+# Soil properties predicted first, then used as inputs for SOM. A point's prediction always comes
+# from a model that never saw that point's lab value: the training points are predicted fold by
+# fold, the test points by a model fitted on every training point. TabICL predicts one property at
+# a time, so each gets its own model.
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+  model: TabICL
+  n_folds: 5
+
+# The FAO calcareousness classes: slightly (< 2 %), moderately (2-10 %), strongly (10-25 %) and
+# extremely (>= 25 %) calcareous. A value on an edge belongs to the class above it. Scores are
+# broken down by measured CaCO3; the per-class models route each point by its PREDICTED CaCO3,
+# which is what is known when a new point is predicted.
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["< 2", "2–10", "10–25", "≥ 25"]
+  # A class with fewer points gets no model of its own; its points use the all-classes model.
+  min_points: 30
+
+# Where each point's region comes from, for the transfer experiments: EITHER a column of the data
+# OR a polygon file (GeoJSON, GeoPackage, shapefile; relative paths are taken from the data folder)
+# with the field holding each region's name. Fill one in before running run_transfer.py.
+regions:
+  column: null
+  polygons_path: null
+  name_field: null
+  # A region with fewer points takes no part in the transfer experiments.
+  min_points: 30
+
+tracking:
+  # The MLflow experiment every A1 run goes into.
+  experiment_name: Paper_A1
+  # The tables and figures are also written here, one folder per experiment.
+  results_dir: results/a1

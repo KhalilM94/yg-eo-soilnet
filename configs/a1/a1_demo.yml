@@ -1,0 +1,39 @@
+# Paper A1 on the made-up demo data. Write the data first, from the repository root:
+#
+#   python experiments/a1/make_demo_data.py
+#
+# configs/a1/a1.yml is the same file for the real data; every setting is explained there.
+
+main_config: demo_main_config.yml
+som_target: organic_matter_g_kg
+models: [XGBoost, TabICL]
+seed: 42
+
+timeseries_percentiles:
+  quantiles: [10, 25, 50, 75, 90]
+  variables: null
+  exclude: []
+
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+  model: TabICL
+  n_folds: 5
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["< 2", "2–10", "10–25", "≥ 25"]
+  min_points: 30
+
+# The demo carries its regions both ways: as a `region` column, used here, and as outlines in
+# experiments/a1/demo_data/regions.geojson (field `name`). To try the outlines instead, set
+# column: null, polygons_path: regions.geojson and name_field: name.
+regions:
+  column: region
+  polygons_path: null
+  name_field: null
+  min_points: 30
+
+tracking:
+  experiment_name: Paper_A1_Demo
+  results_dir: results/a1_demo
