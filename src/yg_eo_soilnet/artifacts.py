@@ -57,6 +57,8 @@ class ArtifactLayout:
     # On the main run only.
     LEADERBOARD_PLOTS = "leaderboard_plots"
     DATA_SPLITS = "data_splits"
+    # The split's own diagnostics: the spatial map, and the stratification distributions.
+    SPLITS_PLOTS = "splits_plots"
 
     # The same file names in every run, so two runs can be compared file by file.
     EVAL_RESULTS_FILE = "eval_results.csv"

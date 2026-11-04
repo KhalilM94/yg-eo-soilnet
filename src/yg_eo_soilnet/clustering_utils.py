@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 import pandas as pd
 from sklearn.cluster import KMeans
+from yg_eo_soilnet.artifacts import ArtifactLayout
 from yg_eo_soilnet.plot_style import (
     BASELINE,
     FIG_WIDTH_COLUMN,
@@ -57,7 +58,7 @@ class BaseSpatialClusterStrategy(ABC):
         lon_col: str = "lon",
         lat_col: str = "lat",
         title: str = "Train/Test Split",
-        artifact_path: str = "splits_plots",
+        artifact_path: str = ArtifactLayout.SPLITS_PLOTS,
         filename: str = "train_test_split.png",
         show: bool = False,
     ):

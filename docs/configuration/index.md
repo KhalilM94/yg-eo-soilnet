@@ -76,6 +76,8 @@ The settings that sit in a nested block have a flat name for this purpose:
 | `split.test_size`, `split.val_size` | `SPLIT_TEST_SIZE`, `SPLIT_VAL_SIZE` |
 | `split.seed` | `SPLIT_SEED` |
 | `split.population_policy` | `SPLIT_POPULATION_POLICY` |
+| `split.strategy_applies_to` | `SPLIT_STRATEGY_APPLIES_TO` |
+| `split.stratify_on`, `split.stratify_bins` | `SPLIT_STRATIFY_ON`, `SPLIT_STRATIFY_BINS` |
 | `data_quality.max_missing_column_ratio` | `MAX_MISSING_COLUMN_RATIO` |
 | `uncertainty.enabled` | `UNCERTAINTY_ENABLED` |
 | `uncertainty.n_members` | `UNCERTAINTY_N_MEMBERS` |
@@ -118,7 +120,10 @@ Everything not set aside and not too empty becomes an input; you never list the 
 
 ```yaml
   split:
-    strategy: random          # or spatial_group, which holds out whole areas
+    strategy: random          # or spatial_group (whole areas) or stratified (matched spread)
+    strategy_applies_to: test_and_val   # train_val keeps one test set across strategies
+    stratify_on: null         # the column stratified splits should match the spread of
+    stratify_bins: 10
     test_size: 0.15           # fractions of ALL the points: these two leave 70% to train on
     val_size: 0.15
     seed: 42

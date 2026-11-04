@@ -9,6 +9,7 @@ carved 64/16/20 off a bundle rebuilt from the same CSVs. The holdouts overlapped
 that would have caught that.
 """
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -655,3 +656,332 @@ def test_clustering_with_a_non_strategy_raises_instead_of_returning_empty_splits
     )
     with pytest.raises(TypeError, match="did not resolve to a BaseSpatialClusterStrategy"):
         UnifiedSplitter(toy_config, logger).build_plan(pd.Index(range(len(toy_dataframe))), coordinates=coordinates)
+
+
+# --- the positions a plan records ------------------------------------------
+# Recorded so a finished run can say where every point was, not just the ones it was tested on.
+# The residual map draws the fit pool underneath the test points, and reads them from here.
+
+
+def _plan_with(coordinates=None):
+    """A three-point plan, one per split."""
+    return SplitPlan(
+        assignments=pd.Series(["train", "val", "test"], index=["p1", "p2", "p3"]),
+        strategy="random",
+        test_size=0.15,
+        val_size=0.15,
+        seed=42,
+        population_policy="intersect",
+        coordinates=coordinates,
+    )
+
+
+def _three_positions():
+    """Positions for the three points, indexed by point id."""
+    return pd.DataFrame({"lat": [32.0, 33.0, 34.0], "lon": [-8.0, -7.0, -6.0]}, index=["p1", "p2", "p3"])
+
+
+def test_a_plan_records_where_each_point_is():
+    frame = _plan_with(_three_positions()).to_frame()
+    assert list(frame.columns) == ["point_id", "split", "lat", "lon"]
+    assert frame.loc[frame["point_id"] == "p2", "lat"].item() == 33.0
+
+
+def test_a_plan_without_positions_writes_no_coordinate_columns():
+    # Data with no lat/lon must not gain two empty columns; readers test for their presence.
+    assert list(_plan_with().to_frame().columns) == ["point_id", "split"]
+
+
+def test_positions_survive_a_round_trip_through_the_saved_form():
+    original = _plan_with(_three_positions())
+    restored = SplitPlan.from_frame(original.to_frame())
+    pd.testing.assert_frame_equal(
+        restored.coordinates,
+        original.coordinates.rename_axis("point_id"),
+        check_names=False,
+    )
+
+
+def test_a_saved_plan_from_before_positions_were_recorded_still_loads():
+    older = pd.DataFrame({"point_id": ["p1", "p2"], "split": ["train", "test"]})
+    assert SplitPlan.from_frame(older).coordinates is None
+
+
+def test_positions_are_taken_by_name_whatever_the_source_columns_were_called():
+    # The provider builds the frame under the configured LAT_COLUMN/LON_COLUMN,
+    # which need not be "lat"/"lon"; the saved plan always uses those two names.
+    named = pd.DataFrame(
+        {"latitude_deg": [32.0, 33.0, 34.0], "longitude_deg": [-8.0, -7.0, -6.0]}, index=["p1", "p2", "p3"]
+    )
+    frame = _plan_with(named).to_frame()
+    assert list(frame.columns) == ["point_id", "split", "lat", "lon"]
+    assert frame["lon"].tolist() == [-8.0, -7.0, -6.0]
+
+
+def test_the_training_points_a_map_draws_are_the_fit_pool():
+    from yg_eo_soilnet.data_manager import training_points_from_plan
+
+    pool = training_points_from_plan(_plan_with(_three_positions()))
+    # Train and validation both: the model saw both, and the test point must not appear.
+    assert sorted(pool["lat"].tolist()) == [32.0, 33.0]
+
+
+def test_there_are_no_training_points_to_draw_without_positions():
+    from yg_eo_soilnet.data_manager import training_points_from_plan
+
+    assert training_points_from_plan(_plan_with()) is None
+    assert training_points_from_plan(None) is None
+
+
+def test_the_training_layer_can_be_switched_off():
+    from yg_eo_soilnet.data_manager import training_points_from_plan
+
+    assert training_points_from_plan(_plan_with(_three_positions()), enabled=False) is None
+
+
+# --- stratified splitting ---------------------------------------------------
+# The targets here are lopsided, so a plain random holdout can leave too few points at the top of
+# the range to say anything about how the model does there.
+
+
+def _splitter(strategy, scope="test_and_val", **extra):
+    """A splitter over a throwaway config."""
+    from types import SimpleNamespace
+
+    settings = dict(
+        SPLIT_HOLDOUT_STRATEGY=strategy,
+        SPLIT_STRATEGY_APPLIES_TO=scope,
+        SPLIT_TEST_SIZE=0.2,
+        SPLIT_VAL_SIZE=0.2,
+        SPLIT_SEED=0,
+        SPLIT_POPULATION_POLICY="intersect",
+        SPLIT_GROUP_STRATEGY={
+            "enabled": True,
+            "class_path": "yg_eo_soilnet.clustering_utils.KMeansClusterStrategy",
+            "params": {"n_clusters": 8},
+        },
+    )
+    settings.update(extra)
+    return UnifiedSplitter(SimpleNamespace(**settings), logging.getLogger("split-test"))
+
+
+@pytest.fixture
+def skewed_population():
+    """600 points, a lopsided value and coordinates: ids, values, bands, coordinates."""
+    rng = np.random.default_rng(0)
+    n = 600
+    ids = pd.Index([f"p{index}" for index in range(n)])
+    values = pd.Series(rng.lognormal(2.5, 0.8, n), index=ids)
+    bands = pd.Series(pd.qcut(values, 10, labels=False, duplicates="drop"), index=ids).astype(object)
+    coordinates = pd.DataFrame({"lat": rng.uniform(31, 35, n), "lon": rng.uniform(-9, -5, n)}, index=ids)
+    return ids, values, bands, coordinates
+
+
+def test_stratifying_matches_the_spread_of_the_three_splits(skewed_population):
+    # The whole point of the feature, so it is compared against the thing it replaces rather than
+    # merely asserted to run.
+    ids, values, bands, _ = skewed_population
+
+    stratified = _splitter("stratified").build_plan(ids, strata=bands)
+    at_random = _splitter("random").build_plan(ids)
+
+    def spread(plan):
+        """How far the splits' upper tails drift apart."""
+        tails = [values.reindex(plan.point_ids_for(name)).quantile(0.9) for name in ("train", "val", "test")]
+        return max(tails) - min(tails)
+
+    assert spread(stratified) < spread(at_random)
+
+
+def test_every_split_reaches_the_top_of_a_lopsided_range(skewed_population):
+    ids, values, bands, _ = skewed_population
+    plan = _splitter("stratified").build_plan(ids, strata=bands)
+
+    top = values.quantile(0.95)
+    for name in ("train", "val", "test"):
+        assert (values.reindex(plan.point_ids_for(name)) > top).any(), f"{name} has no point near the top"
+
+
+def test_a_class_column_stratifies_on_its_classes():
+    rng = np.random.default_rng(1)
+    ids = pd.Index([f"p{index}" for index in range(300)])
+    classes = pd.Series(rng.choice(["sand", "loam", "clay"], 300, p=[0.2, 0.5, 0.3]), index=ids)
+
+    plan = _splitter("stratified").build_plan(ids, strata=classes)
+
+    shares = {
+        name: classes.reindex(plan.point_ids_for(name)).value_counts(normalize=True) for name in ("train", "test")
+    }
+    for label in ("sand", "loam", "clay"):
+        assert shares["train"][label] == pytest.approx(shares["test"][label], abs=0.05)
+
+
+def test_a_point_with_no_value_still_gets_its_share_of_every_split():
+    # Its own band, rather than dropped or pushed into training: a point with no lab reading can
+    # still be held out honestly, unlike a point with no location.
+    ids = pd.Index([f"p{index}" for index in range(200)])
+    values = pd.Series([np.nan] * 60 + list(range(140)), index=ids).astype(object)
+
+    plan = _splitter("stratified").build_plan(ids, strata=values)
+
+    for name in ("train", "val", "test"):
+        held = values.reindex(plan.point_ids_for(name))
+        assert held.isna().any(), f"{name} received none of the points with no value"
+
+
+def test_a_band_too_small_to_split_is_merged_rather_than_raising():
+    # train_test_split refuses outright if a class has fewer members than the split needs.
+    ids = pd.Index([f"p{index}" for index in range(100)])
+    bands = pd.Series(["common"] * 97 + ["rare-a", "rare-b", "rare-c"], index=ids)
+
+    plan = _splitter("stratified").build_plan(ids, strata=bands)
+
+    assert sum(plan.counts().values()) == 100
+
+
+def test_stratified_without_a_column_says_which_setting_to_set():
+    ids = pd.Index([f"p{index}" for index in range(50)])
+    with pytest.raises(ValueError, match="split.stratify_on"):
+        _splitter("stratified").build_plan(ids, strata=None)
+
+
+# --- where the strategy applies ---------------------------------------------
+
+
+def test_by_default_the_strategy_chooses_the_test_set_too(skewed_population):
+    ids, _, _, coordinates = skewed_population
+    plan = _splitter("spatial_group").build_plan(ids, coordinates=coordinates)
+    assert plan.describe()["split_test_drawn_by"] == "spatial_group"
+
+
+def test_train_val_draws_the_test_set_at_random_and_says_so(skewed_population):
+    ids, _, _, coordinates = skewed_population
+    plan = _splitter("spatial_group", scope="train_val").build_plan(ids, coordinates=coordinates)
+    described = plan.describe()
+    # Both are recorded: the strategy still shaped the training, but not the test set.
+    assert described["split_test_drawn_by"] == "random"
+    assert described["split_strategy"] == "spatial_group"
+
+
+def _straddling(plan, first, second):
+    """How many clusters have points in both of these splits."""
+    frame = pd.DataFrame({"split": plan.assignments, "cluster": plan.clusters}).dropna()
+    frame = frame[frame["split"].isin([first, second])]
+    return int((frame.groupby("cluster")["split"].nunique() > 1).sum())
+
+
+def test_train_val_still_keeps_clusters_whole_between_training_and_validation(skewed_population):
+    ids, _, _, coordinates = skewed_population
+    plan = _splitter("spatial_group", scope="train_val").build_plan(ids, coordinates=coordinates)
+
+    # The test set is random now, so clusters do straddle it - that is the deal. The grouping still
+    # has to hold where it still applies, or the setting would be doing nothing at all.
+    assert _straddling(plan, "train", "test") > 0
+    assert _straddling(plan, "train", "val") == 0
+
+
+def test_different_strategies_share_one_test_set_under_train_val(skewed_population):
+    """The reason the setting exists.
+
+    Comparing a spatial_group run against a stratified one is meaningless while each is scored on
+    its own test points. Drawing the test set at random, before the strategy is applied, is what
+    puts the two scores on one axis.
+    """
+    ids, _, bands, coordinates = skewed_population
+
+    plans = {
+        "random": _splitter("random", scope="train_val").build_plan(ids),
+        "spatial_group": _splitter("spatial_group", scope="train_val").build_plan(ids, coordinates=coordinates),
+        "stratified": _splitter("stratified", scope="train_val").build_plan(ids, strata=bands),
+    }
+    test_sets = [set(plan.point_ids_for("test")) for plan in plans.values()]
+
+    assert test_sets[0] == test_sets[1] == test_sets[2]
+    # ... while the training sets genuinely differ, or the strategies would be doing nothing.
+    training = [set(plan.point_ids_for("train")) for plan in plans.values()]
+    assert training[0] != training[1]
+
+
+def test_the_shared_test_set_moves_when_the_population_does(skewed_population):
+    # The guarantee holds only while the seed and the usable points are unchanged. Written down as
+    # a test so nobody relies on it across a growing dataset - plan_path is for that.
+    ids, _, _, _ = skewed_population
+
+    whole = _splitter("random", scope="train_val").build_plan(ids)
+    fewer = _splitter("random", scope="train_val").build_plan(ids[:-50])
+
+    assert set(whole.point_ids_for("test")) != set(fewer.point_ids_for("test"))
+
+
+def test_an_unknown_scope_is_refused_rather_than_guessed():
+    from types import SimpleNamespace
+
+    with pytest.raises(ValueError, match="split.strategy_applies_to"):
+        UnifiedSplitter(
+            SimpleNamespace(SPLIT_HOLDOUT_STRATEGY="random", SPLIT_STRATEGY_APPLIES_TO="sometimes"),
+            logging.getLogger("split-test"),
+        )
+
+
+# --- every strategy has to reach BOTH families ------------------------------
+# The families keep different rows, so each resolves the shared plan against its own row order. A
+# strategy that only reached the tabular side would put two incomparable numbers on one axis, which
+# is the bug the shared plan was built to fix.
+
+
+def test_a_spatial_plan_reaches_the_deep_learning_family_too(toy_config, logger, tmp_path, monkeypatch):
+    """Nothing guarded this before, although it has always worked."""
+    config = _configure(toy_config, tmp_path, "intersect")
+    config.SPLIT_HOLDOUT_STRATEGY = "spatial_group"
+    config.SPLIT_GROUP_STRATEGY = {
+        "enabled": True,
+        "class_path": "yg_eo_soilnet.clustering_utils.KMeansClusterStrategy",
+        "params": {"n_clusters": 4},
+    }
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
+
+    assert plan.strategy == "spatial_group"
+    assert _sklearn_test_ids(config, logger, plan, monkeypatch) == _sequence_test_ids(config, logger, plan)
+
+
+def test_a_stratified_plan_reaches_the_deep_learning_family_too(toy_config, logger, tmp_path, monkeypatch):
+    config = _configure(toy_config, tmp_path, "intersect")
+    config.SPLIT_HOLDOUT_STRATEGY = "stratified"
+    config.SPLIT_STRATIFY_ON = "lat"  # any numeric column in the toy dataset will do
+    config.SPLIT_STRATIFY_BINS = 4
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
+
+    assert plan.strategy == "stratified"
+    assert plan.strata is not None
+    assert _sklearn_test_ids(config, logger, plan, monkeypatch) == _sequence_test_ids(config, logger, plan)
+
+
+def test_the_bands_are_saved_with_the_run_so_the_split_can_be_read_back(toy_config, logger, tmp_path):
+    config = _configure(toy_config, tmp_path, "intersect")
+    config.SPLIT_HOLDOUT_STRATEGY = "stratified"
+    config.SPLIT_STRATIFY_ON = "lat"
+    config.SPLIT_STRATIFY_BINS = 4
+    plan = SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn", "sequence")).plan()
+
+    frame = plan.to_frame()
+    assert "stratum" in frame.columns
+    assert SplitPlan.from_frame(frame).strata is not None
+
+
+def test_stratifying_on_a_column_that_is_not_there_names_the_setting(toy_config, logger, tmp_path):
+    config = _configure(toy_config, tmp_path, "intersect")
+    config.SPLIT_HOLDOUT_STRATEGY = "stratified"
+    config.SPLIT_STRATIFY_ON = "no_such_column"
+    with pytest.raises(ValueError, match="split.stratify_on"):
+        SplitPlanProvider(config, logger, DataManager(config, logger), families=("sklearn",)).plan()
+
+
+def test_a_broken_stratification_figure_does_not_lose_the_split(monkeypatch, skewed_population):
+    # The same rule the spatial map follows: a picture is never worth failing a run over.
+    ids, _, bands, _ = skewed_population
+    monkeypatch.setattr(
+        "yg_eo_soilnet.plot_utils.stratification_panel",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("no display")),
+    )
+    plan = _splitter("stratified").build_plan(ids, strata=bands)
+    assert sum(plan.counts().values()) == len(ids)

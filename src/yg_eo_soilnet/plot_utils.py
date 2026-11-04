@@ -896,3 +896,77 @@ def plot_leaderboard_scatter(
         fig.delaxes(axes[j])
 
     return fig
+
+
+# --- did the stratification actually balance the splits? ---------------------
+
+
+@styled
+def stratification_panel(frame, *, column=None):
+    """How the stratification column is spread across the three splits.
+
+    The point of a stratified split is that the three splits look alike in one chosen dimension.
+    This is how you check that rather than take it on trust: three distributions that sit on top of
+    one another mean it worked.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        One row per point, with a ``split`` column and a ``value`` column holding the number or
+        class that was stratified on.
+    column : str, optional
+        The column's name, for the axis label.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        With nothing to draw, a figure carrying a message.
+    """
+    if frame is None or frame.empty or not {"split", "value"}.issubset(frame.columns):
+        return message_figure("No stratification figure: the split recorded no bands.")
+
+    present = [name for name in ("train", "val", "test") if (frame["split"] == name).any()]
+    if not present:
+        return message_figure("No stratification figure: no point belongs to a split.")
+
+    numeric = pd.to_numeric(frame["value"], errors="coerce")
+    figure, axis = plt.subplots(figsize=(FIG_WIDTH_FULL, 3.0), layout="constrained")
+
+    if numeric.notna().any():
+        # A shared set of edges, or the three curves would be binned differently and could not be
+        # compared by eye - which is the one thing this figure is for.
+        edges = np.histogram_bin_edges(numeric.dropna(), bins=20)
+        for index, name in enumerate(present):
+            values = numeric[frame["split"] == name].dropna()
+            if not len(values):
+                continue
+            axis.hist(
+                values,
+                bins=edges,
+                density=True,
+                histtype="step",
+                lw=1.4,
+                color=MODEL_COLORS[index % len(MODEL_COLORS)],
+                label=f"{name} (n = {len(values):,})",
+            )
+        axis.set_ylabel("share of the split")
+    else:
+        # A class column: the share of each split falling in each class, side by side.
+        shares = pd.crosstab(frame["value"], frame["split"], normalize="columns").reindex(columns=present).sort_index()
+        positions = np.arange(len(shares))
+        width = 0.8 / max(len(present), 1)
+        for index, name in enumerate(present):
+            axis.bar(
+                positions + index * width,
+                shares[name].to_numpy(),
+                width=width,
+                color=MODEL_COLORS[index % len(MODEL_COLORS)],
+                label=f"{name} (n = {int((frame['split'] == name).sum()):,})",
+            )
+        axis.set_xticks(positions + width * (len(present) - 1) / 2, [str(value) for value in shares.index])
+        axis.set_ylabel("share of the split")
+
+    axis.set_xlabel(column or "stratification value")
+    axis.legend(fontsize=7.5)
+    panel_subtitle(axis, "the three should sit on top of one another")
+    return figure

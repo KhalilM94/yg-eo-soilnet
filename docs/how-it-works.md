@@ -57,6 +57,19 @@ points.
 - **`spatial_group`** clusters the points by location and holds out whole clusters, so a test point
   is not the near-neighbour of a training point. Use it whenever your samples are clustered on the
   ground; the difference between the two is how much of your score was proximity.
+- **`stratified`** cuts the points into bands by the column named in `split.stratify_on` and takes
+  the same share of each band for every split, so they all cover the whole range. Use it when a
+  value is lopsided and a random holdout might leave too few points at one end to judge the model
+  there. A numeric column is cut into bands of roughly equal size; a class column uses its classes.
+
+`split.strategy_applies_to` decides how much of the split the strategy governs. By default
+(`test_and_val`) it chooses the test set too, which for `spatial_group` is the whole point. Set it
+to `train_val` and the test set is drawn at random instead, with the strategy shaping only the
+train/validation division — the test set is then the same points whichever strategy you pick, so two
+runs can be compared directly. The catch is that a random test set brings back exactly the proximity
+that `spatial_group` exists to expose, so the score flatters clustered data. Every run records
+`split_test_drawn_by`, and it appears on the leaderboard, so check it before putting two runs' scores
+side by side.
 
 The split is keyed on the point id, not on row numbers, because the two families keep different rows
 - the deep-learning model needs a usable time series. `population_policy: intersect`, the default,

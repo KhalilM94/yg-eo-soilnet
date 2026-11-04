@@ -470,6 +470,13 @@ class Config:
         self.SPLIT_POPULATION_POLICY = self._get_split_config(
             "population_policy", "SPLIT_POPULATION_POLICY", "intersect"
         )
+        # Whether the strategy above chooses the test set too, or only separates training from
+        # validation while the test set is drawn at random. See datamodules/splitting.py.
+        self.SPLIT_STRATEGY_APPLIES_TO = self._get_split_config(
+            "strategy_applies_to", "SPLIT_STRATEGY_APPLIES_TO", "test_and_val"
+        )
+        self.SPLIT_STRATIFY_ON = self._get_split_config("stratify_on", "SPLIT_STRATIFY_ON", None)
+        self.SPLIT_STRATIFY_BINS = int(self._get_split_config("stratify_bins", "SPLIT_STRATIFY_BINS", 10))
         self.SPLIT_PLAN_PATH = self._get_split_config("plan_path", "SPLIT_PLAN_PATH", None)
         # With population_policy `intersect`, stop the run if fewer than this share of the points
         # are usable by every model family: that points to a data problem worth fixing.

@@ -6,9 +6,91 @@ import json
 import os
 from typing import Any, Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
 from yg_eo_soilnet.dataset import SoilDataset
+
+#: What a results table records about where each of its rows is. The coordinates are never model
+#: inputs - :meth:`DataManager.filter_schema` strips them - but a run that does not write them down
+#: cannot afterwards say where its errors fell, so they travel with the results instead.
+LOCATION_COLUMNS = ("point_id", "lat", "lon")
+
+
+def training_points_from_plan(split_plan, *, enabled: bool = True) -> Optional[pd.DataFrame]:
+    """Where the points a model learned from are, for drawing as context under a residual map.
+
+    The fit pool is training plus validation - both are points the model saw - so both are
+    returned. Returns None when the layer is switched off, when there is no plan, or when the plan
+    recorded no coordinates, and the map is then drawn without the layer.
+
+    Parameters
+    ----------
+    split_plan : SplitPlan or None
+        The run's shared split.
+    enabled : bool
+        False returns None without doing any work.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        ``lat``/``lon``, one row per fit-pool point.
+    """
+    if not enabled or split_plan is None:
+        return None
+    coordinates = getattr(split_plan, "coordinates", None)
+    assignments = getattr(split_plan, "assignments", None)
+    if coordinates is None or assignments is None:
+        return None
+    learned_from = assignments.index[np.isin(assignments.to_numpy(), ["train", "val"])]
+    placed = coordinates.reindex(learned_from)
+    if placed.empty:
+        return None
+    latitudes = placed["lat"] if "lat" in placed.columns else placed.iloc[:, 0]
+    longitudes = placed["lon"] if "lon" in placed.columns else placed.iloc[:, 1]
+    frame = pd.DataFrame({"lat": np.asarray(latitudes), "lon": np.asarray(longitudes)})
+    return frame.dropna() if len(frame) else None
+
+
+def attach_locations(frame: pd.DataFrame, *, point_ids=None, lat=None, lon=None) -> pd.DataFrame:
+    """Add ``point_id``, ``lat`` and ``lon`` to a results table, in place.
+
+    Each value may be a pandas Series, which is matched on ``frame``'s own index, or a plain
+    sequence in the frame's row order. Anything missing, or the wrong length, is skipped rather
+    than raising: a run whose data has no coordinates should lose its map, not fail.
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        The table to widen.
+    point_ids, lat, lon : pandas.Series or array_like, optional
+        Aligned with ``frame``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        The same object, for chaining.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> results = pd.DataFrame({"prediction": [1.0, 2.0]})
+    >>> list(attach_locations(results, point_ids=["a", "b"], lat=[32.0, 33.0]).columns)
+    ['prediction', 'point_id', 'lat']
+    """
+    for name, values in zip(LOCATION_COLUMNS, (point_ids, lat, lon)):
+        if values is None:
+            continue
+        if isinstance(values, pd.Series):
+            # Matched on row labels, not assumed to line up: the index is the only thing tying a
+            # result back to the point it came from.
+            frame[name] = values.reindex(frame.index).to_numpy()
+            continue
+        array = np.asarray(values)
+        if array.ndim != 1 or len(array) != len(frame):
+            continue
+        frame[name] = array
+    return frame
 
 
 class DataManager:

@@ -46,7 +46,31 @@ common:
     #                   close enough together that a model could "cheat" by learning from a
     #                   training point a few metres from a test point, instead of learning the
     #                   real pattern.
+    #   stratified    - cut the points into bands by the column named in stratify_on below, and
+    #                   take the same share of each band for every split, so they all cover the
+    #                   whole range. Use this when a value is lopsided and a plain random holdout
+    #                   might leave too few points at one end to judge the model there.
     strategy: random
+    # Where the strategy above applies:
+    #   test_and_val - it chooses the test set as well. The default, and the honest one.
+    #   train_val    - the test set is drawn at random, and the strategy only separates the
+    #                  training points from the validation points.
+    # Use train_val when you want to COMPARE strategies with each other: the test set is then the
+    # same set of points whichever strategy you pick (as long as the seed and the data are
+    # unchanged), so a difference in score comes from the training rather than from being scored on
+    # different points. The cost, with spatial_group, is that test points are near neighbours of
+    # training points again and the score is flattering - which is the very thing spatial_group
+    # exists to expose. Every run records `split_test_drawn_by`, so check that before putting two
+    # runs' scores side by side.
+    strategy_applies_to: test_and_val
+    # Only used when strategy is stratified: the column whose spread every split should match. A
+    # numeric column is cut into bands holding about the same number of points; a class column uses
+    # its own classes. A point with no value for it goes into its own "missing" band, so it still
+    # gets its share of each split.
+    stratify_on: null
+    # How many bands to cut a numeric column into. Fewer bands means coarser balancing but copes
+    # better with a small dataset; bands too thin to split are merged and the run says so.
+    stratify_bins: 10
     # Fraction of ALL usable points to hold out. Whatever isn't in test_size or
     # val_size becomes the training set (here: 1 - 0.15 - 0.15 = 70%).
     test_size: 0.15

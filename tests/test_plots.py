@@ -23,6 +23,7 @@ from yg_eo_soilnet.plot_style import (
 from yg_eo_soilnet.plot_utils import (
     create_parent_pred_obs,
     pred_obs_panel,
+    stratification_panel,
 )
 from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error
 
@@ -468,3 +469,42 @@ def test_an_empty_figure_carries_a_message_rather_than_being_none():
     assert figure is not None
     assert figure.axes[0].texts[0].get_text() == "No leaderboard rows available"
     assert figure.axes[0].axison is False
+
+
+# --- did the stratification balance the splits? -----------------------------
+
+
+def _split_values(kind="numeric", n=600):
+    """One row per point, with its split and the value that was stratified on."""
+    rng = np.random.default_rng(0)
+    values = rng.lognormal(2.5, 0.8, n) if kind == "numeric" else rng.choice(["sand", "loam", "clay"], n)
+    return pd.DataFrame({"split": rng.choice(["train", "val", "test"], n, p=[0.6, 0.2, 0.2]), "value": values})
+
+
+def test_the_stratification_figure_draws_one_curve_per_split():
+    figure = stratification_panel(_split_values(), column="organic_matter_g_kg")
+    labels = [text.get_text() for text in figure.axes[0].get_legend().get_texts()]
+    assert [label.split(" ")[0] for label in labels] == ["train", "val", "test"]
+    plt.close(figure)
+
+
+def test_a_class_column_is_drawn_as_bars_rather_than_curves():
+    figure = stratification_panel(_split_values("classes"), column="texture_20cm")
+    assert figure.axes[0].patches, "a class column should be drawn as bars"
+    plt.close(figure)
+
+
+def test_the_three_splits_are_binned_the_same_way():
+    # Different bin edges per split would make the three curves incomparable by eye, which is the
+    # one thing this figure is for.
+    figure = stratification_panel(_split_values(), column="organic_matter_g_kg")
+    steps = [line.get_xdata() for line in figure.axes[0].lines] or [
+        patch.get_path().vertices[:, 0] for patch in figure.axes[0].patches
+    ]
+    if len(steps) > 1:
+        assert np.allclose(steps[0], steps[1])
+    plt.close(figure)
+
+
+def test_a_split_with_no_bands_gets_a_message_not_an_empty_figure():
+    assert not stratification_panel(pd.DataFrame()).axes[0].lines

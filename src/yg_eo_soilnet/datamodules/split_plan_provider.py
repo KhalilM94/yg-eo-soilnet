@@ -11,6 +11,7 @@ are identical. With ``assign_all`` every point is assigned and each family uses 
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, Iterable, Mapping, Optional
 
 import pandas as pd
@@ -102,12 +103,21 @@ class SplitPlanProvider:
         splitter = UnifiedSplitter(self.config, self.logger)
         self._log_population(all_ids, population, eligibility, splitter.population_policy)
 
+        coordinates = self._coordinates(tabular, all_ids)
+        strata = self._strata(tabular, all_ids)
+
         plan_path = getattr(self.config, "SPLIT_PLAN_PATH", None)
         if plan_path:
-            return self._load_plan(plan_path, population, eligibility, splitter)
+            plan = self._load_plan(plan_path, population, eligibility, splitter)
+            if plan.coordinates is None and coordinates is not None:
+                # A plan saved before positions were recorded still gets them, from the data it is
+                # being reused against. A new plan rather than a mutation: SplitPlan is frozen, so
+                # that a split cannot be quietly changed after the families have read it. The
+                # assignments are carried over untouched, so this is the same split.
+                plan = replace(plan, coordinates=coordinates.reindex(plan.assignments.index))
+            return plan
 
-        coordinates = self._coordinates(tabular, all_ids)
-        return splitter.build_plan(population, coordinates=coordinates, eligibility=eligibility)
+        return splitter.build_plan(population, coordinates=coordinates, strata=strata, eligibility=eligibility)
 
     def _eligibility(self, tabular: pd.DataFrame) -> dict[str, frozenset]:
         """The point ids each model family can actually use, after its own cleaning."""
@@ -222,6 +232,49 @@ class SplitPlanProvider:
             },
             index=all_ids,
         )
+
+    def _strata(self, tabular: pd.DataFrame, all_ids: pd.Index) -> Optional[pd.DataFrame]:
+        """The band each point belongs to, or None when no column was named to stratify on.
+
+        A numeric column is cut into bands holding roughly the same number of points; a class
+        column uses its own classes. Which it is is worked out from the data rather than declared,
+        so the same setting works for a target, a soil-map class or a covariate.
+
+        Returns
+        -------
+        pandas.Series or None
+            Indexed by point id. None when ``split.stratify_on`` is unset - the stratified strategy
+            then refuses, and the other strategies never look.
+
+        Raises
+        ------
+        ValueError
+            If the named column is not in the data.
+        """
+        column = getattr(self.config, "SPLIT_STRATIFY_ON", None)
+        if not column:
+            return None
+        if column not in tabular.columns:
+            raise ValueError(
+                f"split.stratify_on names {column!r}, which is not in the data. Available "
+                f"columns include: {', '.join(sorted(tabular.columns)[:15])}..."
+            )
+
+        values = pd.Series(tabular[column].to_numpy(), index=all_ids)
+        if not pd.api.types.is_numeric_dtype(values):
+            return values.astype(object)
+
+        bins = int(getattr(self.config, "SPLIT_STRATIFY_BINS", 10) or 10)
+        # `duplicates="drop"` because a column with many tied values - a lot of zeros, say - has
+        # fewer distinct band edges than bands asked for, which would otherwise raise.
+        banded = pd.qcut(values, q=bins, labels=False, duplicates="drop")
+        produced = int(banded.nunique(dropna=True))
+        if produced < bins:
+            self.logger.info(
+                f"split.stratify_on {column!r} has too many repeated values for {bins} bands; "
+                f"{produced} were used instead."
+            )
+        return banded.astype(object)
 
     def _load_plan(
         self,
