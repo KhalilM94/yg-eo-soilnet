@@ -47,12 +47,12 @@ LABEL_COLUMNS:
   - landform_class
 
   - ph_water_base
-  - organic_matter_g_kg_base
+  - organic_matter_g_kg_baseline
   - p2o5_ehangable_olsen_ppm_base
   - exchangeable_k2o_ppm_base
   - c_e_c_meq_100g_base
-  - c_e_c_meq_100g__TabICL
-  - caco3_pct_total__TabICL
+  - c_e_c_meq_100g_baseline
+  - caco3_pct_total_baseline
 
 # Whether the lab values listed above are made AVAILABLE to models as optional extra inputs. This
 # does not turn them into ordinary features - they're always excluded from the regular feature set,
@@ -71,8 +71,8 @@ CARRY_LABEL_COLUMNS: true
 # the feature set; only the columns listed here get a model trained to predict them.
 TARGET_COLUMNS:
   - organic_matter_g_kg
-  - clay_pct
-  - sand_pct
+  # - clay_pct
+  # - sand_pct
   # - total_silt_pct
   # - coarse_silt_pct
   # - coarse_element_pct
@@ -111,7 +111,7 @@ MULTI_TARGET_MODE: joint
 #     target - so it will look more accurate than it really is if you only evaluate it with
 #     `split.strategy: random` in main_config.yml. Also try `spatial_group` there to get an honest
 #     read on its actual skill.
-USE_HARMONIC_COORDS: true
+USE_HARMONIC_COORDS: false
 
 # true (the default in code) includes the CONTEXT_FEATURES columns below as ordinary features;
 # false removes them from the feature set entirely, so you can see how the models do without them.

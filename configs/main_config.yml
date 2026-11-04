@@ -155,7 +155,7 @@ common:
   # MLflow is the tool that logs every run's settings, metrics, and saved models so you can browse
   # and compare them later (via `mlflow ui`).
   MLFLOW_TRACKING_URI: ""    # where MLflow stores its data; empty means the local <repo>/mlruns folder
-  MLFLOW_EXPERIMENT_NAME: "Soil_Model_Training_v2"   # groups runs together under this name in the UI
+  MLFLOW_EXPERIMENT_NAME: "Soil_Model_Training_Paper"   # groups runs together under this name in the UI
   # If true, every fitted model is also saved into MLflow's Model Registry as a new version of
   # <target>_<model_name>, and gets tagged "champion" if it beats the current champion version's
   # test RMSE. Note that "champion" only compares versions of the SAME model on the SAME target -
@@ -173,7 +173,7 @@ common:
   # runs, nothing is written to the explain/ folder, and the `shap` library isn't even loaded -
   # training and every other output are unaffected either way. (Every setting below can also be
   # set via an environment variable of the same name.)
-  EXPLAIN_ENABLED: false
+  EXPLAIN_ENABLED: true
   # How many test rows to explain. If the test set is larger than this, a random (but repeatable)
   # subset is used.
   EXPLAIN_MAX_SAMPLES: 500
@@ -225,7 +225,7 @@ common:
   uncertainty:
     # Master on/off switch. When false, none of the below runs: no extra models are trained, no
     # extra columns are written, and the run costs exactly what it would without this block.
-    enabled: true
+    enabled: false
     # How many versions of each model to train per target (the ensemble size). Training time scales
     # directly with this - 5 members means training that model 5 separate times. 3 is enough while
     # iterating, 5 for a report, 10 for a final/published result. On Lightning models this also

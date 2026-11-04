@@ -102,11 +102,11 @@ soil_residual_attention_cnn:
     attention_dropout: 0.1
     attention_readout: mean
     residual_base_columns:
-      organic_matter_g_kg: organic_matter_g_kg_base
-      clay_pct: clay_median_0_30cm
-      sand_pct: sand_median_0_30cm
-      c_e_c_meq_100g: c_e_c_meq_100g__TabICL
-      caco3_pct_total: caco3_pct_total__TabICL
+      organic_matter_g_kg: organic_matter_g_kg_baseline
+      # clay_pct: clay_median_0_30cm
+      # sand_pct: sand_median_0_30cm
+      c_e_c_meq_100g: c_e_c_meq_100g_baseline
+      caco3_pct_total: caco3_pct_total_baseline
       ph_water: ph_median_0_30cm
     residual_base_hidden_dims: []
     residual_base_dropout: 0.2
