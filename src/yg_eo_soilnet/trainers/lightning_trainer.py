@@ -20,6 +20,7 @@ try:  # pragma: no cover - optional dependency
 except ImportError:  # pragma: no cover
     LightningCallback = object  # type: ignore[assignment]
 
+from yg_eo_soilnet.data_manager import attach_locations
 from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
 from yg_eo_soilnet.models.config_fatories.lightning_config_factory import LightningModelBundle
 from yg_eo_soilnet.targets import join_target_names
@@ -116,6 +117,40 @@ class LightningRunResult:
     validation_metrics: dict[str, float]
     test_metrics: dict[str, float]
     best_model_path: str | None
+
+
+def _attach_test_locations(eval_df: pd.DataFrame, datamodule) -> None:
+    """Add ``point_id``/``lat``/``lon`` to a deep-learning results table, where they are known.
+
+    The coordinates come from the run's shared split plan, keyed on point id - deliberately not
+    from ``sequence_bundle.coords``, which is only filled when ``USE_HARMONIC_COORDS`` is on. A map
+    of a model's errors should not disappear because an unrelated model switch was turned off.
+
+    Anything missing is skipped rather than raised: losing the map is not a reason to lose the run.
+    """
+    test_idx = getattr(datamodule, "test_idx_", None)
+    bundle = getattr(datamodule, "sequence_bundle", None)
+    if test_idx is None or bundle is None:
+        return
+    point_ids = list(getattr(bundle, "point_ids", []) or [])
+    if not point_ids:
+        return
+    test_point_ids = [point_ids[index] for index in np.asarray(test_idx).tolist() if index < len(point_ids)]
+    if len(test_point_ids) != len(eval_df):
+        return
+
+    coordinates = getattr(getattr(datamodule, "split_plan", None), "coordinates", None)
+    latitudes = longitudes = None
+    if coordinates is not None:
+        placed = coordinates.reindex(pd.Index(test_point_ids))
+        latitudes = placed["lat"] if "lat" in placed.columns else placed.iloc[:, 0]
+        longitudes = placed["lon"] if "lon" in placed.columns else placed.iloc[:, 1]
+    attach_locations(
+        eval_df,
+        point_ids=test_point_ids,
+        lat=None if latitudes is None else latitudes.to_numpy(),
+        lon=None if longitudes is None else longitudes.to_numpy(),
+    )
 
 
 class LightningTrainer:
@@ -684,6 +719,8 @@ class LightningTrainer:
                 eval_df[f"prediction_{column_name}"] = prediction_values[:, column_index]
             # No plain `prediction` column with several targets: it would hold the first target's
             # predictions under a name that claims to be the run's. Readers use prediction_<target>.
+
+        _attach_test_locations(eval_df, datamodule)
 
         if len(target_names) > 1:
             encoded = join_target_names(target_names)

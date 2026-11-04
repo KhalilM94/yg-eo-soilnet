@@ -9,8 +9,10 @@ scores recorded next to them).
     python replot.py --experiment Soil_Model_Training_v2 --dry-run
 
 Only the run's own saved tables are read: eval_results/eval_results.csv (test measurements,
-predictions and, with uncertainty on, the standard deviation and interval) and, for scikit-learn
-models, cv/cv_results.csv. No data, checkpoint or model is loaded, so it takes seconds.
+predictions, where each point is and, with uncertainty on, the standard deviation and interval),
+the main run's data_splits/split_assignments.parquet (for the training points the residual map
+draws underneath) and, for scikit-learn models, cv/cv_results.csv. No data, checkpoint or model is
+loaded, so it takes seconds.
 
 Each figure replaces the file at the same place in the run (for example plots/pred_obs.png).
 Figures under names no longer used are left in place; delete them by hand if needed. Runs with no
@@ -157,8 +159,8 @@ def main(argv: list[str] | None = None) -> int:
     only = _kinds(args.only)
 
     config = Config(config_path=args.config_path)
-    # Only the MLflow location is taken from the config: runs are opened by id, in their own
-    # experiment.
+    # The MLflow location and the residual map's basemap settings are taken from the config; runs
+    # are otherwise opened by id, in their own experiment.
     configure_tracking_uri(config)
 
     logger = TrainingLogger(name="replot", enable_file_logging=False).get_logger()
@@ -170,7 +172,7 @@ def main(argv: list[str] | None = None) -> int:
         # Reopening a run requires its own experiment to be the active one.
         mlflow.set_experiment(experiment_id=run.info.experiment_id)
         if "mlflow.parentRunId" in run.data.tags:
-            outcomes.append(regenerate_child_figures(run, only=only, dry_run=args.dry_run))
+            outcomes.append(regenerate_child_figures(run, only=only, dry_run=args.dry_run, config=config))
         else:
             # A main run has no predictions of its own; its figures are the leaderboard pair.
             outcomes.append(regenerate_parent_figures(args.run_id, only=only, dry_run=args.dry_run))
@@ -178,14 +180,14 @@ def main(argv: list[str] | None = None) -> int:
         parent = client.get_run(args.parent_run_id)
         mlflow.set_experiment(experiment_id=parent.info.experiment_id)
         logger.info(f"Replotting {parent.info.run_name or args.parent_run_id}")
-        outcomes.extend(regenerate_tree(args.parent_run_id, only=only, dry_run=args.dry_run))
+        outcomes.extend(regenerate_tree(args.parent_run_id, only=only, dry_run=args.dry_run, config=config))
     else:
         parents = _parent_runs(args.experiment, args.since)
         logger.info(f"Found {len(parents)} parent run(s) in {args.experiment}")
         for parent in parents:
             mlflow.set_experiment(experiment_id=parent.info.experiment_id)
             logger.info(f"Replotting {parent.info.run_name or parent.info.run_id}")
-            outcomes.extend(regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run))
+            outcomes.extend(regenerate_tree(parent.info.run_id, only=only, dry_run=args.dry_run, config=config))
 
     written = _report(outcomes, logger, args.dry_run)
     verb = "would be refreshed" if args.dry_run else "refreshed"

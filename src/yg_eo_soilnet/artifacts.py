@@ -7,7 +7,7 @@ use the same layout, so a scikit-learn run and a deep-learning run can be compar
     <run>/
       meta/           run_summary.json
       eval_results/   eval_results.csv, split_summary.json
-      plots/          pred_obs.png, cv_val_curve.png
+      plots/          pred_obs.png, residual_map.png, cv_val_curve.png
       explain/        shap_beeswarm.png, shap_bar.png, shap_values.parquet, shap_summary.json
       uncertainty/    reliability.png, sigma_vs_error.png, uncertainty_summary.json
       predictions/    point_predictions.csv
@@ -68,6 +68,8 @@ class ArtifactLayout:
     EXPLAIN_SUMMARY_FILE = "explain_summary.json"
     CV_RESULTS_FILE = "cv_results.csv"
     PRED_OBS_FILE = "pred_obs.png"
+    # Where those same errors fell on the ground. Written only when the results carry coordinates.
+    RESIDUAL_MAP_FILE = "residual_map.png"
     # Lightning names its own checkpoints after the epoch they come from, which differs between
     # runs; the original name is kept in the run summary and as a tag instead.
     CHECKPOINT_FILE = "best.ckpt"

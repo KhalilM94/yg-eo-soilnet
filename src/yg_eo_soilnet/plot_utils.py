@@ -1,7 +1,8 @@
 """The figures a training run produces.
 
-Predicted against measured for one model, the same for every model at once, the
-:term:`leaderboard`, and the figures showing how a hyperparameter search went.
+Predicted against measured for one model, the same for every model at once, where its errors
+fall on the ground, the :term:`leaderboard`, and the figures showing how a hyperparameter search
+went.
 
 Every function builds a figure and returns it; the caller saves and closes it. With nothing to
 draw, a figure carrying a message comes back rather than nothing, so no caller has to check.
@@ -29,8 +30,10 @@ from yg_eo_soilnet.plot_style import (
     INK_2,
     MODEL_COLORS,
     PROJECT_COLORS,
+    diverging_cmap,
     message_figure,
     metric_box,
+    minus,
     panel_letter,
     panel_subtitle,
     sequential_cmap,
@@ -896,6 +899,281 @@ def plot_leaderboard_scatter(
         fig.delaxes(axes[j])
 
     return fig
+
+
+# --- where the errors fall on the ground -------------------------------------
+
+#: Margin around the test points, as a share of their own span, so points on the edge of the
+#: holdout are not drawn against the frame.
+RESIDUAL_MAP_MARGIN = 0.03
+
+#: How far the figure's shape is allowed to follow the data's. Outside this the canvas would be a
+#: sliver, so the map is letterboxed instead - which is the lesser problem.
+RESIDUAL_MAP_ASPECT_LIMITS = (0.55, 1.45)
+
+#: How the points a model learned from are drawn: hollow, so they are a different shape from the
+#: filled test points rather than only a different colour. A flat grey dot, which is what the paper
+#: figures use over a plain background, disappears into the shaded relief.
+TRAINING_POINT_SIZE = 5
+TRAINING_POINT_LINEWIDTH = 0.35
+
+#: Inches of the figure's height that belong to the colour bar, its labels and its two captions,
+#: rather than to the map.
+COLORBAR_ALLOWANCE_INCHES = 0.95
+
+#: The smallest area a residual map covers, in degrees. A holdout that happens to sit in one
+#: valley would otherwise be blown up to a scale the relief tiles cannot support.
+RESIDUAL_MAP_MIN_SPAN = 0.6
+
+#: Where the colour scale stops. Beyond this percentile of the absolute residual the colour saturates and the
+#: bar is drawn with arrowheads, so a handful of large errors cannot flatten everything else to
+#: the neutral middle.
+RESIDUAL_CLIP_PERCENTILE = 95.0
+
+
+def residual_bounds(lats, lons, *, margin=RESIDUAL_MAP_MARGIN, min_span=RESIDUAL_MAP_MIN_SPAN):
+    """The area a map should cover to show these points comfortably.
+
+    Parameters
+    ----------
+    lats, lons : array_like
+        Degrees north and east.
+    margin : float
+        Extra room around the points, as a share of their own span.
+    min_span : float
+        The smallest width and height to return, in degrees.
+
+    Returns
+    -------
+    tuple of float
+        ``(west, south, east, north)`` in degrees.
+
+    Examples
+    --------
+    >>> residual_bounds([32.0, 33.0], [-8.0, -7.0], margin=0.0, min_span=0.0)
+    (-8.0, 32.0, -7.0, 33.0)
+    """
+    lats = np.asarray(lats, dtype=float)
+    lons = np.asarray(lons, dtype=float)
+    south, north = float(np.min(lats)), float(np.max(lats))
+    west, east = float(np.min(lons)), float(np.max(lons))
+
+    def pad(low, high):
+        """Widen one axis by the margin, and out to ``min_span`` if it is narrower than that."""
+        span = max(high - low, 0.0)
+        room = max(span * margin, (min_span - span) / 2 if span < min_span else 0.0)
+        return low - room, high + room
+
+    west, east = pad(west, east)
+    south, north = pad(south, north)
+    return west, south, east, north
+
+
+def residual_figsize(bounds, width=FIG_WIDTH_FULL):
+    """The figure size that lets a map of ``bounds`` fill its canvas.
+
+    The axes is drawn with an equal aspect, so a figure whose shape does not match the data's
+    leaves a band of white down one pair of edges. Taking the height from the bounds removes it.
+
+    Parameters
+    ----------
+    bounds : tuple of float
+        ``(west, south, east, north)`` in degrees.
+    width : float
+        The figure's width in inches.
+
+    Returns
+    -------
+    tuple of float
+        ``(width, height)`` in inches, the height including room for the colour bar.
+
+    Examples
+    --------
+    >>> width, height = residual_figsize((-10.0, 30.0, -2.0, 36.0))
+    >>> round(width, 2), round(height, 2)
+    (6.5, 6.77)
+    """
+    from yg_eo_soilnet import map_style
+
+    left, bottom = map_style.to_mercator(bounds[0], bounds[1])
+    right, top = map_style.to_mercator(bounds[2], bounds[3])
+    aspect = float((top - bottom) / (right - left))
+    low, high = RESIDUAL_MAP_ASPECT_LIMITS
+    return width, width * float(np.clip(aspect, low, high)) + COLORBAR_ALLOWANCE_INCHES
+
+
+def _residual_limit(residuals):
+    """The symmetric colour limit: the clip percentile of the absolute residual, never zero."""
+    magnitude = float(np.percentile(np.abs(residuals), RESIDUAL_CLIP_PERCENTILE))
+    if not np.isfinite(magnitude) or magnitude <= 0:
+        magnitude = float(np.max(np.abs(residuals))) if len(residuals) else 0.0
+    return magnitude if magnitude > 0 else 1.0
+
+
+@styled
+def residual_map(
+    eval_df,
+    *,
+    target_name=None,
+    training_points=None,
+    basemap_cache_dir=None,
+    relief=True,
+    zoom=None,
+):
+    """Where a model's errors fall on the ground: test points coloured by prediction minus measurement.
+
+    The scatter of predicted against measured says how big the errors are; this says whether they
+    are scattered at random or concentrated somewhere, which is a different problem with a
+    different fix. Blue is a model predicting too low, orange too high, and the neutral middle is
+    no error - the limits are symmetric so that reading holds.
+
+    Parameters
+    ----------
+    eval_df : pandas.DataFrame
+        One row per test point, with ``lat``, ``lon``, ``target`` and ``prediction`` columns.
+    target_name : str, optional
+        Named on the colour bar, so the units are not a guess.
+    training_points : pandas.DataFrame, optional
+        The points the model learned from, with ``lat`` and ``lon`` columns. Drawn underneath in
+        flat grey, as context: an error far from any of them means something different from one in
+        the middle of them. None omits the layer.
+    basemap_cache_dir : str, optional
+        Where the relief tiles and borders are cached.
+    relief : bool, default True
+        False draws flat ground instead of shaded hills.
+    zoom : int, optional
+        Tile zoom for the relief.
+
+    Returns
+    -------
+    matplotlib.figure.Figure
+        With nothing to draw, a figure carrying a message.
+    """
+    from yg_eo_soilnet import map_style
+
+    required = {"lat", "lon", "target", "prediction"}
+    if eval_df is None or eval_df.empty or not required.issubset(eval_df.columns):
+        return message_figure("No residual map: the results carry no coordinates for the test points.")
+
+    frame = eval_df[["lat", "lon", "target", "prediction"]].apply(pd.to_numeric, errors="coerce").dropna()
+    if frame.empty:
+        return message_figure("No residual map: no test point has both a coordinate and a prediction.")
+
+    residuals = (frame["prediction"] - frame["target"]).to_numpy()
+    lats = frame["lat"].to_numpy()
+    lons = frame["lon"].to_numpy()
+    bounds = residual_bounds(lats, lons)
+
+    figure, axis = plt.subplots(figsize=residual_figsize(bounds), layout="constrained")
+    drawn = map_style.draw_basemap(
+        axis,
+        bounds,
+        cache_dir=basemap_cache_dir or map_style.DEFAULT_CACHE_DIR,
+        zoom=zoom or map_style.DEFAULT_ZOOM,
+        relief=relief,
+    )
+
+    handles = []
+    if training_points is not None and len(training_points):
+        context = training_points[["lat", "lon"]].apply(pd.to_numeric, errors="coerce").dropna()
+        if len(context):
+            train_x, train_y = map_style.to_mercator(context["lon"].to_numpy(), context["lat"].to_numpy())
+            # Hollow, so they read as a different kind of thing from the filled test points and
+            # stay legible against the relief - a flat grey dot was all but invisible on it.
+            axis.scatter(
+                train_x,
+                train_y,
+                s=TRAINING_POINT_SIZE,
+                marker="o",
+                facecolors="none",
+                edgecolors=INK_2,
+                lw=TRAINING_POINT_LINEWIDTH,
+                zorder=3,
+                rasterized=True,
+            )
+            handles.append(
+                Line2D(
+                    [],
+                    [],
+                    ls="",
+                    marker="o",
+                    markersize=4,
+                    markerfacecolor="none",
+                    markeredgecolor=INK_2,
+                    markeredgewidth=TRAINING_POINT_LINEWIDTH,
+                    label=f"Training point (n = {len(context):,})",
+                )
+            )
+
+    limit = _residual_limit(residuals)
+    x, y = map_style.to_mercator(lons, lats)
+    # A seeded shuffle, so neither the over- nor the under-predictions are systematically the ones
+    # drawn on top where the points overlap.
+    order = np.random.default_rng(0).permutation(len(residuals))
+    points = axis.scatter(
+        x[order],
+        y[order],
+        c=residuals[order],
+        cmap=diverging_cmap(),
+        vmin=-limit,
+        vmax=limit,
+        s=14,
+        edgecolor="white",
+        lw=0.25,
+        zorder=4,
+        rasterized=True,
+    )
+    # No legend entry for the test points: the colour bar already says what they are, and a grey
+    # swatch for them would collide with the grey that means "training point".
+    if handles:
+        axis.legend(
+            handles=handles,
+            # Upper right: the locator inset has the upper left.
+            loc="upper right",
+            frameon=True,
+            framealpha=0.9,
+            edgecolor=BASELINE,
+            fontsize=7.5,
+            handletextpad=0.4,
+        ).set_zorder(6)
+
+    colorbar = figure.colorbar(
+        points, ax=axis, orientation="horizontal", extend="both", shrink=0.6, pad=0.02, aspect=35
+    )
+    label = "Residual (predicted \N{MINUS SIGN} measured)"
+    colorbar.set_label(f"{label}, {target_name}" if target_name else label)
+    colorbar.outline.set_visible(False)
+    colorbar.ax.tick_params(length=0, labelsize=8)
+    for position, text, align in ((0, "predicted too low", "left"), (1, "predicted too high", "right")):
+        colorbar.ax.text(
+            position, 1.4, text, transform=colorbar.ax.transAxes, ha=align, va="bottom", fontsize=7.5, color=INK_2
+        )
+
+    bias = float(np.mean(residuals))
+    rmse = float(np.sqrt(np.mean(residuals**2)))
+    metric_box(
+        axis,
+        minus(f"n = {len(residuals):,}\nbias = {bias:+.2f}\nRMSE = {rmse:.2f}"),
+        loc="lower left",
+    ).set_zorder(6)
+
+    # Both in the lower-right, the arrow centred directly over the bar, as the paper figures have
+    # them. The legend holds the upper left and the statistics box the lower left.
+    scale_bar_at = map_style.scale_bar_placement(bounds)
+    map_style.finish_map(
+        axis,
+        bounds,
+        scale_bar_at=scale_bar_at,
+        north_arrow_at=map_style.north_arrow_placement(bounds, scale_bar_at),
+        # Only credit the sources that actually made it onto the page.
+        credit=map_style.CREDIT if (drawn["relief"] or drawn["borders"]) else None,
+    )
+
+    # Last, so it sits over the basemap and the points. Upper left, with the legend opposite it.
+    map_style.add_locator_inset(
+        axis, bounds, cache_dir=basemap_cache_dir or map_style.DEFAULT_CACHE_DIR, loc="upper left"
+    )
+    return figure
 
 
 # --- did the stratification actually balance the splits? ---------------------

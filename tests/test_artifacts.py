@@ -277,3 +277,13 @@ def test_reader_candidates_are_deduplicated() -> None:
         ArtifactLayout.EVAL_RESULTS, ArtifactLayout.EVAL_RESULTS_FILE, ArtifactLayout.EVAL_RESULTS_FILE
     )
     assert len(candidates) == len(set(candidates))
+
+
+def test_the_residual_map_has_one_stable_name_like_every_other_figure():
+    # Stable across runs, so MLflow's compare view lines two runs' maps up side by side. Multi-
+    # target runs separate by directory instead - see plots_path.
+    from yg_eo_soilnet.artifacts import ArtifactLayout
+
+    assert ArtifactLayout.RESIDUAL_MAP_FILE == "residual_map.png"
+    assert ArtifactLayout.plots_path() == "plots"
+    assert ArtifactLayout.plots_path("clay_pct") == "plots/clay_pct"

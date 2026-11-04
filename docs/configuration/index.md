@@ -193,7 +193,16 @@ refused, because filling in most of a column invents it rather than recovering i
     enabled: false        # how much each input contributed
   export_point_predictions:
     enabled: false        # every point's prediction, not just the test points
+  residual_map:
+    enabled: true         # a map of where each model's errors fell
 ```
+
+`residual_map` draws `plots/residual_map.png` for every model: its test points at their real
+coordinates, coloured by prediction minus measurement, with the training points underneath in grey.
+It needs `LAT_COLUMN` and `LON_COLUMN` in your data, and is skipped without them. Its other
+settings are the basemap's: `basemap_cache_dir` (where the relief tiles and country borders are
+kept between runs), `relief` (`false` draws flat ground and fetches no tiles), `zoom` and
+`show_training_points`. See {doc}`/outputs`.
 
 ### Where runs are recorded - `main_config.yml`
 

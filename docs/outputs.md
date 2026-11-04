@@ -86,16 +86,44 @@ another model's loss. See {term}`original units`.
 
 | File | What is in it |
 |---|---|
-| `eval_results/eval_results.csv` | One row per test point: its covariates, the lab measurement, and the prediction. With uncertainty on, also `prediction_std` and the interval. |
+| `eval_results/eval_results.csv` | One row per test point: its covariates, the lab measurement, the prediction, and where the point is (`point_id`, `lat`, `lon`). With uncertainty on, also `prediction_std` and the interval. |
 | `eval_results/split_summary.json` | How many points in each split, and how the target is distributed in each. |
 | `plots/pred_obs.png` | Predicted against measured, with the 1:1 line, a fitted line and the scores. |
+| `plots/residual_map.png` | Where those errors fell on the ground: each test point at its real position, coloured by prediction minus measurement. |
 | `cv/cv_results.csv` | Every combination of settings the search tried, and how each scored (scikit-learn only). |
 | `checkpoints/best.ckpt` | The best epoch's weights (deep learning only). |
 | `meta/run_summary.json` | What the model was, what it did, and anything that was skipped and why. |
 | `explain/` | The SHAP figures and the full table of contributions, when explanations are on. |
 | `uncertainty/` | Whether the intervals are the width they claim, when uncertainty is on. |
 | `predictions/point_predictions.csv` | This model's prediction for every point, when the export is on. |
-| `data_splits/split_assignments.parquet` | Which split each point went to. On the main run. |
+| `data_splits/split_assignments.parquet` | Which split each point went to, where it is, and its cluster or band. On the main run. |
+| `splits_plots/` | How the split came out: the map for a spatial split, the distributions for a stratified one. On the main run. |
+
+## The map of where the errors fell
+
+`plots/pred_obs.png` says how big a model's errors are. `plots/residual_map.png` says *where* they
+are: every test point drawn at its real latitude and longitude, coloured by prediction minus
+measurement. Blue is a model predicting too low, orange too high, and the neutral middle is no
+error - the colour limits are symmetric so that reading always holds.
+
+This answers a question the scatter plot cannot. Errors scattered evenly across the country are
+noise; errors concentrated in one region are a model that has not learned that region, which is a
+different problem with a different fix. The points the model was trained on are drawn underneath in
+grey, so a large error out on its own - far from anything the model learned from - is easy to tell
+apart from a large error in the middle of the training set.
+
+A small locator map in the top-left corner shows where in the country you are looking, with the
+mapped area drawn on it as a rectangle. Morocco is drawn from Natural Earth's Morocco
+point-of-view edition, in which the country is a single shape including Western Sahara - so there
+is no dotted or dashed internal line.
+
+The map needs `LAT_COLUMN` and `LON_COLUMN` to exist in your data. Without them it is quietly
+skipped and nothing else about the run changes. Runs recorded before the coordinates were written
+into `eval_results.csv` have none, so they are skipped too, including by `replot.py`.
+
+Settings live under `residual_map` in `main_config.yml`. The relief and the country borders are
+downloaded once into `basemap_cache_dir` and reused; if they can be reached neither from the cache
+nor over the network, the map is still drawn, on plain ground and without the locator.
 
 ## The saved models
 

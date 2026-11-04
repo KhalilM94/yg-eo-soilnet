@@ -11,14 +11,17 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from yg_eo_soilnet import replotting
 from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
 from yg_eo_soilnet.replotting import (
+    ALL_KINDS,
     _cv_plot_name,
     _interval_estimator,
     _own_target_frame,
     _planned,
     _wanted,
     regenerate_child_figures,
+    training_points_for,
 )
 
 
@@ -213,3 +216,85 @@ def test_a_malformed_since_is_reported_before_mlflow_sees_it():
 
     with pytest.raises(SystemExit, match="YYYY-MM-DD"):
         replot._since_filter("01/09/2026")
+
+
+# --- the residual map ------------------------------------------------------
+# It needs coordinates in eval_results.csv, which no run recorded before they were written there.
+# Those runs must be skipped cleanly, not raise, because replot.py walks whole experiments.
+
+
+def test_the_residual_map_is_one_of_the_kinds_that_can_be_redrawn():
+    assert "residual_map" in ALL_KINDS
+    assert _wanted(None, "residual_map")
+    assert not _wanted(["pred_obs"], "residual_map")
+
+
+def test_a_run_without_coordinates_plans_no_residual_map():
+    assert _planned(has_sigma=False, cv_results=None, only=None, has_coordinates=False) == ["plots/pred_obs.png"]
+
+
+def test_a_run_with_coordinates_plans_a_residual_map():
+    planned = _planned(has_sigma=False, cv_results=None, only=None, has_coordinates=True)
+    assert planned == ["plots/pred_obs.png", "plots/residual_map.png"]
+
+
+def test_the_training_points_come_from_the_parent_runs_saved_split(monkeypatch, tmp_path):
+    saved = tmp_path / "split_assignments.parquet"
+    pd.DataFrame(
+        {
+            "point_id": ["p1", "p2", "p3", "p4"],
+            "split": ["train", "val", "test", "train"],
+            "lat": [32.0, 33.0, 34.0, 35.0],
+            "lon": [-8.0, -7.0, -6.0, -5.0],
+        }
+    ).to_parquet(saved, index=False)
+    monkeypatch.setattr(replotting, "_download", lambda run_id, artifact_path: str(saved))
+
+    pool = training_points_for(_run(**{"mlflow.parentRunId": "parent"}))
+
+    # The fit pool only: the test point is what the map colours, not what it draws as context.
+    assert sorted(pool["lat"].tolist()) == [32.0, 33.0, 35.0]
+
+
+def test_a_parent_that_recorded_no_split_simply_has_no_training_points(monkeypatch):
+    monkeypatch.setattr(replotting, "_download", lambda run_id, artifact_path: None)
+    assert training_points_for(_run(**{"mlflow.parentRunId": "parent"})) is None
+
+
+def test_a_split_recorded_before_positions_were_saved_has_no_training_points(monkeypatch, tmp_path):
+    older = tmp_path / "split_assignments.parquet"
+    pd.DataFrame({"point_id": ["p1", "p2"], "split": ["train", "test"]}).to_parquet(older, index=False)
+    monkeypatch.setattr(replotting, "_download", lambda run_id, artifact_path: str(older))
+
+    # No coordinates to draw, so the map is drawn without the layer rather than not at all.
+    assert training_points_for(_run(**{"mlflow.parentRunId": "parent"})) is None
+
+
+def test_a_top_level_run_has_no_parent_to_read_a_split_from():
+    assert training_points_for(_run()) is None
+
+
+def test_asking_for_only_the_residual_map_still_reads_the_results_table(monkeypatch):
+    # The results table is loaded only for the kinds that need it, and the map was missing from
+    # that list - so `--only residual_map` reported "nothing to redraw" for every run.
+    read = []
+
+    def record(run_id, artifact_paths):
+        """Note that the table was asked for, and return one with coordinates in it."""
+        read.append(run_id)
+        return pd.DataFrame(
+            {
+                "clay_pct": [1.0, 2.0],
+                "prediction": [1.1, 2.1],
+                "lat": [32.0, 33.0],
+                "lon": [-8.0, -7.0],
+                "target_name": ["clay_pct", "clay_pct"],
+            }
+        )
+
+    monkeypatch.setattr(replotting, "_read_first", record)
+    outcome = regenerate_child_figures(_run(target="clay_pct", model_name="Ridge"), only=["residual_map"], dry_run=True)
+
+    assert read, "the results table was never read, so the map had nothing to draw from"
+    assert outcome.get("skipped") is None
+    assert outcome["would_write"] == ["plots/residual_map.png"]

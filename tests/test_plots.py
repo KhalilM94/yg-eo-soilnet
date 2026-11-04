@@ -20,9 +20,16 @@ from yg_eo_soilnet.plot_style import (
     style_context,
     styled,
 )
+from yg_eo_soilnet.map_style import to_mercator
 from yg_eo_soilnet.plot_utils import (
+    COLORBAR_ALLOWANCE_INCHES,
+    RESIDUAL_MAP_ASPECT_LIMITS,
+    RESIDUAL_MAP_MIN_SPAN,
     create_parent_pred_obs,
     pred_obs_panel,
+    residual_bounds,
+    residual_figsize,
+    residual_map,
     stratification_panel,
 )
 from yg_eo_soilnet.uncertainty.plots import reliability_curve, sigma_vs_error
@@ -469,6 +476,240 @@ def test_an_empty_figure_carries_a_message_rather_than_being_none():
     assert figure is not None
     assert figure.axes[0].texts[0].get_text() == "No leaderboard rows available"
     assert figure.axes[0].axison is False
+
+
+# --- the residual map ------------------------------------------------------
+
+
+@pytest.fixture
+def flat_ground(monkeypatch):
+    """Draw maps with no basemap at all, so no test reaches the network or the cached archive.
+
+    This is also the state an offline run with an empty cache is in: no relief, no borders, and so
+    no locator either.
+    """
+    from yg_eo_soilnet import map_style
+
+    def no_archive(cache_dir):
+        """Stand in for an archive that is neither cached nor reachable."""
+        raise OSError("not cached")
+
+    monkeypatch.setattr(map_style, "_relief_image", lambda bounds, zoom, cache_dir: (None, None))
+    monkeypatch.setattr(map_style, "_countries", lambda bounds, cache_dir: None)
+    monkeypatch.setattr(map_style, "_all_countries", no_archive)
+
+
+def residual_frame(n=40, bias=0.0, seed=0):
+    """Test points scattered over Morocco, with a controllable bias."""
+    rng = np.random.default_rng(seed)
+    measured = rng.uniform(5.0, 40.0, n)
+    return pd.DataFrame(
+        {
+            "lat": rng.uniform(31.0, 35.0, n),
+            "lon": rng.uniform(-9.0, -5.0, n),
+            "target": measured,
+            "prediction": measured + bias + rng.normal(0.0, 1.0, n),
+        }
+    )
+
+
+def test_the_residual_map_draws_a_point_for_every_test_point(flat_ground):
+    figure = residual_map(residual_frame(n=40), target_name="clay_pct")
+    axis = figure.axes[0]
+    offsets = np.vstack([collection.get_offsets() for collection in axis.collections])
+    assert len(offsets) == 40
+    plt.close(figure)
+
+
+def test_the_colour_scale_is_symmetric_so_the_neutral_middle_means_no_error(flat_ground):
+    # A model biased high must still put zero at the midpoint, or the colours lie about direction.
+    figure = residual_map(residual_frame(n=60, bias=8.0), target_name="clay_pct")
+    scatter = figure.axes[0].collections[0]
+    low, high = scatter.get_clim()
+    assert low == pytest.approx(-high)
+    assert high > 0
+    plt.close(figure)
+
+
+def test_the_map_reports_the_bias_and_the_count(flat_ground):
+    figure = residual_map(residual_frame(n=30, bias=5.0), target_name="clay_pct")
+    written = " ".join(text.get_text() for text in figure.axes[0].texts)
+    assert "n = 30" in written
+    assert "bias = +" in written
+    plt.close(figure)
+
+
+def test_results_without_coordinates_get_a_message_not_a_map():
+    frame = residual_frame(n=10).drop(columns=["lat", "lon"])
+    figure = residual_map(frame, target_name="clay_pct")
+    # The message figure has no axes ticks and no scatter - it is not a map with nothing on it.
+    assert not figure.axes[0].collections
+    plt.close(figure)
+
+
+def test_coordinates_that_are_all_missing_get_a_message_not_a_map():
+    frame = residual_frame(n=10)
+    frame["lat"] = np.nan
+    figure = residual_map(frame, target_name="clay_pct")
+    assert not figure.axes[0].collections
+    plt.close(figure)
+
+
+def test_the_training_points_are_drawn_underneath_the_test_points(flat_ground):
+    training = pd.DataFrame({"lat": [32.0, 33.0, 34.0], "lon": [-8.0, -7.0, -6.0]})
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct", training_points=training)
+    axis = figure.axes[0]
+    # Two scatters now, and the context layer sits below the coloured one.
+    assert len(axis.collections) == 2
+    assert axis.collections[0].get_zorder() < axis.collections[1].get_zorder()
+    assert any("Training point" in text.get_text() for text in axis.get_legend().get_texts())
+    plt.close(figure)
+
+
+def test_without_training_points_there_is_no_legend_at_all(flat_ground):
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct")
+    axis = figure.axes[0]
+    assert len(axis.collections) == 1
+    # The colour bar already says what the points are; a lone grey swatch would only confuse.
+    assert axis.get_legend() is None
+    plt.close(figure)
+
+
+def test_far_away_training_points_do_not_drag_the_map_off_the_test_set(flat_ground):
+    frame = residual_frame(n=20)
+    near = residual_map(frame, target_name="clay_pct")
+    sprawling = pd.DataFrame({"lat": [20.0, 50.0], "lon": [-30.0, 10.0]})
+    with_context = residual_map(frame, target_name="clay_pct", training_points=sprawling)
+    assert with_context.axes[0].get_xlim() == pytest.approx(near.axes[0].get_xlim())
+    assert with_context.axes[0].get_ylim() == pytest.approx(near.axes[0].get_ylim())
+    plt.close(near)
+    plt.close(with_context)
+
+
+def test_the_bounds_hold_every_test_point_with_room_to_spare():
+    lats = [31.0, 34.0]
+    lons = [-9.0, -6.0]
+    west, south, east, north = residual_bounds(lats, lons)
+    assert west < min(lons) and east > max(lons)
+    assert south < min(lats) and north > max(lats)
+
+
+def test_points_in_one_spot_still_get_a_map_worth_looking_at():
+    # Without a floor, a holdout inside one valley would be zoomed to a span of nothing.
+    west, south, east, north = residual_bounds([32.0, 32.001], [-7.0, -7.001])
+    assert (east - west) >= RESIDUAL_MAP_MIN_SPAN
+    assert (north - south) >= RESIDUAL_MAP_MIN_SPAN
+
+
+# --- the canvas the map is drawn on ----------------------------------------
+# The axes is drawn with an equal aspect, so a figure whose shape does not match the data's leaves
+# a band of white down one pair of edges.
+
+
+def test_the_figure_is_taller_than_it_is_wide_for_a_tall_area():
+    _, tall = residual_figsize((-6.0, 30.0, -5.0, 36.0))
+    _, wide = residual_figsize((-12.0, 32.0, -2.0, 33.0))
+    assert tall > wide
+
+
+def test_the_map_area_ends_up_the_same_shape_as_the_ground_it_shows(flat_ground):
+    frame = residual_frame(n=30)
+    figure = residual_map(frame, target_name="clay_pct")
+    figure.canvas.draw()
+
+    bounds = residual_bounds(frame["lat"], frame["lon"])
+    left, bottom = to_mercator(bounds[0], bounds[1])
+    right, top = to_mercator(bounds[2], bounds[3])
+
+    width_in, height_in = figure.get_size_inches()
+    box = figure.axes[0].get_position()
+    drawn = (box.height * height_in) / (box.width * width_in)
+    assert drawn == pytest.approx(float((top - bottom) / (right - left)), rel=0.02)
+    plt.close(figure)
+
+
+def test_a_freakishly_wide_area_does_not_produce_a_sliver_of_a_figure():
+    low, high = RESIDUAL_MAP_ASPECT_LIMITS
+    width, height = residual_figsize((-40.0, 32.0, 10.0, 32.5))
+    assert (height - COLORBAR_ALLOWANCE_INCHES) / width == pytest.approx(low)
+
+
+def test_the_colour_bar_gets_room_of_its_own_beyond_the_map():
+    width, height = residual_figsize((-10.0, 30.0, -2.0, 36.0))
+    # Whatever the ground looks like, the bar and its two captions are not squeezed into the map.
+    assert height > width * RESIDUAL_MAP_ASPECT_LIMITS[0] + COLORBAR_ALLOWANCE_INCHES - 1e-9
+
+
+def test_the_tighter_margin_still_leaves_every_point_off_the_frame():
+    lats = [31.0, 34.0]
+    lons = [-9.0, -6.0]
+    west, south, east, north = residual_bounds(lats, lons)
+    assert west < min(lons) and east > max(lons)
+    assert south < min(lats) and north > max(lats)
+
+
+# --- the locator inset, in place -------------------------------------------
+
+
+def test_the_map_carries_a_locator_showing_where_in_the_country_it_is(monkeypatch):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from yg_eo_soilnet import map_style
+
+    countries = gpd.GeoDataFrame(
+        {"ADM0_A3": ["MAR", "DZA"]},
+        geometry=[box(-13.0, 21.0, -1.0, 36.0), box(-1.0, 21.0, 4.0, 36.0)],
+        crs="EPSG:4326",
+    )
+    monkeypatch.setattr(map_style, "_relief_image", lambda bounds, zoom, cache_dir: (None, None))
+    monkeypatch.setattr(map_style, "_all_countries", lambda cache_dir: countries)
+
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct")
+
+    assert figure.axes[0].child_axes, "the map should carry a locator inset"
+    plt.close(figure)
+
+
+def test_a_map_drawn_without_borders_simply_has_no_locator(flat_ground):
+    # flat_ground fakes the borders away, which is also what an offline run with an empty cache
+    # gets. The map is still drawn; it just cannot say where in the country it is.
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct")
+    assert not figure.axes[0].child_axes
+    plt.close(figure)
+
+
+def test_the_training_points_are_hollow_so_they_read_against_the_relief(flat_ground):
+    # A flat grey dot is almost exactly the land colour, so the layer vanished on the shaded
+    # basemap. Hollow makes them a different shape from the test points, not just a different grey.
+    training = pd.DataFrame({"lat": [32.0, 33.0], "lon": [-8.0, -7.0]})
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct", training_points=training)
+
+    context = figure.axes[0].collections[0]
+    assert context.get_facecolors().size == 0, "the training points should be unfilled"
+    assert len(context.get_edgecolors()), "they are drawn as an outline, so they need an edge"
+    plt.close(figure)
+
+
+def test_the_legend_sits_opposite_the_locator_so_they_cannot_collide(monkeypatch):
+    import geopandas as gpd
+    from shapely.geometry import box
+
+    from yg_eo_soilnet import map_style
+
+    countries = gpd.GeoDataFrame({"ADM0_A3": ["MAR"]}, geometry=[box(-13.0, 21.0, -1.0, 36.0)], crs="EPSG:4326")
+    monkeypatch.setattr(map_style, "_relief_image", lambda bounds, zoom, cache_dir: (None, None))
+    monkeypatch.setattr(map_style, "_all_countries", lambda cache_dir: countries)
+
+    training = pd.DataFrame({"lat": [32.0, 33.0], "lon": [-8.0, -7.0]})
+    figure = residual_map(residual_frame(n=20), target_name="clay_pct", training_points=training)
+    axis = figure.axes[0]
+
+    inset = axis.child_axes[-1].get_position()
+    legend = axis.get_legend().get_window_extent().transformed(axis.transAxes.inverted())
+    # The locator holds the left of the top edge, so the legend must be over on the right.
+    assert inset.x0 < 0.5 < legend.x0
+    plt.close(figure)
 
 
 # --- did the stratification balance the splits? -----------------------------

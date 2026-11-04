@@ -36,7 +36,11 @@ from yg_eo_soilnet.uncertainty.intervals import (
 
 # What a caller can ask to be redrawn. `leaderboard` is the only parent-run entry; the rest are
 # per-child.
-CHILD_KINDS = ("pred_obs", "uncertainty", "cv")
+CHILD_KINDS = ("pred_obs", "residual_map", "uncertainty", "cv")
+
+#: Distinguishes "the caller has not looked the training points up" from "it did, and there are
+#: none" - the second must not trigger a second lookup per child.
+_UNSET = object()
 PARENT_KINDS = ("leaderboard",)
 ALL_KINDS = CHILD_KINDS + PARENT_KINDS
 
@@ -68,6 +72,39 @@ def _read_first(run_id: str, artifact_paths: Iterable[str]) -> Optional[pd.DataF
         except Exception:
             continue
     return None
+
+
+def training_points_for(run: Any) -> Optional[pd.DataFrame]:
+    """The points the model learned from, read from its parent run's saved split.
+
+    The results table a replot works from holds the TEST points only, so the context layer of the
+    residual map has to come from somewhere else: ``data_splits/split_assignments.parquet`` on the
+    parent run, which lists every point, its split and - for runs recorded since positions were
+    written down - where it is.
+
+    Returns
+    -------
+    pandas.DataFrame or None
+        ``lat``/``lon`` for the fit pool, or None when the parent recorded no usable split. The map
+        is then drawn without the layer rather than not at all.
+    """
+    parent_id = run.data.tags.get("mlflow.parentRunId")
+    return _training_points_of(parent_id) if parent_id else None
+
+
+def _training_points_of(parent_run_id: str) -> Optional[pd.DataFrame]:
+    """The fit pool's coordinates from one main run's saved split, or None."""
+    local_path = _download(parent_run_id, f"{ArtifactLayout.DATA_SPLITS}/split_assignments.parquet")
+    if local_path is None:
+        return None
+    try:
+        frame = pd.read_parquet(local_path)
+    except Exception:
+        return None
+    if not {"split", "lat", "lon"}.issubset(frame.columns):
+        return None
+    pool = frame[frame["split"].isin(["train", "val"])]
+    return pool[["lat", "lon"]].dropna() if len(pool) else None
 
 
 def _interval_estimator(run: Any, target: str) -> Any:
@@ -126,6 +163,8 @@ def regenerate_child_figures(
     *,
     only: Optional[Iterable[str]] = None,
     dry_run: bool = False,
+    training_points: Any = _UNSET,
+    config: Any = None,
 ) -> dict:
     """Redraw one model's figures.
 
@@ -137,6 +176,12 @@ def regenerate_child_figures(
         Which figures to redraw; all of them unless given.
     dry_run : bool, default False
         Report what would be written without writing anything.
+    training_points : pandas.DataFrame or None, optional
+        The context layer for the residual map. Looked up from this run's parent when not given;
+        pass it in when redrawing a whole tree, so the parent's split is read once rather than
+        once per model.
+    config : Config, optional
+        Read only for the residual map's basemap settings.
 
     Returns
     -------
@@ -163,7 +208,7 @@ def regenerate_child_figures(
     outcome.update(target=target, model_name=model_name)
 
     evaluation_df = None
-    if _wanted(only, "pred_obs") or _wanted(only, "uncertainty"):
+    if any(_wanted(only, kind) for kind in ("pred_obs", "residual_map", "uncertainty")):
         evaluation_df = _read_first(run_id, _eval_results_artifact_paths(target, model_name))
         if evaluation_df is None:
             outcome["skipped"] = "no eval_results.csv"
@@ -184,10 +229,14 @@ def regenerate_child_figures(
         return outcome
 
     has_sigma = frame is not None and sigma_column(frame, target) is not None
+    has_coordinates = frame is not None and {"lat", "lon"}.issubset(frame.columns)
 
     if dry_run:
-        outcome["would_write"] = _planned(has_sigma, cv_results, only)
+        outcome["would_write"] = _planned(has_sigma, cv_results, only, has_coordinates)
         return outcome
+
+    if training_points is _UNSET:
+        training_points = training_points_for(run) if has_coordinates else None
 
     # start_run(run_id=...) on a FINISHED run flips it to RUNNING; the context manager sets it back
     # to FINISHED on the way out, so the run's terminal status survives a replot.
@@ -201,6 +250,16 @@ def regenerate_child_figures(
                 interval_label=describe_interval(_interval_estimator(run, target)),
             ):
                 outcome["written"].append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.PRED_OBS_FILE}")
+
+            if _wanted(only, "residual_map") and logger._log_residual_map_artifact(
+                frame,
+                target=target,
+                model_name=model_name,
+                artifact_path=ArtifactLayout.plots_path(),
+                training_points=training_points,
+                config=config,
+            ):
+                outcome["written"].append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.RESIDUAL_MAP_FILE}")
 
             if _wanted(only, "uncertainty") and has_sigma:
                 written = logger._log_uncertainty_artifacts(
@@ -233,11 +292,17 @@ def _own_target_frame(
     return frames[0][0] if len(frames) == 1 else None
 
 
-def _planned(has_sigma: bool, cv_results, only) -> list[str]:
-    """The files a real run would write, listed without writing any of them."""
+def _planned(has_sigma: bool, cv_results, only, has_coordinates: bool = False) -> list[str]:
+    """The files a real run would write, listed without writing any of them.
+
+    ``has_coordinates`` defaults to False because a run recorded before positions were written into
+    eval_results.csv has none, and so gets no residual map.
+    """
     planned: list[str] = []
     if _wanted(only, "pred_obs"):
         planned.append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.PRED_OBS_FILE}")
+    if _wanted(only, "residual_map") and has_coordinates:
+        planned.append(f"{ArtifactLayout.PLOTS}/{ArtifactLayout.RESIDUAL_MAP_FILE}")
     if _wanted(only, "uncertainty") and has_sigma:
         planned.append(f"{ArtifactLayout.UNCERTAINTY}/{ArtifactLayout.RELIABILITY_FILE}")
         planned.append(f"{ArtifactLayout.UNCERTAINTY}/{ArtifactLayout.SIGMA_ERROR_FILE}")
@@ -324,11 +389,19 @@ def regenerate_tree(
     *,
     only: Optional[Iterable[str]] = None,
     dry_run: bool = False,
+    config: Any = None,
 ) -> list[dict]:
     """Redraw every figure under one main run: each model's, then the run's own.
 
     The run's own go last, because they are built from the models' tables.
     """
-    outcomes = [regenerate_child_figures(run, only=only, dry_run=dry_run) for run in scoring_descendants(parent_run_id)]
+    descendants = scoring_descendants(parent_run_id)
+    # Read once for the whole tree: every model under this run shares one split, and a run with
+    # dozens of models would otherwise download the same table dozens of times.
+    training_points = None if dry_run else _training_points_of(parent_run_id)
+    outcomes = [
+        regenerate_child_figures(run, only=only, dry_run=dry_run, training_points=training_points, config=config)
+        for run in descendants
+    ]
     outcomes.append(regenerate_parent_figures(parent_run_id, only=only, dry_run=dry_run))
     return outcomes

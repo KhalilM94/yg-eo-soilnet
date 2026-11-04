@@ -179,6 +179,16 @@ class ModelTrainer:
                 f"minimum recommended is {min_valid_rows} for {X_train.shape[1]} features."
             )
 
+        # Where each test point is, so the results table can say where the errors fell. The
+        # splitter already sliced these alongside X_test; they are metadata, never model inputs.
+        test_locations = None
+        if data.get("lat_test") is not None and data.get("lon_test") is not None:
+            test_locations = {
+                "point_id": data.get("point_ids"),
+                "lat": data["lat_test"],
+                "lon": data["lon_test"],
+            }
+
         # Every point, for the per-point export. Points whose target was never measured are kept:
         # they can still be predicted, and the export is meant to be complete.
         export_data = None
@@ -216,6 +226,8 @@ class ModelTrainer:
                             mlflow_logger=mlflow_logger,
                             calibration_data=calibration_data,
                             export_data=export_data,
+                            test_locations=test_locations,
+                            split_plan=data.get("split_plan"),
                         )
                     trained_models += 1
                 except Exception as e:
@@ -251,6 +263,8 @@ class ModelTrainer:
         mlflow_logger,
         calibration_data=None,
         export_data=None,
+        test_locations=None,
+        split_plan=None,
     ):
         """Search, fit and record one model for one target group, inside its open sub-run.
 
@@ -360,6 +374,8 @@ class ModelTrainer:
                     "categorical_encoding": categorical_encoding,
                 },
                 export_data=export_data,
+                test_locations=test_locations,
+                split_plan=split_plan,
             )
         else:
             raise ValueError(f"Unknown modeltype: {modeltype}")

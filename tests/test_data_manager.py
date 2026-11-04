@@ -526,3 +526,151 @@ def test_nothing_is_dropped_while_the_block_is_switched_off(toy_config, logger) 
     toy_config.EXISTING_HS_FEATURES = {"enabled": False, "ignore": True, "band_names": [], "prefix": ["S2_"]}
 
     assert DataManager(toy_config, logger).hyperspectral_drop_columns(["S2_B4"]) == set()
+
+
+# --- where each result came from -------------------------------------------
+# The coordinates are never model inputs, so filter_schema strips them long before a results table
+# is built. They are put back here, because a run that never wrote them down cannot afterwards say
+# where its errors fell.
+
+
+def test_locations_are_matched_on_the_frames_own_index_not_by_position():
+    from yg_eo_soilnet.data_manager import attach_locations
+
+    # A results frame carries the row labels of the rows it was sliced from, which is the only
+    # thing tying a prediction back to its point. Lining up by position would silently mismatch.
+    results = pd.DataFrame({"prediction": [1.0, 2.0]}, index=[7, 3])
+    latitudes = pd.Series({3: 33.0, 7: 37.0, 9: 39.0})
+
+    attach_locations(results, lat=latitudes)
+
+    assert results["lat"].tolist() == [37.0, 33.0]
+
+
+def test_plain_sequences_are_taken_in_the_frames_row_order():
+    from yg_eo_soilnet.data_manager import attach_locations
+
+    results = pd.DataFrame({"prediction": [1.0, 2.0]}, index=[7, 3])
+    attach_locations(results, point_ids=["a", "b"])
+    assert results["point_id"].tolist() == ["a", "b"]
+
+
+def test_a_missing_coordinate_is_skipped_rather_than_raising():
+    from yg_eo_soilnet.data_manager import attach_locations
+
+    # Losing the map is not a reason to lose the run.
+    results = pd.DataFrame({"prediction": [1.0, 2.0]})
+    attach_locations(results, lat=None, lon=[1.0, 2.0])
+    assert "lat" not in results.columns
+    assert results["lon"].tolist() == [1.0, 2.0]
+
+
+def test_a_wrong_length_coordinate_is_skipped_rather_than_misaligned():
+    from yg_eo_soilnet.data_manager import attach_locations
+
+    results = pd.DataFrame({"prediction": [1.0, 2.0]})
+    attach_locations(results, lat=[32.0, 33.0, 34.0])
+    assert "lat" not in results.columns
+
+
+def test_a_sklearn_results_table_records_where_each_test_point_is():
+    import numpy as np
+
+    from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
+
+    X_test = pd.DataFrame({"feature": [1.0, 2.0]}, index=[5, 9])
+    frame = ChildRunLogger._build_sklearn_evaluation_frame(
+        np.arange(2, dtype=float),
+        X_test,
+        pd.Series([0.0, 1.0], name="target_a", index=[5, 9]),
+        ["target_a"],
+        "Ridge",
+        test_locations={
+            "point_id": pd.Series({5: "p5", 9: "p9"}),
+            "lat": pd.Series({5: 32.0, 9: 33.0}),
+            "lon": pd.Series({5: -8.0, 9: -7.0}),
+        },
+    )
+
+    assert frame["point_id"].tolist() == ["p5", "p9"]
+    assert frame["lat"].tolist() == [32.0, 33.0]
+    assert frame["lon"].tolist() == [-8.0, -7.0]
+
+
+def test_a_results_table_without_locations_is_unchanged():
+    import numpy as np
+
+    from yg_eo_soilnet.data_manager import LOCATION_COLUMNS
+    from yg_eo_soilnet.logger.mlflow_loggers import ChildRunLogger
+
+    frame = ChildRunLogger._build_sklearn_evaluation_frame(
+        np.arange(2, dtype=float),
+        pd.DataFrame({"feature": [1.0, 2.0]}),
+        pd.Series([0.0, 1.0], name="target_a"),
+        ["target_a"],
+        "Ridge",
+    )
+    assert not set(LOCATION_COLUMNS) & set(frame.columns)
+
+
+def test_a_deep_learning_results_table_gets_its_positions_from_the_shared_split():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from yg_eo_soilnet.trainers.lightning_trainer import _attach_test_locations
+
+    datamodule = SimpleNamespace(
+        test_idx_=np.array([2, 0]),
+        sequence_bundle=SimpleNamespace(point_ids=["p0", "p1", "p2"]),
+        split_plan=SimpleNamespace(
+            coordinates=pd.DataFrame({"lat": [30.0, 31.0, 32.0], "lon": [-5.0, -6.0, -7.0]}, index=["p0", "p1", "p2"])
+        ),
+    )
+    frame = pd.DataFrame({"prediction": [1.0, 2.0]})
+
+    _attach_test_locations(frame, datamodule)
+
+    assert frame["point_id"].tolist() == ["p2", "p0"]
+    assert frame["lat"].tolist() == [32.0, 30.0]
+
+
+def test_the_deep_learning_map_does_not_depend_on_the_harmonic_coordinate_switch():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from yg_eo_soilnet.trainers.lightning_trainer import _attach_test_locations
+
+    # sequence_bundle.coords is empty whenever USE_HARMONIC_COORDS is off. The positions come from
+    # the shared split instead, so an unrelated model switch cannot take the map away.
+    datamodule = SimpleNamespace(
+        test_idx_=np.array([0]),
+        sequence_bundle=SimpleNamespace(point_ids=["p0", "p1"], coords=np.empty((0, 0))),
+        split_plan=SimpleNamespace(coordinates=pd.DataFrame({"lat": [30.0], "lon": [-5.0]}, index=["p0"])),
+    )
+    frame = pd.DataFrame({"prediction": [1.0]})
+
+    _attach_test_locations(frame, datamodule)
+
+    assert frame["lat"].tolist() == [30.0]
+
+
+def test_a_deep_learning_run_with_no_recorded_positions_still_gets_its_point_ids():
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from yg_eo_soilnet.trainers.lightning_trainer import _attach_test_locations
+
+    datamodule = SimpleNamespace(
+        test_idx_=np.array([1]),
+        sequence_bundle=SimpleNamespace(point_ids=["p0", "p1"]),
+        split_plan=SimpleNamespace(coordinates=None),
+    )
+    frame = pd.DataFrame({"prediction": [1.0]})
+
+    _attach_test_locations(frame, datamodule)
+
+    assert frame["point_id"].tolist() == ["p1"]
+    assert "lat" not in frame.columns

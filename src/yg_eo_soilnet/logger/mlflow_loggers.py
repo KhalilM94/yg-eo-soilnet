@@ -17,7 +17,13 @@ deep-learning model can be compared directly.
 """
 
 from yg_eo_soilnet.utils import mlflow_rpiq_score
-from yg_eo_soilnet.plot_utils import plot_leaderboard_scatter, pred_obs_panel, create_parent_pred_obs
+from yg_eo_soilnet.data_manager import attach_locations, training_points_from_plan
+from yg_eo_soilnet.plot_utils import (
+    create_parent_pred_obs,
+    plot_leaderboard_scatter,
+    pred_obs_panel,
+    residual_map,
+)
 from yg_eo_soilnet.artifacts import (
     ArtifactLayout,
     candidate_artifact_paths,
@@ -682,6 +688,70 @@ class ChildRunLogger:
         )
         return True
 
+    def _log_residual_map_artifact(
+        self,
+        evaluation_df: pd.DataFrame,
+        target: str,
+        model_name: str,
+        artifact_path: str | None = None,
+        training_points=None,
+        config=None,
+    ) -> bool:
+        """Draw ``plots/residual_map.png``: where this target's errors fell on the ground.
+
+        Returns False, having drawn nothing, when the results carry no coordinates - which is the
+        case for every run recorded before they were written into ``eval_results.csv``, and for any
+        dataset without them. The caller records that as a skip rather than a failure.
+
+        Parameters
+        ----------
+        evaluation_df : pandas.DataFrame
+            One target's test results, with ``lat``/``lon`` columns.
+        target, model_name : str
+            What is being drawn, for the label and the log line.
+        artifact_path : str, optional
+            Where the figure goes; ``plots/`` by default.
+        training_points : pandas.DataFrame, optional
+            The points the model learned from, drawn underneath as context.
+        config : Config, optional
+            Read for the basemap settings.
+
+        Returns
+        -------
+        bool
+            Whether a figure was written.
+        """
+        if evaluation_df.empty or target not in evaluation_df.columns or "prediction" not in evaluation_df.columns:
+            return False
+        if not {"lat", "lon"}.issubset(evaluation_df.columns):
+            return False
+
+        plot_eval_df = pd.DataFrame(
+            {
+                "lat": evaluation_df["lat"],
+                "lon": evaluation_df["lon"],
+                "target": evaluation_df[target],
+                "prediction": evaluation_df["prediction"],
+            }
+        )
+        if not plot_eval_df[["lat", "lon"]].notna().any().all():
+            # The columns are there but empty - this dataset has no coordinates for these points.
+            return False
+
+        log_figure(
+            residual_map(
+                plot_eval_df,
+                target_name=target,
+                training_points=training_points,
+                basemap_cache_dir=getattr(config, "RESIDUAL_MAP_CACHE_DIR", None),
+                relief=getattr(config, "RESIDUAL_MAP_RELIEF", True),
+                zoom=getattr(config, "RESIDUAL_MAP_ZOOM", None),
+            ),
+            ArtifactLayout.RESIDUAL_MAP_FILE,
+            artifact_path or ArtifactLayout.PLOTS,
+        )
+        return True
+
     def _log_checkpoint(self, best_model_path: str) -> None:
         """Save the best epoch's :term:`checkpoint` under the same name in every run, ``best.ckpt``.
 
@@ -1112,6 +1182,8 @@ class ChildRunLogger:
         extra_params=None,
         targets=None,
         export_data=None,
+        test_locations=None,
+        split_plan=None,
     ):
         """Record one trained scikit-learn model, inside the sub-run the trainer has opened.
 
@@ -1133,6 +1205,12 @@ class ChildRunLogger:
             The fitted model.
         X_train, y_train, X_test, y_test : pandas.DataFrame
             The data it was fitted on, and the test points it is scored against.
+        test_locations : pandas.DataFrame, optional
+            Where each test point is - ``point_id``, ``lat`` and ``lon``, on ``X_test``'s index.
+            Written into the results table so the run can afterwards say where its errors fell.
+        split_plan : SplitPlan, optional
+            The run's shared split. Read only for the coordinates of the points the model learned
+            from, which the residual map draws underneath the test points.
         target : str
             The :term:`target group`.
         targets : list of str, optional
@@ -1242,7 +1320,9 @@ class ChildRunLogger:
         self._log_cv_results(cv_results, target, model_name, param_names)
 
         # --- Evaluation frame, in ORIGINAL target units ---
-        eval_df = self._build_sklearn_evaluation_frame(test_predictions, X_test, y_test, target_names, model_name)
+        eval_df = self._build_sklearn_evaluation_frame(
+            test_predictions, X_test, y_test, target_names, model_name, test_locations=test_locations
+        )
         if ensemble_prediction is not None:
             # The sigma and interval columns land beside the predictions the builder just wrote, so
             # eval_results.csv carries the estimate and its uncertainty in one row per point.
@@ -1321,6 +1401,12 @@ class ChildRunLogger:
             },
         )
 
+        # Resolved once for the whole model run: every target's map draws the same points, and
+        # rebuilding the frame per target would repeat the work for nothing.
+        training_points = training_points_from_plan(
+            split_plan, enabled=getattr(config, "RESIDUAL_MAP_TRAINING_POINTS", True)
+        )
+
         def log_one(frame, target_name):
             """Everything that is about ONE target, in whichever run holds that target."""
             metrics = regression_metrics(frame[target_name], frame["prediction"])
@@ -1357,6 +1443,17 @@ class ChildRunLogger:
                     artifact_path=ArtifactLayout.plots_path(),
                     interval_label=describe_interval(ensemble.calibrators.get(target_name) if ensemble else None),
                 )
+
+                # Where those same errors fell on the ground. Skipped without coordinates.
+                if getattr(config, "RESIDUAL_MAP_ENABLED", True):
+                    self._log_residual_map_artifact(
+                        frame,
+                        target=target_name,
+                        model_name=model_name,
+                        artifact_path=ArtifactLayout.plots_path(),
+                        training_points=training_points,
+                        config=config,
+                    )
 
                 # --- Test Plots ---
                 self._log_plots(plot_functions, target_name, model_name)
@@ -1501,12 +1598,21 @@ class ChildRunLogger:
         return version
 
     @staticmethod
-    def _build_sklearn_evaluation_frame(predictions, X_test, y_test, target_names, model_name):
+    def _build_sklearn_evaluation_frame(predictions, X_test, y_test, target_names, model_name, test_locations=None):
         """Build the table of test-point results: covariates, measurements and predictions.
 
-        The same columns the deep-learning side produces, so one reader handles both.
+        The same columns the deep-learning side produces, so one reader handles both. With
+        ``test_locations``, each row also carries where its point is, which is what the residual
+        map is drawn from - here and, later, by ``replot.py``.
         """
         eval_df = pd.concat([X_test, y_test], axis=1)
+        if test_locations is not None:
+            attach_locations(
+                eval_df,
+                point_ids=test_locations.get("point_id"),
+                lat=test_locations.get("lat"),
+                lon=test_locations.get("lon"),
+            )
         predictions = np.asarray(predictions)
         if predictions.ndim == 1 or predictions.shape[1] == 1:
             eval_df["prediction"] = predictions.reshape(-1)
@@ -1752,6 +1858,12 @@ class ChildRunLogger:
             {"model": model, "bundle": bundle, "target": run_target},
         )
 
+        # Resolved once for the whole model run: every target's map draws the same points.
+        training_points = training_points_from_plan(
+            getattr(getattr(bundle, "datamodule", None), "split_plan", None),
+            enabled=getattr(config, "RESIDUAL_MAP_TRAINING_POINTS", True),
+        )
+
         def log_one(frame, target_name):
             """Everything that is about ONE target, in whichever run holds that target."""
             is_model_run = target_name == run_target
@@ -1782,6 +1894,24 @@ class ChildRunLogger:
                 )
             except Exception:
                 pred_obs_logged = False
+
+            # Where those same errors fell on the ground. Skipped without coordinates, and guarded
+            # for the same reason as the figure above: a bad figure is not worth losing the run's
+            # summary over.
+            try:
+                if getattr(config, "RESIDUAL_MAP_ENABLED", True):
+                    self._log_residual_map_artifact(
+                        frame if frame is not None else evaluation_df,
+                        target=target_name,
+                        model_name=model_name,
+                        artifact_path=ArtifactLayout.plots_path(),
+                        training_points=training_points,
+                        config=config,
+                    )
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    f"Residual map failed for {target_name}/{model_name}: {type(exc).__name__}: {exc}"
+                )
 
             uncertainty_summary = self._log_uncertainty_artifacts(
                 frame=frame if frame is not None else evaluation_df,
@@ -1852,6 +1982,24 @@ class ParentRunLogger:
         """The individual targets in a results table; see :class:`ChildRunLogger`."""
         return ChildRunLogger._resolve_target_names(evaluation_df, fallback_target)
 
+    @staticmethod
+    def _split_provenance(parent_run_id: str) -> dict:
+        """How this run's split was drawn, for the leaderboard to carry on every row.
+
+        `rmse_test` from a random holdout and `rmse_test` from a spatially held-out set are
+        different measurements. Without this, two runs' leaderboards look directly comparable when
+        they are not.
+        """
+        try:
+            params = mlflow.tracking.MlflowClient().get_run(parent_run_id).data.params  # type: ignore
+        except Exception:
+            return {}
+        return {
+            key: params[key]
+            for key in ("split_strategy", "split_test_drawn_by", "split_strategy_applies_to")
+            if key in params
+        }
+
     def _collect_leaderboard(self, parent_run_id: str):
         """Build the :term:`leaderboard`: one row per model per target, ranked by test score.
 
@@ -1878,6 +2026,9 @@ class ParentRunLogger:
         # level deeper than they used to. Searching only direct children left a joint run out of
         # the leaderboard entirely: its model run carried no target tag and its per-target runs
         # were grandchildren.
+        # Read once from the main run: every row of one leaderboard shares the same split.
+        split_provenance = self._split_provenance(parent_run_id)
+
         leaf_runs: list[Any] = []
         for child in children_of(parent_run_id):
             grandchildren = _scoring_runs(children_of(child.info.run_id))
@@ -1903,6 +2054,10 @@ class ParentRunLogger:
                 "target": target,
                 "model": model_name,
                 "framework": run_data.tags.get("framework") or model_run.data.tags.get("framework") or "unknown",
+                # How the test set was chosen. Carried on every row because a score measured on a
+                # random holdout and one measured on a spatially held-out set are not the same
+                # measurement, and two leaderboards put side by side must show that.
+                **split_provenance,
             }
             # Collect all logged metrics (rmse_test, r2_test, mae_test, ...)
             row.update(run_data.metrics)

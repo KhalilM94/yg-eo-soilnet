@@ -312,6 +312,35 @@ common:
     # meta/run_summary.json and keeps that model's regular (non-ensembled) prediction.
     fail_on_error: false
 
+  # --- Map of where the errors fell -------------------------------------------------------------
+  # Alongside plots/pred_obs.png (how big the errors are), each model gets plots/residual_map.png:
+  # its test points drawn at their real coordinates, coloured by prediction minus measurement.
+  # Blue is a model predicting too low, orange too high, and the neutral middle is no error. It
+  # answers a question the scatter plot cannot: are the errors scattered at random, or concentrated
+  # in one part of the country? Those are different problems with different fixes.
+  #
+  # It needs LAT_COLUMN/LON_COLUMN to exist in your data. Without them the figure is quietly
+  # skipped and nothing else about the run changes.
+  residual_map:
+    enabled: true
+    # Where the relief tiles and country borders are kept between runs. They are downloaded once,
+    # on the first map ever drawn. The folder below already holds every tile Morocco needs, from
+    # the paper figures - so by default nothing is downloaded at all. With neither the cache nor a
+    # network connection, the map is still drawn, just on plain ground instead of relief.
+    basemap_cache_dir: notebooks/basemap_cache
+    # false draws flat ground instead of shaded hills - quicker, and 64 fewer files to fetch the
+    # first time. The country borders are still drawn when they are cached or reachable. You do
+    # not need this setting to work offline: anything that cannot be fetched is simply left off
+    # the map, and the run carries on.
+    relief: true
+    # The detail level of the relief tiles. The cached tiles are zoom 8; asking for a different
+    # zoom means downloading a fresh set.
+    zoom: 8
+    # Draw the points the model was trained on underneath the test points, in flat grey. Worth
+    # keeping on: a large error out on its own, far from anything the model learned from, means
+    # something different from a large error in the middle of the training points.
+    show_training_points: true
+
   # --- Per-point prediction export ------------------------------------------------------------
   # Writes out "what did every model predict for this point?" for every point in your dataset,
   # identified by POINT_ID_COLUMN. Two files are written:

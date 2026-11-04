@@ -215,3 +215,18 @@ def sequential_cmap(ramp=CARBONATE_RAMP, name: str = "soilnet_sequential"):
 def minus(text: str) -> str:
     """Replace a hyphen with a real minus sign, so numbers match the axis labels."""
     return text.replace("-", "\N{MINUS SIGN}")
+
+
+#: Blue through a neutral grey to orange, for a number that is meaningfully signed - a residual,
+#: a difference between two campaigns. The midpoint grey is what makes zero readable, so a caller
+#: must set symmetric limits or the colours say the wrong thing.
+DIVERGING_RAMP = ["#104281", PROJECT_COLORS["Fertimap"], "#d3d1c9", PROJECT_COLORS["Al Moutmir"], "#9a3b12"]
+
+
+def diverging_cmap(ramp=DIVERGING_RAMP, name: str = "soilnet_diverging"):
+    """A colour ramp for a signed number, neutral in the middle.
+
+    Pair it with limits symmetric about zero (``vmin=-limit, vmax=limit``), or the neutral colour
+    lands somewhere other than zero and over- and under-prediction stop being distinguishable.
+    """
+    return LinearSegmentedColormap.from_list(name, ramp)

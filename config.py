@@ -437,6 +437,21 @@ class Config:
             "fail_on_error", "EXPORT_POINT_PREDICTIONS_FAIL_ON_ERROR", False
         )
 
+        # The map of where each model's errors fell. It needs coordinates in the data; without
+        # them the figure is skipped and the rest of the run is unaffected.
+        residual_map_config = {
+            **self._normalize_mapping(self.config.get("residual_map", {})),
+            **self._normalize_mapping(self.COMMON_CONFIG.get("residual_map", {})),
+        }
+        self.RESIDUAL_MAP_ENABLED = bool(residual_map_config.get("enabled", True))
+        # These two match yg_eo_soilnet.map_style.DEFAULT_CACHE_DIR and DEFAULT_ZOOM. They are
+        # repeated rather than imported because that module pulls in matplotlib, which the
+        # configuration has no business loading.
+        self.RESIDUAL_MAP_CACHE_DIR = residual_map_config.get("basemap_cache_dir") or "notebooks/basemap_cache"
+        self.RESIDUAL_MAP_RELIEF = bool(residual_map_config.get("relief", True))
+        self.RESIDUAL_MAP_ZOOM = int(residual_map_config.get("zoom") or 8)
+        self.RESIDUAL_MAP_TRAINING_POINTS = bool(residual_map_config.get("show_training_points", True))
+
         self.LIGHTNING_EARLY_STOPPING_MONITOR = self._get_config("LIGHTNING_EARLY_STOPPING_MONITOR", "val_loss")
         self.LIGHTNING_EARLY_STOPPING_MODE = self._get_config("LIGHTNING_EARLY_STOPPING_MODE", "min")
         self.LIGHTNING_EARLY_STOPPING_PATIENCE = self._get_config("LIGHTNING_EARLY_STOPPING_PATIENCE", 100)
