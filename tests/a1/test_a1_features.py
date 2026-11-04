@@ -11,9 +11,13 @@ import pytest
 
 from yg_eo_soilnet.a1.features import (
     N_OBS_COLUMN,
+    REGION_COLUMN,
+    SAMPLE_YEAR_COLUMN,
     A1Table,
     build_table,
+    load_points,
     percentile_column,
+    sample_years,
     timeseries_percentiles,
 )
 
@@ -143,7 +147,10 @@ def test_the_static_covariates_are_the_ones_main_py_would_use(table):
     # No lab value, coordinate, id or region is ever an input.
     for column in ("organic_matter_g_kg", "caco3_pct_total", "c_e_c_meq_100g", "clay_pct", "ph_water"):
         assert column not in static
-    for column in ("uuid", "lat", "lon", "region"):
+    for column in ("uuid", "lat", "lon", "region", "sample_year", REGION_COLUMN, SAMPLE_YEAR_COLUMN):
+        assert column not in static
+    # Nor are earlier models' predictions.
+    for column in ("caco3_pct_total__TabICL", "c_e_c_meq_100g__TabICL"):
         assert column not in static
 
 
@@ -170,9 +177,9 @@ def test_the_table_has_one_row_per_point_indexed_by_its_id(table, a1_demo_dir):
 def test_a_region_kept_in_the_targets_file_still_arrives(table, a1_demo_dir):
     targets = pd.read_csv(a1_demo_dir / "targets.csv").set_index("uuid")
 
-    assert table.region_column == "region"
+    assert table.region_column == REGION_COLUMN
     pd.testing.assert_series_equal(
-        table.frame["region"].sort_index(), targets["region"].sort_index(), check_names=False
+        table.frame[REGION_COLUMN].sort_index(), targets["region"].sort_index(), check_names=False
     )
 
 
@@ -234,13 +241,66 @@ def test_a_lab_column_that_was_not_carried_over_names_the_settings_to_change(a1_
 
 
 def test_a_region_column_in_neither_file_is_reported(a1_settings):
-    settings = a1_settings(regions={"column": "province"})
+    settings = a1_settings(regions={"source": "column", "column": "province"})
     with pytest.raises(ValueError, match="province"):
         build_table(settings)
 
 
 def test_without_a_region_column_there_is_none_in_the_table(a1_settings):
-    table = build_table(a1_settings(regions={"column": None}))
+    table = build_table(a1_settings(regions={"source": None}))
 
     assert table.region_column is None
-    assert "region" not in table.frame.columns
+    assert REGION_COLUMN not in table.frame.columns
+
+
+def test_regions_from_polygons_match_the_region_column(a1_settings):
+    from_column = load_points(a1_settings())
+    from_polygons = load_points(
+        a1_settings(regions={"source": "polygons", "polygons_path": "regions.geojson", "name_field": "name"})
+    )
+
+    pd.testing.assert_series_equal(from_polygons.frame[REGION_COLUMN], from_column.frame[REGION_COLUMN])
+
+
+def test_load_points_needs_no_time_series(a1_settings):
+    temporal = {"enabled": False, "time_column": "observation_date", "modality_prefix_map": {"s2": "S2_"}}
+    points = load_points(a1_settings(main_overrides={"temporal": temporal}))
+
+    assert points.percentile_columns == ()
+    assert points.feature_columns == points.static_columns
+
+
+def test_the_sampling_year_arrives_as_whole_years(a1_settings, a1_demo_dir):
+    points = load_points(a1_settings())
+    targets = pd.read_csv(a1_demo_dir / "targets.csv").set_index("uuid")
+
+    assert points.sample_year_column == SAMPLE_YEAR_COLUMN
+    assert points.frame[SAMPLE_YEAR_COLUMN].dtype == "Int64"
+    assert points.frame[SAMPLE_YEAR_COLUMN].sort_index().tolist() == targets["sample_year"].sort_index().tolist()
+
+
+def test_the_sampling_year_can_come_from_a_separate_table(a1_settings, a1_demo_dir, tmp_path):
+    targets = pd.read_csv(a1_demo_dir / "targets.csv")
+    # One row per depth, as in the real soil analysis table, with dates rather than years.
+    dates = pd.concat([targets, targets])[["uuid", "sample_year"]]
+    dates["date"] = dates["sample_year"].astype(str) + "/06/30"
+    path = tmp_path / "analyses.csv"
+    dates[["uuid", "date"]].to_csv(path, index=False)
+
+    points = load_points(a1_settings(sample_year={"column": "date", "file": str(path)}))
+
+    expected = targets.set_index("uuid")["sample_year"]
+    assert points.frame[SAMPLE_YEAR_COLUMN].reindex(expected.index).tolist() == expected.tolist()
+
+
+def test_a_prediction_column_that_is_not_in_the_data_is_simply_not_listed(a1_settings):
+    points = load_points(a1_settings(preflight={"prediction_columns": {"caco3_pct_total": "nowhere"}}))
+
+    assert points.prediction_columns == {}
+
+
+def test_dates_in_any_usual_layout_become_years_and_unreadable_ones_are_left_out():
+    years = sample_years(pd.Series(["2019/12/31", "2018-03-02", "not a date", None]))
+
+    assert years.tolist()[:2] == [2019, 2018]
+    assert years.isna().tolist()[2:] == [True, True]

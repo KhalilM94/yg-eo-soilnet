@@ -67,7 +67,13 @@ def test_a_file_with_only_main_config_takes_every_default(main_config):
     assert settings.percentiles.quantiles == (10.0, 25.0, 50.0, 75.0, 90.0)
     assert settings.auxiliary.model == "TabICL"
     assert settings.auxiliary.n_folds == 5
-    assert settings.regions.column is None
+    assert settings.regions.source is None
+    assert settings.sample_year.column is None
+    assert settings.preflight.min_cell_points == 30
+    assert settings.preflight.prediction_columns == {
+        "caco3_pct_total": "caco3_pct_total__TabICL",
+        "c_e_c_meq_100g": "c_e_c_meq_100g__TabICL",
+    }
     assert settings.tracking.experiment_name == "Paper_A1"
 
 
@@ -127,14 +133,62 @@ def test_every_carbonate_class_needs_a_name(main_config):
         _settings(main_config, carbonate={"edges": [2, 10, 25], "labels": ["low", "high"]})
 
 
-def test_regions_come_from_a_column_or_from_polygons_not_both(main_config):
-    with pytest.raises(ValueError, match="not both"):
-        _settings(main_config, regions={"column": "region", "polygons_path": "r.geojson", "name_field": "name"})
+def test_regions_from_a_column_need_only_its_name(main_config):
+    regions = _settings(main_config, regions={"source": "column", "column": "province"}).regions
+    assert (regions.source, regions.column) == ("column", "province")
 
 
-def test_region_polygons_need_the_field_holding_the_names(main_config):
-    with pytest.raises(ValueError, match="name_field"):
-        _settings(main_config, regions={"polygons_path": "r.geojson"})
+def test_regions_from_polygons_need_the_file_and_the_name_field(main_config):
+    regions = _settings(
+        main_config, regions={"source": "polygons", "polygons_path": "r.geojson", "name_field": "name"}
+    ).regions
+    assert (regions.polygons_path, regions.name_field) == ("r.geojson", "name")
+
+
+@pytest.mark.parametrize(
+    "regions, message",
+    [
+        ({"source": "column"}, "must name the column"),
+        ({"source": "polygons", "polygons_path": "r.geojson"}, "name_field"),
+        ({"source": "polygons", "name_field": "name"}, "polygons_path"),
+        ({"source": "column", "column": "region", "polygons_path": "r.geojson"}, "belongs to source 'polygons'"),
+        (
+            {"source": "polygons", "polygons_path": "r.geojson", "name_field": "name", "column": "region"},
+            "belongs to source 'column'",
+        ),
+        ({"column": "region"}, "regions.source is not"),
+        ({"source": "shapefile"}, "must be one of"),
+    ],
+)
+def test_a_region_source_that_is_half_set_up_or_mixed_is_refused(main_config, regions, message):
+    with pytest.raises(ValueError, match=message):
+        _settings(main_config, regions=regions)
+
+
+def test_a_sampling_year_file_needs_the_column_to_read(main_config):
+    with pytest.raises(ValueError, match="sample_year.column"):
+        _settings(main_config, sample_year={"file": "analyses.csv"})
+
+
+def test_the_preflight_thresholds_are_checked(main_config):
+    with pytest.raises(ValueError, match="overfit_r2_gap"):
+        _settings(main_config, preflight={"overfit_r2_gap": -0.1})
+    with pytest.raises(ValueError, match="min_cell_points"):
+        _settings(main_config, preflight={"min_cell_points": 0})
+    with pytest.raises(ValueError, match="prediction_columns"):
+        _settings(main_config, preflight={"prediction_columns": ["caco3_pct_total__TabICL"]})
+
+
+def test_the_real_settings_read_the_baseline_columns_as_the_earlier_predictions():
+    settings = load_settings(str(PROJECT_ROOT / "configs" / "a1" / "a1.yml"))
+    assert settings.preflight.prediction_columns == {
+        "caco3_pct_total": "caco3_pct_total_baseline",
+        "c_e_c_meq_100g": "c_e_c_meq_100g_baseline",
+    }
+    assert (settings.sample_year.column, settings.sample_year.file) == (
+        "date",
+        "Morocco_soil_analysis_filtered_uuid_roadsafe.csv",
+    )
 
 
 def test_fewer_than_two_folds_is_refused(main_config):

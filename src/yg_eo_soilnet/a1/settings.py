@@ -17,10 +17,30 @@ from typing import Any, Mapping, Optional
 
 import yaml
 
-#: The FAO calcareousness classes, in % total CaCO3: slightly, moderately, strongly and extremely
-#: calcareous. The same edges as the paper figures (notebook cell 20).
-FAO_CARBONATE_EDGES = (2.0, 10.0, 25.0)
-FAO_CARBONATE_LABELS = ("< 2", "2–10", "10–25", "≥ 25")
+# Re-exported: the classes are defined in strata, beside the function that cuts them.
+from yg_eo_soilnet.a1.strata import FAO_CARBONATE_EDGES, FAO_CARBONATE_LABELS
+
+__all__ = [
+    "FAO_CARBONATE_EDGES",
+    "FAO_CARBONATE_LABELS",
+    "A1Settings",
+    "AuxiliarySettings",
+    "CarbonateSettings",
+    "PercentileSettings",
+    "PreflightSettings",
+    "RegionSettings",
+    "SampleYearSettings",
+    "TrackingSettings",
+    "load_settings",
+    "settings_from_mapping",
+]
+
+#: ``regions.source: column`` - each point's region is read from a column of the data.
+REGIONS_FROM_COLUMN = "column"
+#: ``regions.source: polygons`` - each point's region is the outline in a polygon file it falls in.
+REGIONS_FROM_POLYGONS = "polygons"
+#: The values ``regions.source`` accepts, besides null (no regions).
+REGION_SOURCES = (REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS)
 
 
 @dataclass(frozen=True)
@@ -91,21 +111,71 @@ class RegionSettings:
 
     Attributes
     ----------
+    source : {"column", "polygons"} or None
+        Which of the two it is; None means the data has no regions, and the experiments that need
+        them say so rather than run.
     column : str or None
-        A column already holding each point's region.
+        With ``source: column``, the column holding each point's region. It may sit in the static
+        file or in the targets file.
     polygons_path : str or None
-        A polygon file (GeoJSON, GeoPackage, shapefile) read with geopandas. A relative path is
-        taken from the data folder, like the data files themselves.
+        With ``source: polygons``, a polygon file (GeoJSON, GeoPackage, shapefile) read with
+        geopandas. A relative path is taken from the data folder, like the data files themselves.
     name_field : str or None
-        The polygon file's field holding each region's name.
+        With ``source: polygons``, the polygon file's field holding each region's name.
     min_points : int
         A region with fewer points than this takes no part in the transfer experiments.
     """
 
+    source: Optional[str] = None
     column: Optional[str] = None
     polygons_path: Optional[str] = None
     name_field: Optional[str] = None
     min_points: int = 30
+
+
+@dataclass(frozen=True)
+class SampleYearSettings:
+    """Where each point's sampling year comes from.
+
+    Attributes
+    ----------
+    column : str or None
+        A column holding the sampling date or year. A date has its year taken; a number is used as
+        it is. None means the year is unknown, and the diagnostics that need it are skipped.
+    file : str or None
+        A separate table holding that column with the point id, when neither data file has it. A
+        relative path is taken from the data folder. A point listed more than once keeps its first
+        year.
+    """
+
+    column: Optional[str] = None
+    file: Optional[str] = None
+
+
+def _default_prediction_columns() -> dict[str, str]:
+    """``<target>__TabICL`` for each default auxiliary target."""
+    return {target: f"{target}__TabICL" for target in AuxiliarySettings().targets}
+
+
+@dataclass(frozen=True)
+class PreflightSettings:
+    """The thresholds of the pre-flight diagnostics (``experiments/a1/preflight.py``).
+
+    Attributes
+    ----------
+    min_cell_points : int
+        A region x carbonate-class cell with fewer points than this is flagged: too few to fit or
+        score a model on.
+    overfit_r2_gap : float
+        An existing prediction column whose R² on the training points beats its R² on the test
+        points by more than this is flagged, as the mark of a model that saw those training points.
+    prediction_columns : dict of str to str
+        Lab column to the column holding an earlier model's prediction of it.
+    """
+
+    min_cell_points: int = 30
+    overfit_r2_gap: float = 0.1
+    prediction_columns: dict[str, str] = field(default_factory=_default_prediction_columns)
 
 
 @dataclass(frozen=True)
@@ -138,7 +208,7 @@ class A1Settings:
         The scikit-learn model-list entries trained for SOM.
     seed : int
         The random seed of everything A1 adds (folds, per-region splits).
-    percentiles, auxiliary, carbonate, regions, tracking
+    percentiles, auxiliary, carbonate, regions, sample_year, preflight, tracking
         The settings of each part; see their own classes.
     source_path : str or None
         The file these settings were read from.
@@ -152,6 +222,8 @@ class A1Settings:
     auxiliary: AuxiliarySettings = field(default_factory=AuxiliarySettings)
     carbonate: CarbonateSettings = field(default_factory=CarbonateSettings)
     regions: RegionSettings = field(default_factory=RegionSettings)
+    sample_year: SampleYearSettings = field(default_factory=SampleYearSettings)
+    preflight: PreflightSettings = field(default_factory=PreflightSettings)
     tracking: TrackingSettings = field(default_factory=TrackingSettings)
     source_path: Optional[str] = None
 
@@ -196,7 +268,9 @@ def load_settings(path: str) -> A1Settings:
     >>> settings.som_target, settings.auxiliary.targets
     ('organic_matter_g_kg', ('caco3_pct_total', 'c_e_c_meq_100g'))
     >>> settings.carbonate.labels
-    ('< 2', '2–10', '10–25', '≥ 25')
+    ('<2', '2-10', '10-25', '>=25')
+    >>> settings.regions.source, settings.regions.column
+    ('column', 'region')
     """
     if not os.path.exists(path):
         raise FileNotFoundError(f"A1 settings file not found: {path}")
@@ -239,6 +313,8 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "auxiliary",
         "carbonate",
         "regions",
+        "sample_year",
+        "preflight",
         "tracking",
     }
     _refuse_unknown(raw, known, "the A1 settings")
@@ -260,6 +336,8 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         auxiliary=_section(raw, "auxiliary", AuxiliarySettings, _auxiliary_kwargs),
         carbonate=_section(raw, "carbonate", CarbonateSettings, _carbonate_kwargs),
         regions=_section(raw, "regions", RegionSettings, _region_kwargs),
+        sample_year=_section(raw, "sample_year", SampleYearSettings, _sample_year_kwargs),
+        preflight=_section(raw, "preflight", PreflightSettings, _preflight_kwargs),
         tracking=_section(raw, "tracking", TrackingSettings, _tracking_kwargs),
         source_path=source_path,
     )
@@ -318,11 +396,33 @@ def _carbonate_kwargs(values: Mapping) -> dict:
 def _region_kwargs(values: Mapping) -> dict:
     """The region section's settings, converted to their types."""
     kwargs: dict[str, Any] = {}
-    for key in ("column", "polygons_path", "name_field"):
+    for key in ("source", "column", "polygons_path", "name_field"):
         if values.get(key) is not None:
             kwargs[key] = str(values[key])
     if "min_points" in values:
         kwargs["min_points"] = int(values["min_points"])
+    return kwargs
+
+
+def _sample_year_kwargs(values: Mapping) -> dict:
+    """The sample-year section's settings, converted to their types."""
+    return {key: str(values[key]) for key in ("column", "file") if values.get(key) is not None}
+
+
+def _preflight_kwargs(values: Mapping) -> dict:
+    """The pre-flight section's settings, converted to their types."""
+    kwargs: dict[str, Any] = {}
+    if "min_cell_points" in values:
+        kwargs["min_cell_points"] = int(values["min_cell_points"])
+    if "overfit_r2_gap" in values:
+        kwargs["overfit_r2_gap"] = float(values["overfit_r2_gap"])
+    if "prediction_columns" in values:
+        columns = values["prediction_columns"] or {}
+        if not isinstance(columns, Mapping):
+            raise ValueError(
+                f"preflight.prediction_columns must map each lab column to its prediction column; got {columns!r}"
+            )
+        kwargs["prediction_columns"] = {str(target): str(column) for target, column in columns.items()}
     return kwargs
 
 
@@ -365,14 +465,54 @@ def _validate(settings: A1Settings) -> None:
             f"got {len(carbonate.labels)}"
         )
 
-    regions = settings.regions
-    if regions.column and regions.polygons_path:
-        raise ValueError("Set regions.column or regions.polygons_path, not both: they would disagree.")
-    if regions.polygons_path and not regions.name_field:
-        raise ValueError("regions.polygons_path needs regions.name_field, the field holding each region's name.")
-    for name, value in (("carbonate.min_points", carbonate.min_points), ("regions.min_points", regions.min_points)):
+    _validate_regions(settings.regions)
+
+    if settings.sample_year.file and not settings.sample_year.column:
+        raise ValueError("sample_year.file needs sample_year.column, the column in it holding the date or year.")
+
+    preflight = settings.preflight
+    if preflight.overfit_r2_gap < 0:
+        raise ValueError(f"preflight.overfit_r2_gap must not be negative; got {preflight.overfit_r2_gap}")
+
+    for name, value in (
+        ("carbonate.min_points", carbonate.min_points),
+        ("regions.min_points", settings.regions.min_points),
+        ("preflight.min_cell_points", preflight.min_cell_points),
+    ):
         if value < 1:
             raise ValueError(f"{name} must be at least 1; got {value}")
+
+
+def _validate_regions(regions: RegionSettings) -> None:
+    """Refuse a region source that is half set up, or set up two ways at once."""
+    polygon_keys = {"polygons_path": regions.polygons_path, "name_field": regions.name_field}
+    if regions.source is None:
+        stray = [key for key, value in {"column": regions.column, **polygon_keys}.items() if value]
+        if stray:
+            raise ValueError(
+                f"regions.{stray[0]} is set but regions.source is not. Set regions.source to "
+                f"{REGIONS_FROM_COLUMN!r} or {REGIONS_FROM_POLYGONS!r} to say which one to use."
+            )
+        return
+    if regions.source not in REGION_SOURCES:
+        raise ValueError(f"regions.source must be one of {list(REGION_SOURCES)} or null; got {regions.source!r}")
+
+    if regions.source == REGIONS_FROM_COLUMN:
+        if not regions.column:
+            raise ValueError("regions.source is 'column', so regions.column must name the column.")
+        stray = [key for key, value in polygon_keys.items() if value]
+        if stray:
+            raise ValueError(f"regions.{stray[0]} belongs to source 'polygons', but regions.source is 'column'.")
+        return
+
+    missing = [key for key, value in polygon_keys.items() if not value]
+    if missing:
+        raise ValueError(
+            f"regions.source is 'polygons', so regions.{missing[0]} must be set: the polygon file, and the "
+            "field in it holding each region's name."
+        )
+    if regions.column:
+        raise ValueError("regions.column belongs to source 'column', but regions.source is 'polygons'.")
 
 
 def _refuse_unknown(values: Mapping, known: set, where: str) -> None:

@@ -1,14 +1,16 @@
 # Columns of the A1 demo dataset (python experiments/a1/make_demo_data.py). A trimmed copy of
 # configs/data_spec.yml, which explains every setting in detail.
 
-# Every lab measurement in the demo. None of them is ever an ordinary input; A1 reads CaCO3 and
-# CEC through its own leak-free predictions instead.
+# Every lab measurement in the demo, and the earlier predictions of two of them. None of them is
+# ever an ordinary input; A1 reads CaCO3 and CEC through its own leak-free predictions instead.
 LABEL_COLUMNS:
   - organic_matter_g_kg
   - clay_pct
   - ph_water
   - caco3_pct_total
   - c_e_c_meq_100g
+  - caco3_pct_total__TabICL
+  - c_e_c_meq_100g__TabICL
 # The lab columns live in the targets file, so they have to be carried over when it is joined.
 CARRY_LABEL_COLUMNS: true
 TARGET_COLUMNS:
@@ -17,12 +19,14 @@ MULTI_TARGET_MODE: per_target
 USE_HARMONIC_COORDS: false
 USE_CONTEXT_FEATURES: false
 CONTEXT_FEATURES: []
-# `region` says where a point is, not what its soil is like, so it is never an input.
+# `region` and `sample_year` say where and when a point was sampled, not what its soil is like,
+# so they are never inputs.
 IGNORED_COLUMNS: &ignored_columns
   - uuid
   - lat
   - lon
   - region
+  - sample_year
 ELIMINATED_FEATURES: *ignored_columns
 CATEGORICAL_FEATURES:
   - landform_class

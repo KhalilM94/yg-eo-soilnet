@@ -22,17 +22,32 @@ auxiliary:
 carbonate:
   column: caco3_pct_total
   edges: [2, 10, 25]
-  labels: ["< 2", "2–10", "10–25", "≥ 25"]
+  labels: ["<2", "2-10", "10-25", ">=25"]
   min_points: 30
 
 # The demo carries its regions both ways: as a `region` column, used here, and as outlines in
-# experiments/a1/demo_data/regions.geojson (field `name`). To try the outlines instead, set
-# column: null, polygons_path: regions.geojson and name_field: name.
+# experiments/a1/demo_data/regions.geojson. To try the outlines instead:
+#   source: polygons, column: null, polygons_path: regions.geojson, name_field: name
 regions:
+  source: column
   column: region
   polygons_path: null
   name_field: null
   min_points: 30
+
+sample_year:
+  column: sample_year
+  file: null
+
+# The demo's earlier predictions are deliberately leaky, so the pre-flight check flags them:
+#   python experiments/a1/preflight.py --config configs/a1/a1_demo.yml \
+#       --split-plan experiments/a1/demo_data/split_assignments.parquet
+preflight:
+  min_cell_points: 30
+  overfit_r2_gap: 0.1
+  prediction_columns:
+    caco3_pct_total: caco3_pct_total__TabICL
+    c_e_c_meq_100g: c_e_c_meq_100g__TabICL
 
 tracking:
   experiment_name: Paper_A1_Demo

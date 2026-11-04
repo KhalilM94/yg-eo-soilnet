@@ -12,10 +12,17 @@ monthly time series it reuses, with what A1 needs and the ordinary demo lacks:
 - **organic matter** that depends on carbonate and differs from region to region, so carbonate
   stratification (b) and transfer between regions (c, d) have a pattern to find. As in the real
   soils, organic matter darkens the shortwave-infrared reflectance only of non-calcareous soils.
+- **a sampling year** (``sample_year``, 2017-2020).
+- **earlier predictions of CaCO3 and CEC** (``caco3_pct_total__TabICL``, ``c_e_c_meq_100g__TabICL``)
+  that are deliberately **leaky**: much closer to the truth on the training points of the saved
+  split than on the others, as if the model had been fitted on them. They are there so the
+  pre-flight check that looks for exactly that has something to find.
+- **the split** those predictions leak through, saved as ``split_assignments.parquet`` in the same
+  form as a run's ``data_splits/split_assignments.parquet``.
 
-Nothing in it is a real measurement. Four files are written to ``experiments/a1/demo_data/``:
-``static.csv``, ``targets.csv``, ``timeseries.csv`` and ``regions.geojson``. Run it from the
-repository root::
+Nothing in it is a real measurement. Five files are written to ``experiments/a1/demo_data/``:
+``static.csv``, ``targets.csv``, ``timeseries.csv``, ``regions.geojson`` and
+``split_assignments.parquet``. Run it from the repository root::
 
     pixi run -e core python experiments/a1/make_demo_data.py
     # or: python experiments/a1/make_demo_data.py --n-points 1200 --seed 0
@@ -27,8 +34,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -38,6 +47,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from examples.make_demo_data import make_static, make_targets, make_timeseries  # noqa: E402
+from yg_eo_soilnet.datamodules.splitting import TRAIN, UnifiedSplitter  # noqa: E402
 
 OUTPUT_FOLDER = Path(__file__).resolve().parent / "demo_data"
 
@@ -64,6 +74,22 @@ BAREST_BANDS = ("s2_b2_barest", "s2_b4_barest", "s2_b8_barest", "s2_b11_barest",
 SWIR_BANDS = ("s2_b11_barest", "s2_b12_barest")
 #: Below this CaCO3 (%), organic matter shows in the reflectance; above it, carbonate masks it.
 SOM_VISIBLE_BELOW_CACO3 = 10.0
+
+#: The years the demo points were sampled in.
+SAMPLE_YEARS = (2017, 2018, 2019, 2020)
+
+#: The split the leaky predictions leak through: the sizes and seed of
+#: configs/a1/demo_main_config.yml, so it is the split an A1 run on the demo would draw.
+SPLIT_SETTINGS = SimpleNamespace(
+    SPLIT_HOLDOUT_STRATEGY="random", SPLIT_TEST_SIZE=0.15, SPLIT_VAL_SIZE=0.15, SPLIT_SEED=42
+)
+#: The leaky predictions' error, as a share of each property's spread: small on the training points,
+#: as from a model that saw them, and three times larger elsewhere.
+LEAK_NOISE_TRAIN = 0.2
+LEAK_NOISE_HELD_OUT = 0.6
+#: The properties given leaky predictions, and the suffix of their prediction columns.
+LEAKY_PROPERTIES = ("caco3_pct_total", "c_e_c_meq_100g")
+PREDICTION_SUFFIX = "__TabICL"
 
 
 def region_of(lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
@@ -103,8 +129,8 @@ def region_polygons() -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
-def make_a1_data(n_points: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Invent the three tables of the A1 demo dataset.
+def make_a1_data(n_points: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Invent the four tables of the A1 demo dataset.
 
     Parameters
     ----------
@@ -118,9 +144,13 @@ def make_a1_data(n_points: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, 
     static : pandas.DataFrame
         One row per point: ``uuid`` and the static covariates (no coordinates).
     targets : pandas.DataFrame
-        One row per point: ``uuid``, ``lat``, ``lon``, the lab values and ``region``.
+        One row per point: ``uuid``, ``lat``, ``lon``, the lab values, ``region``, ``sample_year`` and
+        the leaky predictions.
     timeseries : pandas.DataFrame
         One row per point per observed month.
+    split : pandas.DataFrame
+        The split the predictions leak through, as :meth:`SplitPlan.to_frame
+        <yg_eo_soilnet.datamodules.splitting.SplitPlan.to_frame>` writes it.
     """
     rng = np.random.default_rng(seed)
     static = make_static(n_points, rng)
@@ -169,7 +199,43 @@ def make_a1_data(n_points: int, seed: int) -> tuple[pd.DataFrame, pd.DataFrame, 
             "region": regions,
         }
     )
-    return static.drop(columns=["lat", "lon"]), targets, timeseries
+    # Drawn after everything above, so adding them did not change any earlier value.
+    targets["sample_year"] = rng.choice(SAMPLE_YEARS, size=n_points)
+    split = demo_split(targets)
+    targets = add_leaky_predictions(targets, split, rng)
+    return static.drop(columns=["lat", "lon"]), targets, timeseries, split
+
+
+def demo_split(targets: pd.DataFrame) -> pd.DataFrame:
+    """Split the demo points the way an A1 run on the demo would, and return the saved form.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``point_id``, ``split``, ``lat`` and ``lon``, one row per point.
+    """
+    splitter = UnifiedSplitter(SPLIT_SETTINGS, logging.getLogger(__name__))
+    coordinates = targets.set_index("uuid")[["lat", "lon"]]
+    plan = splitter.build_plan(pd.Index(targets["uuid"]), coordinates=coordinates)
+    return plan.to_frame()
+
+
+def add_leaky_predictions(targets: pd.DataFrame, split: pd.DataFrame, rng: np.random.Generator) -> pd.DataFrame:
+    """Add a prediction column per property in :data:`LEAKY_PROPERTIES`, too good on the training points.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``targets`` with ``<property>__TabICL`` columns added.
+    """
+    in_training = targets["uuid"].map(split.set_index("point_id")["split"]).eq(TRAIN).to_numpy()
+    noise_share = np.where(in_training, LEAK_NOISE_TRAIN, LEAK_NOISE_HELD_OUT)
+    targets = targets.copy()
+    for column in LEAKY_PROPERTIES:
+        truth = targets[column].to_numpy()
+        predicted = truth + rng.normal(0, 1, len(truth)) * noise_share * truth.std()
+        targets[f"{column}{PREDICTION_SUFFIX}"] = np.clip(predicted, 0, None).round(2)
+    return targets
 
 
 def main(argv: list[str] | None = None) -> Path:
@@ -191,16 +257,17 @@ def main(argv: list[str] | None = None) -> Path:
     parser.add_argument("--out", type=Path, default=OUTPUT_FOLDER, help="Folder to write into.")
     args = parser.parse_args(argv)
 
-    static, targets, timeseries = make_a1_data(args.n_points, args.seed)
+    static, targets, timeseries, split = make_a1_data(args.n_points, args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
     static.to_csv(args.out / "static.csv", index=False)
     targets.to_csv(args.out / "targets.csv", index=False)
     timeseries.to_csv(args.out / "timeseries.csv", index=False)
     with open(args.out / "regions.geojson", "w") as handle:
         json.dump(region_polygons(), handle)
+    split.to_parquet(args.out / "split_assignments.parquet", index=False)
     print(
         f"Wrote {len(static)} points and {len(timeseries)} monthly observations to {args.out}/ "
-        "(static.csv, targets.csv, timeseries.csv, regions.geojson)."
+        "(static.csv, targets.csv, timeseries.csv, regions.geojson, split_assignments.parquet)."
     )
     return args.out
 

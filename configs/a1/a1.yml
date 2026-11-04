@@ -34,25 +34,55 @@ auxiliary:
   n_folds: 5
 
 # The FAO calcareousness classes: slightly (< 2 %), moderately (2-10 %), strongly (10-25 %) and
-# extremely (>= 25 %) calcareous. A value on an edge belongs to the class above it. Scores are
-# broken down by measured CaCO3; the per-class models route each point by its PREDICTED CaCO3,
-# which is what is known when a new point is predicted.
+# extremely (>= 25 %) calcareous. A value on an edge belongs to the class above it, as in the paper
+# figures. Scores are broken down by measured CaCO3; the per-class models route each point by its
+# PREDICTED CaCO3, which is what is known when a new point is predicted.
 carbonate:
   column: caco3_pct_total
   edges: [2, 10, 25]
-  labels: ["< 2", "2–10", "10–25", "≥ 25"]
+  labels: ["<2", "2-10", "10-25", ">=25"]
   # A class with fewer points gets no model of its own; its points use the all-classes model.
   min_points: 30
 
-# Where each point's region comes from, for the transfer experiments: EITHER a column of the data
-# OR a polygon file (GeoJSON, GeoPackage, shapefile; relative paths are taken from the data folder)
-# with the field holding each region's name. Fill one in before running run_transfer.py.
+# Where each point's region comes from, for the region breakdowns and the transfer experiments.
+# Choose with `source`:
+#   column    - a column of the data already names each point's region. It may be in the static
+#               file or the targets file; it is never used as an input.
+#                 source: column
+#                 column: <the column's name>
+#   polygons  - a file of region outlines (GeoJSON, GeoPackage, shapefile; a relative path is taken
+#               from the data folder). It is reprojected to latitude/longitude, and each point takes
+#               the name of the outline it falls in; a point in none has no region.
+#                 source: polygons
+#                 polygons_path: <the file>
+#                 name_field: <the field holding each region's name>
+#   null      - no regions yet: the steps that need them say so and are skipped.
 regions:
+  source: null
   column: null
   polygons_path: null
   name_field: null
   # A region with fewer points takes no part in the transfer experiments.
   min_points: 30
+
+# When each point was sampled, for the pre-flight region x year table. `column` holds a date (its
+# year is taken) or a year. Neither data file has one, so it is read from the soil analysis table
+# and joined by point id; a point listed there more than once (one row per depth) keeps its first.
+sample_year:
+  column: date
+  file: Morocco_soil_analysis_filtered_uuid_roadsafe.csv
+
+# The pre-flight diagnostics: python experiments/a1/preflight.py --config configs/a1/a1.yml
+preflight:
+  # A region x carbonate-class cell with fewer points is flagged as too thin to fit or score on.
+  min_cell_points: 30
+  # An earlier prediction column whose R2 on the training points beats its R2 on the test points by
+  # more than this is flagged: the mark of a model that saw those training points' lab values.
+  overfit_r2_gap: 0.1
+  # Each lab column, and the column holding the earlier TabICL prediction of it.
+  prediction_columns:
+    caco3_pct_total: caco3_pct_total_baseline
+    c_e_c_meq_100g: c_e_c_meq_100g_baseline
 
 tracking:
   # The MLflow experiment every A1 run goes into.
