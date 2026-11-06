@@ -68,6 +68,11 @@ def main(argv: list[str] | None = None) -> RunResult:
         help="Clear a run folder made from other settings or plans, instead of refusing to add to it.",
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Do not record the run in MLflow.")
+    parser.add_argument(
+        "--dev-mode",
+        action="store_true",
+        help="The quickest run through every step (XGBoost in both stages, untuned): its scores mean nothing.",
+    )
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
@@ -80,6 +85,7 @@ def main(argv: list[str] | None = None) -> RunResult:
         groups=args.groups,
         restart=args.restart,
         tracking=not args.no_mlflow,
+        dev_mode=args.dev_mode,
     )
     print(f"{len(result.computed)} file(s) written, {len(result.skipped)} already done, in {result.run_dir}/")
     for note in result.notes:

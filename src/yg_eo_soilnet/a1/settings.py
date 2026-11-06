@@ -14,7 +14,7 @@ configuration and the data.
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional
 
 import yaml
@@ -357,6 +357,45 @@ class A1Settings:
         from config import Config  # local: the project's Config sits at the repository root
 
         return Config(config_path=self.main_config_path)
+
+
+#: The model stages of a dev-mode run (``run_a1.py --dev-mode``): XGBoost in both, small and untuned.
+DEV_MODE_STAGE1 = StageSettings(estimator="XGBoost", init_args={"n_estimators": 50})
+DEV_MODE_STAGE2 = StageSettings(
+    estimator="XGBoost",
+    init_args={"n_estimators": 50},
+    params={"model__max_depth": [3], "model__learning_rate": [0.1]},
+)
+#: The inner cross-validation folds of a dev-mode run.
+DEV_MODE_INNER_CV_FOLDS = 2
+
+
+def dev_mode_settings(settings: A1Settings) -> A1Settings:
+    """A copy of ``settings`` cut down to the quickest run that still goes through every step.
+
+    Behind ``run_a1.py --dev-mode``, as ``main.py --dev-mode`` is for the main pipeline: it shows
+    that every step runs, in minutes, so nothing it scores is worth reading. Both stages become a
+    50-tree XGBoost with a single setting to try (so stage 2 is not tuned), and the inner
+    cross-validation has two folds. Everything else - the data, the plans, the groups - is kept.
+
+    Parameters
+    ----------
+    settings : A1Settings
+
+    Returns
+    -------
+    A1Settings
+        A new object; ``settings`` is unchanged.
+
+    Examples
+    --------
+    >>> quick = dev_mode_settings(load_settings("configs/a1/a1_demo.yml"))
+    >>> quick.stage1.estimator, quick.stage2.estimator, quick.inner_cv_folds
+    ('XGBoost', 'XGBoost', 2)
+    >>> quick.target
+    'organic_matter_g_kg'
+    """
+    return replace(settings, stage1=DEV_MODE_STAGE1, stage2=DEV_MODE_STAGE2, inner_cv_folds=DEV_MODE_INNER_CV_FOLDS)
 
 
 def load_settings(path: str) -> A1Settings:

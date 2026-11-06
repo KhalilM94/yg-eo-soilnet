@@ -262,3 +262,15 @@ def test_the_main_configuration_is_read_through_the_projects_own_config(a1_setti
 def test_a1_settings_is_constructible_directly_with_its_defaults(main_config):
     settings = A1Settings(main_config_path=str(main_config))
     assert settings.stage2.estimator == "XGBoost"
+
+
+def test_dev_mode_cuts_both_stages_down_and_leaves_the_rest():
+    from yg_eo_soilnet.a1.settings import dev_mode_settings, load_settings
+
+    full = load_settings("configs/a1/a1_demo.yml")
+    quick = dev_mode_settings(full)
+    assert quick.stage1.estimator == quick.stage2.estimator == "XGBoost"
+    assert all(len(values) == 1 for values in quick.stage2.params.values())  # one setting to try: untuned
+    assert quick.inner_cv_folds == 2
+    assert full.stage1.estimator == "TabICL" and full.inner_cv_folds == 5  # the original is untouched
+    assert dataclasses.replace(quick, stage1=full.stage1, stage2=full.stage2, inner_cv_folds=5) == full

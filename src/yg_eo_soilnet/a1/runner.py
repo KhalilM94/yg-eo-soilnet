@@ -39,7 +39,7 @@ import json
 import logging
 import os
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -51,6 +51,7 @@ from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
 from yg_eo_soilnet.a1.features import build_table
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_FILE, LOGO, MIXED
+from yg_eo_soilnet.a1.settings import dev_mode_settings
 from yg_eo_soilnet.a1.stage2 import (
     GLOBAL_AUX,
     LOCAL,
@@ -136,6 +137,7 @@ def run_plans(
     groups: bool = False,
     restart: bool = False,
     tracking: bool = True,
+    dev_mode: bool = False,
     logger: Optional[logging.Logger] = None,
 ) -> RunResult:
     """Run every plan of the index (or of the kinds asked for), skipping what is already done.
@@ -157,6 +159,11 @@ def run_plans(
         Clear a run folder made from other settings or plans, instead of refusing to add to it.
     tracking : bool, default True
         Record the run in MLflow.
+    dev_mode : bool, default False
+        Cut the models down to the quickest run that still goes through every step
+        (:func:`~yg_eo_soilnet.a1.settings.dev_mode_settings`): it shows the pipeline works, and its
+        scores mean nothing. Recorded in the run folder's settings hash, so a dev-mode run never
+        resumes into a full one.
     logger : logging.Logger, optional
 
     Returns
@@ -171,6 +178,14 @@ def run_plans(
         If the run folder was made from other settings or plans and ``restart`` is not set.
     """
     logger = logger or logging.getLogger(__name__)
+    overrides = None
+    if dev_mode:
+        a1 = replace(a1, settings=dev_mode_settings(a1.settings))
+        overrides = {"dev_mode": True}
+        logger.warning(
+            "Dev mode: XGBoost in both stages, 50 trees, no tuning, 2 inner folds. This run shows the pipeline "
+            "works; its scores mean nothing."
+        )
     settings = a1.settings
     config = settings.load_config()
     plans_path = Path(plans_dir or Path(settings.output_dir) / "plans")
@@ -187,13 +202,15 @@ def run_plans(
             kinds.append(CONTROL)
         index = index[index["kind"].isin(kinds)]
     run_dir = Path(settings.output_dir) / "runs" / run_name
-    manifest = _check_manifest(a1, config, plans_path, index, run_dir, restart=restart, logger=logger)
+    manifest = _check_manifest(
+        a1, config, plans_path, index, run_dir, restart=restart, overrides=overrides, logger=logger
+    )
 
     table = build_table(settings, config, logger)
     resolved = a1.resolve_groups(table, logger=logger)
     result = RunResult(run_dir=run_dir)
 
-    parent = _start_parent(a1, config, run_name, kinds, groups) if tracking else None
+    parent = _start_parent(a1, config, run_name, kinds, groups, dev_mode) if tracking else None
     try:
         for row in index.itertuples(index=False):
             computed_here = _run_one_plan(
@@ -436,9 +453,9 @@ def collect_dissimilarity(run_dir: Path, settings) -> pd.DataFrame:
 # --- the run folder ------------------------------------------------------------------------------
 
 
-def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger) -> dict:
+def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, overrides=None) -> dict:
     """Make sure the run folder's outputs came from these settings and plans; clear it on restart."""
-    fingerprint = _config_hash(a1, config)
+    fingerprint = _config_hash(a1, config, overrides)
     manifest_path = run_dir / MANIFEST_FILE
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
@@ -476,6 +493,7 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger) 
         "format": PREDICTION_FORMAT,
         "config_hash": fingerprint,
         "settings": a1.path,
+        "overrides": overrides or {},
         "git_commit": a1.git_commit,
         "git_dirty": a1.git_dirty,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
@@ -485,13 +503,20 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger) 
     return manifest
 
 
-def _config_hash(a1: A1Config, config) -> str:
-    """One hash of every file the outputs depend on: the A1 settings, the groups, the main config, the spec."""
+def _config_hash(a1: A1Config, config, overrides: Optional[dict] = None) -> str:
+    """One hash of every file the outputs depend on: the A1 settings, the groups, the main config, the spec.
+
+    Settings changed after reading (``overrides``, e.g. dev mode) are hashed too - but only when
+    there are some, so a plain run's hash, and every run folder made before overrides existed,
+    stays as it was.
+    """
     paths = [a1.path, a1.groups.source_path, a1.settings.main_config_path, getattr(config, "data_spec_path", None)]
     digest = hashlib.sha256()
     for path in paths:
         if path and os.path.exists(path):
             digest.update(Path(path).read_bytes())
+    if overrides:
+        digest.update(json.dumps(overrides, sort_keys=True).encode())
     return digest.hexdigest()
 
 
@@ -532,7 +557,7 @@ def _write_json(path: Path, payload: dict) -> None:
 # --- MLflow ---------------------------------------------------------------------------------------
 
 
-def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool):
+def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool, dev_mode: bool = False):
     """Open the run's parent MLflow run, with its provenance."""
     import mlflow
 
@@ -548,6 +573,7 @@ def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool):
             **a1.describe(),
             "a1_kinds": ",".join(kinds) if kinds else "all",
             "a1_groups": groups,
+            "a1_dev_mode": dev_mode,
             "a1_min_cell_size": a1.settings.min_cell_size,
         }
     )

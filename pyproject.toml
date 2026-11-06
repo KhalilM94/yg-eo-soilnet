@@ -99,6 +99,13 @@ format-check = "ruff format --check ."
 typecheck = "mypy"
 # Builds the documentation website into docs/_build/html; any warning fails the build.
 docs = "sphinx-build -W --keep-going -b html docs docs/_build/html"
+# The Paper A1 demo dataset, written to experiments/a1/demo_data (see docs/a1.md).
+demo-data-a1 = "python experiments/a1/make_demo_data.py"
+# The whole Paper A1 pipeline on the demo data, cut down to a few minutes: checks, split plans,
+# the models on the random and leave-one-region-out plans (XGBoost in both stages, untuned), the
+# score tables and the figures, all under results/a1_demo/. It shows every step still runs; its
+# scores mean nothing. See docs/a1.md.
+a1-demo = { cmd = "python experiments/a1/preflight.py --config configs/a1/a1_demo.yml && python experiments/a1/make_plans.py --config configs/a1/a1_demo.yml --kinds random,logo && python experiments/a1/run_a1.py --config configs/a1/a1_demo.yml --kinds random,logo --groups --dev-mode --run-name dev --restart && python experiments/a1/evaluate.py --config configs/a1/a1_demo.yml --run-name dev --n-boot 200 && python experiments/a1/make_figures.py --config configs/a1/a1_demo.yml --run-name dev --regions experiments/a1/demo_data/regions.geojson --regions-name-field name --n-boot 200 --no-relief", depends-on = ["demo-data-a1"] }
 
 [tool.pixi.feature.explore.tasks]
 notebook = "jupyter lab"

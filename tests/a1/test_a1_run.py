@@ -549,3 +549,65 @@ def test_a_missing_dissimilarity_table_is_recomputed_alone(demo_run):
     again = run_plans(demo_run["a1"], groups=True, tracking=False)
     assert again.computed == [str(target)]
     assert not again.dissimilarity.empty
+
+
+# --- dev mode, and the evaluation and figure scripts ----------------------------------------------
+
+
+def test_dev_mode_is_part_of_the_settings_hash_and_a_plain_hash_is_unchanged(demo_run):
+    from yg_eo_soilnet.a1.runner import _config_hash
+
+    a1 = demo_run["a1"]
+    config = a1.settings.load_config()
+    plain = _config_hash(a1, config)
+    assert _config_hash(a1, config, None) == plain == _config_hash(a1, config, {})
+    assert _config_hash(a1, config, {"dev_mode": True}) != plain
+    # The module's run, made without dev mode, still matches the plain hash.
+    assert json.loads((demo_run["result"].run_dir / MANIFEST_FILE).read_text())["config_hash"] == plain
+
+
+def test_a_dev_mode_run_never_resumes_into_a_full_run(demo_run):
+    a1 = demo_run["a1"]
+    with pytest.raises(RunMismatch, match="the settings differ"):
+        run_plans(a1, kinds=[RANDOM], tracking=False, dev_mode=True)
+    quick = run_plans(a1, kinds=[RANDOM], tracking=False, dev_mode=True, run_name="dev")
+    assert len(quick.computed) == len(MODELS)
+    manifest = json.loads((quick.run_dir / MANIFEST_FILE).read_text())
+    assert manifest["overrides"] == {"dev_mode": True}
+    params = json.loads(
+        pd.read_parquet(quick.run_dir / "predictions" / "random" / "global__combined.parquet")["tuned_params"].iloc[0]
+    )
+    assert params["tuned"] is False and params["model__max_depth"] == 3
+
+
+def test_the_evaluation_script_writes_its_five_tables(demo_run):
+    from experiments.a1.evaluate import TABLES
+    from experiments.a1.evaluate import main as evaluate_main
+
+    tables = evaluate_main(["--config", str(demo_run["path"]), "--n-boot", "20"])
+    out = demo_run["result"].run_dir / "evaluation"
+    assert sorted(path.name for path in out.glob("*.csv")) == sorted(TABLES)
+    assert {"kind", "model", "covariate_group", "split", "rmse", "rpiq", "small"} <= set(tables["scores.csv"].columns)
+    assert {"a", "b", "p_holm"} <= set(tables["differences.csv"].columns)
+    assert set(tables["differences.csv"]["a"]) == {PER_CLASS_MEASURED, PER_CLASS_PREDICTED, GLOBAL_AUX}
+    assert (tables["transfer.csv"]["kind"] == LOGO).all() and tables["transfer.csv"]["has_local"].all()
+
+
+def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
+    import matplotlib.pyplot as plt
+
+    from experiments.a1.make_figures import main as figures_main
+    from yg_eo_soilnet import map_style
+    from yg_eo_soilnet.a1.figures import FIGURE_NAMES, is_message_figure
+
+    def refuse(url, path):
+        raise OSError("offline")
+
+    monkeypatch.setattr(map_style, "cached_download", refuse)
+    drawn = figures_main(["--config", str(demo_run["path"]), "--out", str(tmp_path), "--n-boot", "20", "--no-relief"])
+    plt.close("all")
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+        f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")
+    )
+    # The module's run has random and logo plans only: figure 6 needs mixed plans and says so.
+    assert [name for name, figure in drawn.items() if is_message_figure(figure)] == ["fig6_mixed"]
