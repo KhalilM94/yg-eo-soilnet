@@ -245,7 +245,7 @@ def _load_points(settings: A1Settings, config, logger: logging.Logger):
         raise ValueError(f"{len(duplicated)} point id(s) repeat in the data, e.g. {list(duplicated[:5])}")
     tabular = tabular.set_index(point_col, drop=False)
 
-    needed_labels = list(dict.fromkeys([settings.som_target, *settings.auxiliary.targets, settings.carbonate.column]))
+    needed_labels = list(dict.fromkeys([settings.target, *settings.auxiliary.targets, settings.carbonate.column]))
     missing_labels = [column for column in needed_labels if column not in tabular.columns]
     if missing_labels:
         raise ValueError(
@@ -294,7 +294,7 @@ def _load_points(settings: A1Settings, config, logger: logging.Logger):
         extra[column] = pd.to_numeric(values, errors="coerce")
         prediction_columns[target] = column
 
-    static = manager.filter_schema(tabular, target_columns=[settings.som_target])
+    static = manager.filter_schema(tabular, target_columns=[settings.target])
     static = static.drop(columns=sorted(not_inputs & set(static.columns)))
     categorical = [column for column in getattr(config, "CATEGORICAL_FEATURES", []) or [] if column in static]
 
@@ -305,7 +305,7 @@ def _load_points(settings: A1Settings, config, logger: logging.Logger):
 
     logger.info(
         f"A1 points: {len(frame)}, {static.shape[1]} static covariate(s); "
-        f"{int(frame[settings.som_target].notna().sum())} with a measured {settings.som_target}."
+        f"{int(frame[settings.target].notna().sum())} with a measured {settings.target}."
     )
     table = A1Table(
         frame=frame,

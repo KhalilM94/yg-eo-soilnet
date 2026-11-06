@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> PreflightResult:
         default=None,
         help="A saved split (data_splits/split_assignments.parquet), to score the earlier predictions on.",
     )
-    parser.add_argument("--out", default=None, help="Output folder (default <tracking.results_dir>/preflight).")
+    parser.add_argument("--out", default=None, help="Output folder (default <output_dir>/preflight).")
     parser.add_argument(
         "--min-cell-points", type=int, default=None, help="Flag region x class cells under this many points."
     )

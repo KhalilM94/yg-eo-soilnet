@@ -5,25 +5,16 @@
 # configs/a1/a1.yml is the same file for the real data; every setting is explained there.
 
 main_config: demo_main_config.yml
-som_target: organic_matter_g_kg
-models: [XGBoost, TabICL]
-seed: 42
+data:
+  root: "experiments/a1/demo_data"
+  static: "static.csv"
+  targets: "targets.csv"
+  timeseries: "timeseries.csv"
 
-timeseries_percentiles:
-  quantiles: [10, 25, 50, 75, 90]
-  variables: null
-  exclude: []
-
+target: organic_matter_g_kg
 auxiliary:
   targets: [caco3_pct_total, c_e_c_meq_100g]
-  model: TabICL
-  n_folds: 5
-
-carbonate:
-  column: caco3_pct_total
-  edges: [2, 10, 25]
-  labels: ["<2", "2-10", "10-25", ">=25"]
-  min_points: 30
+covariate_groups: covariate_groups_demo.yml
 
 # The demo carries its regions both ways: as a `region` column, used here, and as outlines in
 # experiments/a1/demo_data/regions.geojson. To try the outlines instead:
@@ -33,7 +24,27 @@ regions:
   column: region
   polygons_path: null
   name_field: null
-  min_points: 30
+
+stage1:
+  estimator: TabICL
+stage2:
+  estimator: XGBoost
+inner_cv_folds: 5
+seeds: [42]
+
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  quantiles: [10, 25, 50, 75, 90]
+  variables: null
+  exclude: []
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
 
 sample_year:
   column: sample_year
@@ -43,12 +54,10 @@ sample_year:
 #   python experiments/a1/preflight.py --config configs/a1/a1_demo.yml \
 #       --split-plan experiments/a1/demo_data/split_assignments.parquet
 preflight:
-  min_cell_points: 30
   overfit_r2_gap: 0.1
   prediction_columns:
     caco3_pct_total: caco3_pct_total__TabICL
     c_e_c_meq_100g: c_e_c_meq_100g__TabICL
 
-tracking:
-  experiment_name: Paper_A1_Demo
-  results_dir: results/a1_demo
+output_dir: results/a1_demo
+mlflow_experiment: Paper_A1_Demo

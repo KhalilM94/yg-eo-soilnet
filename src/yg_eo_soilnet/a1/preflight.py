@@ -5,7 +5,7 @@ Four questions, each answered by a table written as a CSV and summarised in ``pr
 1. **Completeness.** How many points have SOM, CaCO3 and CEC all measured, and how empty is every
    column the experiments read.
 2. **Regions x carbonate.** How many points fall in each region and FAO carbonate class. A cell
-   with fewer than ``preflight.min_cell_points`` is flagged: a per-class model, or a per-class
+   with fewer than ``min_cell_size`` points is flagged: a per-class model, or a per-class
    score, cannot be trusted on so few points.
 3. **Regions x sampling year.** Whether some regions were only sampled in some years, which would
    tangle "a different region" with "a different year".
@@ -287,9 +287,9 @@ def run_preflight(
         A saved split (``data_splits/split_assignments.parquet``). Without one the earlier
         predictions are not scored.
     out_dir : str, optional
-        Where to write; ``<tracking.results_dir>/preflight`` unless given.
+        Where to write; ``<output_dir>/preflight`` unless given.
     min_cell_points : int, optional
-        Overrides ``preflight.min_cell_points``.
+        Overrides ``min_cell_size``.
     overfit_r2_gap : float, optional
         Overrides ``preflight.overfit_r2_gap``.
     config : Config, optional
@@ -303,9 +303,9 @@ def run_preflight(
     """
     logger = logger or logging.getLogger(__name__)
     config = config if config is not None else settings.load_config()
-    threshold = int(min_cell_points if min_cell_points is not None else settings.preflight.min_cell_points)
+    threshold = int(min_cell_points if min_cell_points is not None else settings.min_cell_size)
     gap = float(overfit_r2_gap if overfit_r2_gap is not None else settings.preflight.overfit_r2_gap)
-    out = Path(out_dir or os.path.join(settings.tracking.results_dir, "preflight"))
+    out = Path(out_dir or os.path.join(settings.output_dir, "preflight"))
     out.mkdir(parents=True, exist_ok=True)
 
     points = load_points(settings, config, logger)
@@ -314,7 +314,7 @@ def run_preflight(
     sections: list[str] = []
 
     # 1. Completeness and missingness.
-    properties = list(dict.fromkeys([settings.som_target, *settings.auxiliary.targets]))
+    properties = list(dict.fromkeys([settings.target, *settings.auxiliary.targets]))
     result.tables[COMPLETENESS_FILE] = completeness(frame, properties)
     result.tables[MISSINGNESS_FILE] = missingness(frame, _column_kinds(points))
     sections.append(_completeness_section(result.tables[COMPLETENESS_FILE], result.tables[MISSINGNESS_FILE]))

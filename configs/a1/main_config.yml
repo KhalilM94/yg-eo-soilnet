@@ -1,0 +1,383 @@
+# The main configuration of the Paper A1 experiments (configs/a1/a1.yml points here).
+#
+# A copy of configs/main_config.yml - the same data files and the same split - with two differences:
+#   - DATA_SPEC_PATH names the A1 data spec (configs/a1/data_spec.yml), in which the existing
+#     soil-map layers are inputs;
+#   - MLFLOW_EXPERIMENT_NAME is Paper_A1.
+# Paths to the other configuration files are relative to this folder. a1.yml repeats the `data:`
+# block below, and loading A1 stops if the two disagree; when the data moves, change both.
+#
+common:
+  # Where to find your input data. `root` is the folder everything below lives in; each entry
+  # below it can point to either a single file or a folder of files.
+  data:
+    root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+    # The file with your static (non-time-series) features - soil covariates, etc. The measured
+    # lab values (the targets) can either live in this same file, or in their own file - see
+    # `targets` below.
+    static: 'Morocco_Static_Covariates_Processed_V_310826.csv'
+    # static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+    # The file with your measured lab values - what the models learn to predict. Leave this blank
+    # (null) if `static` above already contains those columns. When targets live in their own
+    # file like here, lat/lon coordinates are copied over from it when the two files are joined.
+    targets: 'Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826_base.csv'
+    # targets: 'Morocco_soil_targets_uuid_roadsafe_6ksample_Prior_Predictions_V_110826.csv'
+
+    # Time-series data (satellite/weather observations over time) always lives in its own file(s) -
+    # either a single file, or a folder with one file per data source.
+    timeseries: 'Morocco_Soil_Predictors_2017_2025_TS_with_indices_V_310826.csv'
+    # Optional: a JSON file listing the exact path to each of the three sources above, if you'd
+    # rather manage paths that way. Leave as null to just use the paths given above.
+    manifest: null
+  POINT_ID_COLUMN: "uuid"   # the column that uniquely identifies each sample point
+  LAT_COLUMN: "lat"
+  LON_COLUMN: "lon"
+  RANDOM_SEED: 42           # controls every source of randomness (data split, shuffling, etc.),
+                            # so re-running with the same seed reproduces the same result
+  # There is intentionally no TEST_SIZE setting here - the train/validation/test split is
+  # controlled entirely by the `split:` block below. (An old TEST_SIZE key still works as a
+  # fallback for configs written before that block existed, but don't add a new one here - it
+  # would just create a second, conflicting place to set the same number.)
+
+  # --- train / validation / test split ---------------------------------------------------------
+  # This one split is shared by every model the pipeline trains, whether it's a classic model
+  # (sklearn) or a deep-learning model (Lightning), so all of them are evaluated on the exact same
+  # held-out points and their scores can be compared directly.
+  #
+  # Points are matched up by POINT_ID_COLUMN rather than by row position, because different model
+  # types can end up using a different subset of rows (e.g. some drop rows with missing data that
+  # others keep).
+  split:
+    # How to choose which points go into the validation/test sets:
+    #   random        - pick points at random.
+    #   spatial_group - group nearby points into clusters first, then hold out entire clusters, so
+    #                   no cluster is split across train and test. Use this if your points are
+    #                   close enough together that a model could "cheat" by learning from a
+    #                   training point a few metres from a test point, instead of learning the
+    #                   real pattern.
+    #   stratified    - cut the points into bands by the column named in stratify_on below, and
+    #                   take the same share of each band for every split, so they all cover the
+    #                   whole range. Use this when a value is lopsided and a plain random holdout
+    #                   might leave too few points at one end to judge the model there.
+    strategy: random
+    # Where the strategy above applies:
+    #   test_and_val - it chooses the test set as well. The default, and the honest one.
+    #   train_val    - the test set is drawn at random, and the strategy only separates the
+    #                  training points from the validation points.
+    # Use train_val when you want to COMPARE strategies with each other: the test set is then the
+    # same set of points whichever strategy you pick (as long as the seed and the data are
+    # unchanged), so a difference in score comes from the training rather than from being scored on
+    # different points. The cost, with spatial_group, is that test points are near neighbours of
+    # training points again and the score is flattering - which is the very thing spatial_group
+    # exists to expose. Every run records `split_test_drawn_by`, so check that before putting two
+    # runs' scores side by side.
+    strategy_applies_to: test_and_val
+    # Only used when strategy is stratified: the column whose spread every split should match. A
+    # numeric column is cut into bands holding about the same number of points; a class column uses
+    # its own classes. A point with no value for it goes into its own "missing" band, so it still
+    # gets its share of each split.
+    stratify_on: null
+    # How many bands to cut a numeric column into. Fewer bands means coarser balancing but copes
+    # better with a small dataset; bands too thin to split are merged and the run says so.
+    stratify_bins: 10
+    # Fraction of ALL usable points to hold out. Whatever isn't in test_size or
+    # val_size becomes the training set (here: 1 - 0.15 - 0.15 = 70%).
+    test_size: 0.15
+    val_size: 0.15
+    seed: 42
+    # Some points can only be used by some model types - e.g. deep-learning models need complete
+    # time series and drop points that classic models can still use. This decides how to handle
+    # that mismatch:
+    #   intersect  - only use points that EVERY model type can use, so all models see the exact
+    #                same test set and their scores are perfectly comparable. Costs you some
+    #                training data for the model types that could have used more points.
+    #   assign_all - each model type uses every point it can handle; test sets overlap but aren't
+    #                identical, since some model types end up with a larger usable set than others.
+    population_policy: intersect
+    # Safety check for `intersect` above: if the shared set of usable points drops below this
+    # fraction of your full dataset, the run stops with an error instead of silently training on a
+    # tiny slice of your data. Raise it to be more cautious, or set to 0 to disable the check.
+    min_population_ratio: 0.5
+    # Path to a previously saved split (a data_splits/split_assignments.parquet file). Set this to
+    # reuse the exact same test set across multiple runs, even as you add more data. Leave as null
+    # to compute a fresh split every run.
+    plan_path: null
+    # Only used when strategy is spatial_group above: which clustering method groups points into
+    # clusters, and its settings.
+    group:
+      class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+      params:
+        n_clusters: 12
+        # cell_size_m: 5000   # use SpatialGridClusterStrategy (grid cells) instead of KMeans
+
+  # --- missing data: one rule for every model type ----------------------------------------------
+  # If a feature column is missing a lot of values, that's usually a sign something is wrong with
+  # the data rather than something to quietly work around - a column that's almost entirely blank
+  # can end up wiping out most of your usable data (deep-learning models drop rows with missing
+  # values outright).
+  #
+  # The rule below is applied the same way for every model type:
+  #   a column blank in MORE than max_missing_column_ratio of rows -> the run STOPS with an error
+  #                                                                    naming that column
+  #   a column blank in LESS than that                              -> filled in with the column's
+  #                                                                    median value, and flagged so
+  #                                                                    the model knows it was
+  #                                                                    filled in rather than measured
+  data_quality:
+    max_missing_column_ratio: 0.2
+    # Column names to exempt from the check above: always kept and filled in, however sparse they
+    # are. Only use this when you genuinely want the filled-in value used - not just to silence an
+    # error for a column you haven't looked at yet.
+    allow_sparse_columns: []
+    # Set to false to turn the stop-the-run error above into a warning instead, and keep training
+    # anyway. True by default, since this kind of missing-data problem is easy to miss otherwise.
+    fail_on_sparse_columns: true
+
+  # Stop the whole run if EVERY model fails for a given target, instead of finishing with no
+  # results for it.
+  FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET: true
+  # If a single model errors out, false (default) skips it and keeps training the rest; true stops
+  # the entire run on the first model failure.
+  FAIL_ON_MODEL_ERROR: false
+  # Paths to the other config files this pipeline reads, relative to this file's own folder.
+  # The A1 data spec, next to this file; the model lists are the project's own.
+  DATA_SPEC_PATH: "data_spec.yml"
+  SKLEARN_CONFIG_PATH: "../sklearn/config.yml"
+  LIGHTNING_CONFIG_PATH: "../lightning/config.yml"
+  SKLEARN_REGISTRY_PATH: "../sklearn/model_registry.yml"
+  LIGHTNING_REGISTRY_PATH: "../lightning/models/defaults.yml"
+  # --- time-series (satellite/weather) inputs -----------------------------------------------
+  temporal:
+    enabled: true   # turn off to ignore the time-series file entirely and use static data only
+    # Column in the time-series file that holds each observation's date.
+    time_column: "observation_date"
+    # How to tell which columns in the time-series file belong to which data source, by the
+    # prefix on their column name - e.g. every column starting with "S2_" is Sentinel-2 data.
+    modality_prefix_map:
+      s2: "S2_"
+      s1_asc: "S1_asc_"
+      s1_dsc: "S1_desc_"
+      soil: "SOIL_"
+      ag: "AG_"
+      clim: "CLIM_"
+
+  # --- experiment tracking (MLflow) -----------------------------------------------------------
+  # MLflow is the tool that logs every run's settings, metrics, and saved models so you can browse
+  # and compare them later (via `mlflow ui`).
+  MLFLOW_TRACKING_URI: ""    # where MLflow stores its data; empty means the local <repo>/mlruns folder
+  MLFLOW_EXPERIMENT_NAME: "Paper_A1"   # groups runs together under this name in the UI
+  # If true, every fitted model is also saved into MLflow's Model Registry as a new version of
+  # <target>_<model_name>, and gets tagged "champion" if it beats the current champion version's
+  # test RMSE. Note that "champion" only compares versions of the SAME model on the SAME target -
+  # it doesn't decide which model type is best for a target overall, you still compare across
+  # model types yourself (e.g. on the leaderboard). Set to false for throwaway/experimental runs
+  # so they don't clutter the registry with versions you don't actually want to keep.
+  MLFLOW_REGISTER_MODELS: true
+  MLFLOW_EXPERIMENT_EXPORT_ENABLED: false   # also copy the run's MLflow folder to the path below
+  MLFLOW_EXPERIMENT_EXPORT_PATH: "mlflow_exports"
+  MAIN_FILE_LOGGING_ENABLED: true   # also write a log file for the run, not just console output
+
+  # --- Explainability (SHAP) --------------------------------------------------------------------
+  # SHAP explains WHY a model made each prediction, by scoring how much each feature pushed that
+  # prediction up or down. EXPLAIN_ENABLED is the master on/off switch: when false, none of this
+  # runs, nothing is written to the explain/ folder, and the `shap` library isn't even loaded -
+  # training and every other output are unaffected either way. (Every setting below can also be
+  # set via an environment variable of the same name.)
+  EXPLAIN_ENABLED: true
+  # How many test rows to explain. If the test set is larger than this, a random (but repeatable)
+  # subset is used.
+  EXPLAIN_MAX_SAMPLES: 500
+  # How many reference rows SHAP compares against when judging each feature's effect. More is more
+  # accurate but slower.
+  EXPLAIN_BACKGROUND_SAMPLES: 100
+  # How many rows to show in the summary plots (beeswarm/bar charts). This only limits the picture,
+  # not the data - the full results are always saved to explain/shap_values.parquet.
+  EXPLAIN_MAX_DISPLAY: 25
+  # Budget, in number of model calls, for explaining models that don't have a fast/exact SHAP
+  # method. Tree-based and linear models are always fast and exact and ignore this setting; other
+  # models (like TabICL) are estimated first and SKIPPED if they'd cost more than this budget - the
+  # reason is recorded in meta/run_summary.json. Raise this if you deliberately want to explain
+  # such a model anyway; consider lowering EXPLAIN_MAX_SAMPLES at the same time to keep the total
+  # cost reasonable.
+  EXPLAIN_MAX_EVALS: 200000
+  # Which models to explain. [] (default) explains every trained model; list specific registry
+  # names (e.g. ["XGBoost"]) to restrict it to just those.
+  EXPLAIN_MODELS: []
+  # Models to always skip, regardless of EXPLAIN_MAX_EVALS above - unless a model is also listed
+  # in EXPLAIN_MODELS, which wins. TabICL is skipped by default: it re-examines the whole training
+  # set for every single prediction it makes, so explaining it can take much longer than a model
+  # like XGBoost on the same data.
+  EXPLAIN_SKIP_MODELS: ["TabICL"]
+  # If explaining a model fails, false (default) just records the failure in
+  # meta/run_summary.json and keeps the training run's other results.
+  EXPLAIN_FAIL_ON_ERROR: false
+
+  # --- Predictive uncertainty ----------------------------------------------------------------
+  # Normally each model gives you a single predicted number per point. This block turns that into
+  # a predicted number PLUS a margin of error, by training several versions of the same model (an
+  # "ensemble") and looking at how much their predictions disagree with each other.
+  #
+  # There are two different reasons a prediction can be uncertain, and this pipeline tracks them
+  # separately because they answer different questions:
+  #   epistemic uncertainty  - how much the ensemble members disagree with each other. Roughly,
+  #                            "how sure is the model, given what it has learned so far?" This
+  #                            tends to shrink as you add more training data.
+  #   aleatoric uncertainty  - noise in the data itself at that point - e.g. "this kind of soil is
+  #                            just inherently variable here." This does NOT shrink with more data,
+  #                            and is only available for Lightning (deep-learning) models - see
+  #                            `heteroscedastic` below.
+  # The two are combined into one total margin of error ("sigma") for each prediction.
+  #
+  # Raw ensemble disagreement tends to be overconfident (too narrow), so the margin is then
+  # CALIBRATED against a held-out set of real answers, so that a "95% interval" on a plot actually
+  # does contain the true value about 95% of the time - not just whatever the model feels sure
+  # about. The `picp_test` metric logged with every run checks whether that promise actually held.
+  uncertainty:
+    # Master on/off switch. When false, none of the below runs: no extra models are trained, no
+    # extra columns are written, and the run costs exactly what it would without this block.
+    enabled: false
+    # How many versions of each model to train per target (the ensemble size). Training time scales
+    # directly with this - 5 members means training that model 5 separate times. 3 is enough while
+    # iterating, 5 for a report, 10 for a final/published result. On Lightning models this also
+    # multiplies how much disk space checkpoints use, since each member saves its own weights
+    # (roughly n_members times the size of one checkpoint, per target).
+    n_members: 10
+    # Each ensemble member gets its own random seed, computed as RANDOM_SEED + member_index * this
+    # value. Using a large stride (rather than +1) keeps a member's seed from ever accidentally
+    # matching the seed used for the data split, or a model's own seed setting.
+    member_seed_stride: 1000
+    # auto | always | never. Some models (Ridge, PLS) have no randomness of their own to vary
+    # between members, so without help every member would train identically and the "disagreement"
+    # would always be exactly zero - falsely reporting perfect confidence. `auto` fixes this by
+    # re-sampling the training data slightly differently for each member of exactly those models,
+    # and leaves models that already vary run-to-run (XGBoost, GradientBoosting) alone.
+    bootstrap: auto
+    # Lightning models only. When true, instead of predicting just one number, the model directly
+    # predicts a value AND how uncertain it is about that value, and is trained to get both right.
+    # This is the only way to get a margin of error that's wider specifically where the DATA is
+    # noisier, rather than only where the ensemble members happen to disagree. When this is on, the
+    # training loss becomes harder to compare against a plain run's.
+    heteroscedastic: true
+    # Only used when heteroscedastic is true. Tunes how much the training loss penalizes the model
+    # for claiming high uncertainty instead of trying harder to fit difficult points. 0.0 is the
+    # plain statistical formula, which lets a model "give up" on hard points by simply calling them
+    # very uncertain; 1.0 fully corrects for that; 0.5 is a commonly used middle ground and the
+    # default here.
+    beta_nll: 0.5
+    # --- how the margin of error becomes the interval shown on plots -------------------------
+    # A margin-of-error ("sigma") value is always computed once uncertainty is enabled. This
+    # setting decides how that turns into the lower/upper bounds you see on plots - the options
+    # below mean different things and are NOT interchangeable:
+    #
+    #   conformal  the interval is fitted so it actually contains about 95% (or whatever `alpha`
+    #              you set implies) of true values, checked against real held-out data. This is the
+    #              only option with a checked guarantee behind it, and the only one guaranteed to
+    #              mean the same thing for both sklearn and Lightning models. Recommended default -
+    #              use this unless you have a specific reason not to.
+    #   gaussian   a classic statistical confidence interval, which assumes the errors follow a
+    #              normal (bell-curve) distribution and that sigma is already on the right scale.
+    #              That assumption can be quite wrong for some models, so treat this option with
+    #              more caution than `conformal`.
+    #   sigma      just "the prediction, plus or minus k standard deviations", with no claim about
+    #              what percentage of true values that should cover. The honest choice if you want
+    #              to show the model's raw spread rather than a calibrated guarantee.
+    #   none       write the sigma value, but don't compute an interval or draw any bars.
+    #
+    # Only `conformal` needs a chunk of data set aside purely for calibration (see
+    # `calibration.source` below) - with `gaussian` or `sigma`, sklearn models can use all of their
+    # usual training data instead of holding some back.
+    interval:
+      method: sigma
+      # For `conformal` and `gaussian`: how much of the true values the interval is allowed to
+      # miss, e.g. 0.05 means a 95% interval. Not used by `sigma`.
+      alpha: 0.05
+      # For `method: sigma` only: how many standard deviations wide the interval is.
+      k: 1.0
+    calibration:
+      # Same idea as interval.alpha above; kept here for configs written before the `interval`
+      # block existed. If `interval.method` is set, that takes priority - this is only read as a
+      # fallback.
+      alpha: 0.05
+      # WHERE the data used to calibrate the `conformal` interval comes from - this choice has a
+      # real cost attached:
+      #   val     - use the validation split. The safe, honest choice, but on sklearn models it
+      #             means holding back the validation data from training too (sklearn models
+      #             otherwise train on train+validation combined and validate internally via
+      #             cross-validation) - so sklearn ends up training on somewhat less data. In
+      #             exchange, both model families calibrate on the exact same points, so their
+      #             intervals are directly comparable to each other.
+      #   cv_oof  - reuse the "out-of-fold" predictions already produced during sklearn's own
+      #             cross-validation search, at no extra cost in training data. sklearn models
+      #             only - there's no equivalent step for Lightning models.
+      source: val
+    # Which registry entries to build an ensemble for. [] (default) applies it to every enabled
+    # model; list specific names to restrict it.
+    models: []
+    # Models to always exclude from ensembling, regardless of `models` above (unless a model is
+    # also explicitly listed in `models`, which wins). TabICL is excluded by default: building an
+    # ensemble of it means repeating its expensive full-dataset pass n_members times, which can
+    # easily run out of memory.
+    skip_models: ["TabICL"]
+    # If building the ensemble for a model fails, false (default) records the failure in
+    # meta/run_summary.json and keeps that model's regular (non-ensembled) prediction.
+    fail_on_error: false
+
+  # --- Map of where the errors fell -------------------------------------------------------------
+  # Alongside plots/pred_obs.png (how big the errors are), each model gets plots/residual_map.png:
+  # its test points drawn at their real coordinates, coloured by prediction minus measurement.
+  # Blue is a model predicting too low, orange too high, and the neutral middle is no error. It
+  # answers a question the scatter plot cannot: are the errors scattered at random, or concentrated
+  # in one part of the country? Those are different problems with different fixes.
+  #
+  # It needs LAT_COLUMN/LON_COLUMN to exist in your data. Without them the figure is quietly
+  # skipped and nothing else about the run changes.
+  residual_map:
+    enabled: true
+    # Where the relief tiles and country borders are kept between runs. They are downloaded once,
+    # on the first map ever drawn. The folder below already holds every tile Morocco needs, from
+    # the paper figures - so by default nothing is downloaded at all. With neither the cache nor a
+    # network connection, the map is still drawn, just on plain ground instead of relief.
+    basemap_cache_dir: notebooks/basemap_cache
+    # false draws flat ground instead of shaded hills - quicker, and 64 fewer files to fetch the
+    # first time. The country borders are still drawn when they are cached or reachable. You do
+    # not need this setting to work offline: anything that cannot be fetched is simply left off
+    # the map, and the run carries on.
+    relief: true
+    # The detail level of the relief tiles. The cached tiles are zoom 8; asking for a different
+    # zoom means downloading a fresh set.
+    zoom: 8
+    # Draw the points the model was trained on underneath the test points, in flat grey. Worth
+    # keeping on: a large error out on its own, far from anything the model learned from, means
+    # something different from a large error in the middle of the training points.
+    show_training_points: true
+
+  # --- Per-point prediction export ------------------------------------------------------------
+  # Writes out "what did every model predict for this point?" for every point in your dataset,
+  # identified by POINT_ID_COLUMN. Two files are written:
+  #   predictions/point_predictions_wide.csv   one row per point, one column per target+model pair
+  #   predictions/point_predictions_long.csv   one row per (point, target, model) combination -
+  #                                             use this one if you need to parse target/model
+  #                                             names back apart, since both can contain underscores
+  #
+  # If a model was ensembled (see `uncertainty` above), the exported value is the ensemble's
+  # average prediction - no margin of error here. For that, look at eval_results.csv and the
+  # uncertainty/ folder instead.
+  #
+  # Two things to know before using this file:
+  #   * It covers EVERY point, not just the test set - so most rows are points a model was already
+  #     trained on, and its predictions for those will look much better than its real, honest
+  #     accuracy. Nothing in this file marks which rows are which; cross-reference
+  #     data_splits/split_assignments.parquet (keyed on the same point ids) to tell them apart.
+  #   * Producing it means running every model over your entire dataset, which is extra work that
+  #     nothing else in the pipeline does - that's why it's off by default.
+  export_point_predictions:
+    enabled: false
+    # Which models to export predictions for. [] (default) exports every model that supports it;
+    # list specific names to restrict it - a name listed here overrides `skip_models` below.
+    models: []
+    # Models to always exclude, since running them over the full dataset can take a very long time
+    # (the same reason TabICL is excluded from SHAP and ensembling above).
+    skip_models: [] #"TabICL"
+    # If exporting a model's predictions fails, false (default) records the failure in
+    # meta/run_summary.json and continues with the rest of the run.
+    fail_on_error: false

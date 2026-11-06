@@ -7,7 +7,6 @@ deliberately thin, so a pre-flight that found nothing on it would be broken.
 import numpy as np
 import pandas as pd
 import pytest
-import yaml
 
 from experiments.a1.preflight import main as preflight_main
 from yg_eo_soilnet.a1.preflight import (
@@ -182,16 +181,7 @@ def test_points_the_split_does_not_cover_are_counted_not_scored(a1_settings, spl
 
 
 def test_the_command_line_writes_to_the_folder_it_is_given(a1_settings, split_plan, tmp_path):
-    settings = a1_settings()
-    # The command reads a settings file; write the fixture's settings as one.
-    raw = {
-        "main_config": settings.main_config_path,
-        "regions": {"source": "column", "column": "region"},
-        "sample_year": {"column": "sample_year"},
-        "preflight": {"prediction_columns": dict(settings.preflight.prediction_columns)},
-    }
-    path = tmp_path / "a1.yml"
-    path.write_text(yaml.safe_dump(raw))
+    path = a1_settings(as_file=True)
 
     result = preflight_main(["--config", str(path), "--split-plan", split_plan, "--out", str(tmp_path / "cli")])
 

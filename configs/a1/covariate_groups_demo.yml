@@ -1,0 +1,20 @@
+# The covariate groups of the A1 demo dataset (configs/a1/a1_demo.yml points here). See
+# configs/a1/covariate_groups.yml for how groups are written and checked.
+
+satellite:
+  prefixes: [s2_, S2_]
+  columns: [ts_n_obs]
+
+terrain:
+  columns: [elevation, slope, aspect, twi, landform_class]
+
+climate:
+  columns: [aridity_index]
+  prefixes: [CLIM_]
+
+# The demo has one soil-map layer.
+legacy_soil:
+  columns: [clay_median_0_30cm]
+
+auxiliary:
+  columns: [caco3_pct_total, c_e_c_meq_100g]

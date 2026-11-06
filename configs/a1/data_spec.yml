@@ -1,0 +1,179 @@
+# The data spec of the Paper A1 experiments: configs/data_spec.yml, with ONE deliberate difference.
+#
+#   The existing soil-map layers - bd, clay, ph, sand, soc, som and swc medians over 0-30 cm, and
+#   the texture class texture_20cm - are inputs here, the `legacy_soil` covariate group, rather
+#   than LABEL_COLUMNS. main.py keeps them out so its models learn from the satellite data rather
+#   than echo the map; A1 measures what the map adds, so it needs them in.
+#
+# texture_20cm is a class, so it is also declared under CATEGORICAL_FEATURES. landform_class stays a
+# lab column, as in configs/data_spec.yml. Everything else is a copy: when configs/data_spec.yml
+# changes, change this file to match.
+#
+# Every column in your data that is a real, measured lab value - not something a model should
+# ever be given as an input. A column listed here is NEVER used as a feature, whether or not
+# you're currently training a model to predict it (see TARGET_COLUMNS below for that).
+#
+# This matters most when your static-features file also contains the target columns (a "joint"
+# file, rather than a separate targets file). Without this list, removing a target from
+# TARGET_COLUMNS wouldn't remove that column from the data - it would silently turn into an input
+# feature for predicting the OTHER targets. That's a form of data leakage: the model would be
+# learning from information it wouldn't actually have when making a real prediction.
+LABEL_COLUMNS:
+  - sand_pct
+  - clay_pct
+  - total_silt_pct
+  - fine_silt_pct
+  - coarse_silt_pct
+  - coarse_element_pct
+  - ph_water
+  - caco3_pct_total
+  - caco3_active_pct
+  - c_e_c_meq_100g
+  - ce_ext1_5_ms_cm
+  - na2o_ppm
+  - cl_ppm
+  - na_meq_100g
+  - c_n_ratio
+  - organic_matter_pct
+  - organic_matter_g_kg
+  - exchangeable_k2o_ppm
+  - p2o5_ehangable_olsen_ppm
+  - mgo_ppm
+  - cao_ppm
+  - iron_ppm_dtpa
+  - mn_ppm_dtpa
+  - cu_ppm_dtpa
+  - zn_ppm_dtpa
+  - b_ppm_hot_water
+  
+  # The existing soil-map layers (*_median_0_30cm, texture_20cm) are NOT here, unlike in
+  # configs/data_spec.yml: A1 uses them as inputs (the legacy_soil covariate group). Two more
+  # layers named for A1, silt_median_0_30cm and SU_WRB1_PH, are not in the current static file.
+  - landform_class
+
+  - ph_water_base
+  - organic_matter_g_kg_baseline
+  - p2o5_ehangable_olsen_ppm_base
+  - exchangeable_k2o_ppm_base
+  - c_e_c_meq_100g_base
+  - c_e_c_meq_100g_baseline
+  - caco3_pct_total_baseline
+
+# Whether the lab values listed above are made AVAILABLE to models as optional extra inputs. This
+# does not turn them into ordinary features - they're always excluded from the regular feature set,
+# regardless of this setting. What it enables is a model explicitly opting to use one as an input
+# in its own right, for cases where that lab value is genuinely available before prediction time
+# too (e.g. a model that uses measured pH as an extra input when predicting organic matter - see
+# soil_cnn's `auxiliary_label_columns` setting in the Lightning registry).
+#
+# Turn this on when your targets live in a separate file from your static features, as they do
+# here: without it, only the targets you're actively training on (TARGET_COLUMNS below) would even
+# be available to opt into, instead of the full list above.
+CARRY_LABEL_COLUMNS: true
+
+# Which of the lab values above to actually train a model for in this run - this is the setting
+# you'll change most often. A column named here (or in LABEL_COLUMNS above) is always kept out of
+# the feature set; only the columns listed here get a model trained to predict them.
+TARGET_COLUMNS:
+  - organic_matter_g_kg
+  # - clay_pct
+  # - sand_pct
+  # - total_silt_pct
+  # - coarse_silt_pct
+  # - coarse_element_pct
+  - ph_water
+  - caco3_pct_total
+  # - caco3_active_pct
+  - c_e_c_meq_100g
+  # - c_n_ratio
+  # - p2o5_ehangable_olsen_ppm
+  # - exchangeable_k2o_ppm
+  # - ce_ext1_5_ms_cm
+  # - organic_matter_g_kg_base
+
+# How to handle MORE THAN ONE target at once (ignored if TARGET_COLUMNS above has just one entry):
+#   joint       train ONE model that predicts all the targets together, sharing what it learns
+#               across them. Can help when targets are related to each other.
+#   per_target  train a SEPARATE, independent model for each target - the traditional approach.
+# This applies to both classic (sklearn) and deep-learning (Lightning) models. An individual model
+# in a registry file can override this with its own `multi_target:` setting; for a classic model
+# to be eligible for `joint` mode it must also declare `multi_target: native`, since most
+# scikit-learn model types are only able to predict one target at a time.
+MULTI_TARGET_MODE: joint
+
+# --- location awareness (off/empty by default) -----------------------------------------------
+# Lets the soil_cnn model use each point's latitude/longitude as an extra input, through a
+# dedicated branch built specifically for that purpose - other model types never see raw
+# coordinates, which otherwise stay as metadata (listed in IGNORED_COLUMNS below). Internally, the
+# coordinates get converted into a set of sine/cosine values rather than handed to the model as
+# raw numbers - a standard way to represent position so a neural network can make use of it.
+#
+# Two things to know before turning this on:
+#   * A point with a missing latitude or longitude is dropped entirely, and how many points were 
+#     dropped is logged.
+#   * A model that knows WHERE a point is can "cheat" by learning that nearby points tend to have
+#     similar values, instead of learning the real relationship between the other features and the
+#     target - so it will look more accurate than it really is if you only evaluate it with
+#     `split.strategy: random` in main_config.yml. Also try `spatial_group` there to get an honest
+#     read on its actual skill.
+USE_HARMONIC_COORDS: false
+
+# true (the default in code) includes the CONTEXT_FEATURES columns below as ordinary features;
+# false removes them from the feature set entirely, so you can see how the models do without them.
+USE_CONTEXT_FEATURES: false
+# Columns that describe a point's surroundings rather than the point itself - e.g. neighbourhood
+# statistics or patch variance, already computed and sitting in your static features file. Naming
+# a column here doesn't change how it's used day to day (it's treated as an ordinary numeric
+# feature either way) - it just groups these columns together so you can:
+#   * switch the whole group on/off at once with USE_CONTEXT_FEATURES above, to test whether they
+#     actually help (an empty list here means there's nothing for that switch to affect)
+#   * see them called out as their own group in the SHAP explainability output
+# Naming a column that doesn't actually exist in your data will raise an error.
+CONTEXT_FEATURES: []
+
+
+# Columns to always exclude from the feature set - identifiers, coordinates, geometry, and other
+# metadata that isn't a genuine predictive feature. (You don't need to list measured lab values
+# here - LABEL_COLUMNS above already takes care of those.) Comment a line back in to also drop
+# that column from the features; comment one out to make it available again.
+IGNORED_COLUMNS: &ignored_columns
+  - point_id
+  - lat
+  - lon
+  - geometry
+  - uuid
+  - cluster
+  - date
+
+# Same list as IGNORED_COLUMNS above - the &ignored_columns / *ignored_columns pair is a YAML
+# "anchor", which just means both settings automatically stay identical. You only need to edit the
+# list once, above.
+ELIMINATED_FEATURES: *ignored_columns
+
+# Columns that hold categories/labels rather than numbers (e.g. a soil-texture class). These are
+# handled differently from numeric features: models that support them learn a separate
+# representation for each category (an "embedding") instead of treating the values as numbers.
+#
+# A column listed here must NOT also be in LABEL_COLUMNS above - a lab column is removed from the
+# feature set before the category handling ever sees it, so listing it in both places would mean no
+# model receives it. The run now stops and says so rather than dropping it silently.
+#
+# texture_20cm and landform_class were listed here until 2026-09-23. Both stay in LABEL_COLUMNS:
+# like the *_median_0_30cm layers beside them they come from an existing soil map, and keeping them
+# out of the ordinary feature set is deliberate - the models are meant to learn from the EO data
+# rather than echo that map. Move one out of LABEL_COLUMNS if you want it as a real input.
+CATEGORICAL_FEATURES:
+  # The soil-map texture class, an A1 input (configs/data_spec.yml keeps it a lab column).
+  - texture_20cm
+
+existing_hs_features:
+  # Off by default, and not commonly needed. Lets you tell the pipeline to ignore a set of
+  # pre-existing hyperspectral/band columns in your data (e.g. if you're supplying your own band
+  # columns and want the pipeline to skip past ones matching a naming pattern or list).
+  enabled: false
+  # Whether those columns should actually be dropped (only takes effect when `enabled` is true).
+  ignore: false
+  # Column-name prefixes that identify existing band columns to ignore.
+  prefix: ["S2_", "S1_asc","S1_desc", "SOIL_", "AG_", "CLIM_"]
+  band_count: 6      # how many bands to expect per prefix, if generating names automatically
+  band_names: []      # explicit column names to ignore; takes priority over prefix/band_count above

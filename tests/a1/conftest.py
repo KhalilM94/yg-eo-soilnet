@@ -38,10 +38,12 @@ def a1_settings(a1_demo_dir, tmp_path):
 
     The main configuration is the shipped ``configs/a1/demo_main_config.yml`` with the data folder
     pointed at the generated dataset and every other path made absolute, so the test does not depend
-    on the directory pytest runs from. ``main_overrides`` edits its ``common`` block.
+    on the directory pytest runs from. ``main_overrides`` edits its ``common`` block; ``groups``
+    replaces the covariate groups; ``as_file=True`` writes the settings to a file and returns its
+    path, for :func:`~yg_eo_soilnet.a1.config.load_a1_config`.
     """
 
-    def build(main_overrides=None, **overrides):
+    def build(main_overrides=None, *, as_file=False, groups=None, **overrides):
         main = yaml.safe_load((A1_CONFIGS / "demo_main_config.yml").read_text())
         common = main["common"]
         common["data"]["root"] = str(a1_demo_dir)
@@ -60,7 +62,19 @@ def a1_settings(a1_demo_dir, tmp_path):
 
         raw = yaml.safe_load((A1_CONFIGS / "a1_demo.yml").read_text())
         raw["main_config"] = str(main_path)
+        raw["data"] = {**raw["data"], "root": str(a1_demo_dir)}
+        if (main_overrides or {}).get("data"):
+            raw["data"] = {key: main_overrides["data"][key] for key in raw["data"] if key in main_overrides["data"]}
+        groups_path = A1_CONFIGS / raw["covariate_groups"]
+        if groups is not None:
+            groups_path = tmp_path / "covariate_groups.yml"
+            groups_path.write_text(yaml.safe_dump(groups, sort_keys=False))
+        raw["covariate_groups"] = str(groups_path)
         raw.update(overrides)
+        if as_file:
+            path = tmp_path / "a1.yml"
+            path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
+            return path
         return settings_from_mapping(raw)
 
     return build

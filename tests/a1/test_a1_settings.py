@@ -37,7 +37,7 @@ def test_the_shipped_settings_files_load(name):
     settings = load_settings(str(PROJECT_ROOT / "configs" / "a1" / name))
 
     assert Path(settings.main_config_path).is_file()
-    assert settings.som_target == "organic_matter_g_kg"
+    assert settings.target == "organic_matter_g_kg"
     assert settings.auxiliary.targets == ("caco3_pct_total", "c_e_c_meq_100g")
     assert settings.carbonate.edges == FAO_CARBONATE_EDGES
     assert settings.carbonate.labels == FAO_CARBONATE_LABELS
@@ -65,22 +65,26 @@ def test_a_file_with_only_main_config_takes_every_default(main_config):
     settings = _settings(main_config)
 
     assert settings.percentiles.quantiles == (10.0, 25.0, 50.0, 75.0, 90.0)
-    assert settings.auxiliary.model == "TabICL"
-    assert settings.auxiliary.n_folds == 5
+    assert (settings.stage1.estimator, settings.stage2.estimator) == ("TabICL", "XGBoost")
+    assert settings.inner_cv_folds == 5
+    assert settings.seeds == (42,) and settings.seed == 42
+    assert settings.min_cell_size == 30
+    assert settings.bootstrap.block_size_km == 10.0
+    assert settings.covariate_groups_path is None
     assert settings.regions.source is None
     assert settings.sample_year.column is None
-    assert settings.preflight.min_cell_points == 30
     assert settings.preflight.prediction_columns == {
         "caco3_pct_total": "caco3_pct_total__TabICL",
         "c_e_c_meq_100g": "c_e_c_meq_100g__TabICL",
     }
-    assert settings.tracking.experiment_name == "Paper_A1"
+    assert settings.mlflow_experiment == "Paper_A1"
+    assert settings.output_dir == "results/a1"
 
 
 def test_settings_cannot_be_changed_once_read(main_config):
     settings = _settings(main_config)
     with pytest.raises(dataclasses.FrozenInstanceError):
-        settings.som_target = "clay_pct"  # type: ignore[misc]
+        settings.target = "clay_pct"  # type: ignore[misc]
 
 
 def test_a_missing_settings_file_is_reported():
@@ -101,7 +105,10 @@ def test_main_config_is_required():
 @pytest.mark.parametrize(
     "raw, where",
     [
-        ({"som_targte": "x"}, "the A1 settings"),
+        ({"targte": "x"}, "the A1 settings"),
+        ({"stage1": {"estimater": "TabICL"}}, "stage1"),
+        ({"bootstrap": {"block_km": 10}}, "bootstrap"),
+        ({"data": {"rot": "x"}}, "data"),
         ({"carbonate": {"edge": [2, 10]}}, "carbonate"),
         ({"timeseries_percentiles": {"quantile": [50]}}, "timeseries_percentiles"),
     ],
@@ -112,7 +119,7 @@ def test_a_misspelt_setting_is_refused_rather_than_ignored(main_config, raw, whe
 
 
 def test_feeding_som_back_in_as_its_own_input_is_refused(main_config):
-    with pytest.raises(ValueError, match="must not include the SOM target"):
+    with pytest.raises(ValueError, match="must not include the target"):
         _settings(main_config, auxiliary={"targets": ["organic_matter_g_kg", "caco3_pct_total"]})
 
 
@@ -173,8 +180,6 @@ def test_a_sampling_year_file_needs_the_column_to_read(main_config):
 def test_the_preflight_thresholds_are_checked(main_config):
     with pytest.raises(ValueError, match="overfit_r2_gap"):
         _settings(main_config, preflight={"overfit_r2_gap": -0.1})
-    with pytest.raises(ValueError, match="min_cell_points"):
-        _settings(main_config, preflight={"min_cell_points": 0})
     with pytest.raises(ValueError, match="prediction_columns"):
         _settings(main_config, preflight={"prediction_columns": ["caco3_pct_total__TabICL"]})
 
@@ -191,19 +196,61 @@ def test_the_real_settings_read_the_baseline_columns_as_the_earlier_predictions(
     )
 
 
-def test_fewer_than_two_folds_is_refused(main_config):
-    with pytest.raises(ValueError, match="n_folds"):
-        _settings(main_config, auxiliary={"n_folds": 1})
+def test_fewer_than_two_inner_folds_is_refused(main_config):
+    with pytest.raises(ValueError, match="inner_cv_folds"):
+        _settings(main_config, inner_cv_folds=1)
 
 
-def test_at_least_one_som_model_is_needed(main_config):
-    with pytest.raises(ValueError, match="models"):
-        _settings(main_config, models=[])
+@pytest.mark.parametrize("estimator", ["XGBoost", "TabICL"])
+def test_stage1_takes_tabicl_or_xgboost(main_config, estimator):
+    assert _settings(main_config, stage1={"estimator": estimator}).stage1.estimator == estimator
+
+
+def test_any_other_stage1_estimator_is_refused(main_config):
+    with pytest.raises(ValueError, match="stage1.estimator must be one of"):
+        _settings(main_config, stage1={"estimator": "Ridge"})
+
+
+def test_a_stage_without_an_estimator_is_refused(main_config):
+    with pytest.raises(ValueError, match="stage2.estimator"):
+        _settings(main_config, stage2={})
+
+
+@pytest.mark.parametrize("seeds, message", [([], "at least one"), ([1, 1], "repeats")])
+def test_seeds_must_be_given_and_distinct(main_config, seeds, message):
+    with pytest.raises(ValueError, match=message):
+        _settings(main_config, seeds=seeds)
+
+
+def test_several_seeds_repeat_the_experiment_and_the_first_one_leads(main_config):
+    settings = _settings(main_config, seeds=[7, 8, 9])
+    assert settings.seeds == (7, 8, 9) and settings.seed == 7
+
+
+@pytest.mark.parametrize("block", [0, -5])
+def test_the_bootstrap_block_must_have_a_size(main_config, block):
+    with pytest.raises(ValueError, match="block_size_km"):
+        _settings(main_config, bootstrap={"block_size_km": block})
+
+
+def test_the_minimum_cell_size_must_be_positive(main_config):
+    with pytest.raises(ValueError, match="min_cell_size"):
+        _settings(main_config, min_cell_size=0)
+
+
+def test_a_covariate_groups_file_that_does_not_exist_is_reported(main_config):
+    with pytest.raises(FileNotFoundError, match="covariate_groups"):
+        _settings(main_config, covariate_groups="nowhere.yml")
 
 
 def test_a_single_name_where_a_list_is_expected_is_refused_rather_than_split_into_letters(main_config):
     with pytest.raises(ValueError, match="must be a list"):
-        _settings(main_config, models="XGBoost")
+        _settings(main_config, auxiliary={"targets": "caco3_pct_total"})
+
+
+def test_the_data_block_is_kept_as_written(main_config):
+    settings = _settings(main_config, data={"root": "/data", "static": "s.csv"})
+    assert dict(settings.data) == {"root": "/data", "static": "s.csv"}
 
 
 def test_the_main_configuration_is_read_through_the_projects_own_config(a1_settings):
@@ -214,4 +261,4 @@ def test_the_main_configuration_is_read_through_the_projects_own_config(a1_setti
 
 def test_a1_settings_is_constructible_directly_with_its_defaults(main_config):
     settings = A1Settings(main_config_path=str(main_config))
-    assert settings.models == ("XGBoost", "TabICL")
+    assert settings.stage2.estimator == "XGBoost"

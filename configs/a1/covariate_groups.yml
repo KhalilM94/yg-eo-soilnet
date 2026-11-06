@@ -1,0 +1,47 @@
+# Which covariate goes in which group, for the Paper A1 experiments (configs/a1/a1.yml points here).
+#
+# Each group lists `columns` (exact names) and/or `prefixes`. A prefix matches every input whose
+# name starts with it, and also every time-series percentile of a variable whose name starts with
+# it: "S2_" matches ts_S2_B4_p10 as well as an S2_... column.
+#
+# Checked when A1 is loaded with the data: a column or prefix that matches no input, a column
+# claimed by two groups, and a group left with nothing are all errors. An input no group claims is
+# warned about, since it would then be in no model - `combined`, the union of the groups, is what
+# the full model reads. `combined` is never written here.
+#
+# `auxiliary` is different from the others: it names the soil properties whose STAGE-1 PREDICTIONS
+# are inputs (columns a1_pred_<property>), never their measured values. Each must be one of
+# auxiliary.targets in a1.yml.
+
+satellite:
+  # Bare-soil Sentinel-2 reflectance (s2_<band>_barest and its spread, _sd), and the percentiles of
+  # the Sentinel-1, Sentinel-2, vegetation and soil-moisture time series.
+  prefixes: [s2_, S2_, S1_asc_, S1_desc_, AG_, SOIL_]
+  # How many dated readings each point's time series holds.
+  columns: [ts_n_obs]
+
+terrain:
+  columns: [elevation, slope, aspect, twi]
+
+climate:
+  columns: [aridity_index]
+  prefixes: [CLIM_]
+
+# The existing soil-map layers, inputs only in A1 (see configs/a1/data_spec.yml). The map also had
+# silt_median_0_30cm and SU_WRB1_PH, which are not in the current static file; list them again here
+# once they are.
+legacy_soil:
+  columns:
+    - bd_median_0_30cm
+    - clay_median_0_30cm
+    - ph_median_0_30cm
+    - sand_median_0_30cm
+    - soc_median_0_30cm
+    - som_median_0_30cm
+    - swc_median_0_30cm
+    - texture_20cm
+    # - silt_median_0_30cm
+    # - SU_WRB1_PH
+
+auxiliary:
+  columns: [caco3_pct_total, c_e_c_meq_100g]
