@@ -435,3 +435,70 @@ def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
     plan = _plan(demo_run, "random")
     assert reread.predictions.index.equals(plan.assignments.index)
     assert reread.predictions.notna().all().all()
+
+
+# --- what the evaluation needs, on every row -------------------------------------------------------
+
+
+def test_every_row_carries_its_points_position_and_its_plans_details(demo_run, context_parts):
+    table = context_parts[0]
+    frame = _predictions(demo_run)
+    coordinates = table.coordinates.reindex(frame["point_id"])
+    assert np.allclose(frame["lat"], coordinates["lat"]) and np.allclose(frame["lon"], coordinates["lon"])
+
+    index = pd.read_csv(demo_run["result"].run_dir.parents[1] / "plans" / "index.csv")
+    logo = frame[frame["plan_id"] == "logo_r01_north_east"]
+    expected = index.set_index("plan_id").loc["logo_r01_north_east", "held_out"]
+    assert set(logo["held_out"]) == {expected}
+    assert frame["fraction"].isna().all() and frame["repeat"].isna().all()  # neither random nor logo has a share
+
+
+def test_a_run_folder_in_an_older_format_is_refused_then_cleared_on_restart(demo_run):
+    from yg_eo_soilnet.a1.runner import PREDICTION_FORMAT
+
+    a1 = demo_run["a1"]
+    old = demo_run["result"].run_dir.parent / "older"
+    old.mkdir()
+    manifest = json.loads((demo_run["result"].run_dir / MANIFEST_FILE).read_text())
+    del manifest["format"]
+    (old / MANIFEST_FILE).write_text(json.dumps(manifest))
+
+    with pytest.raises(RunMismatch, match=f"format 1, this code writes format {PREDICTION_FORMAT}"):
+        run_plans(a1, kinds=[RANDOM], tracking=False, run_name="older")
+    cleared = run_plans(a1, kinds=[RANDOM], tracking=False, run_name="older", restart=True)
+    assert len(cleared.computed) == len(MODELS)
+    assert json.loads((old / MANIFEST_FILE).read_text())["format"] == PREDICTION_FORMAT
+
+
+def test_asking_for_mixed_plans_runs_their_control_plans_too(demo_run, tmp_path, monkeypatch):
+    from yg_eo_soilnet.a1 import runner
+    from yg_eo_soilnet.a1.plans import CONTROL, MIXED
+
+    a1 = demo_run["a1"]
+    plans = tmp_path / "plans"
+    write_plans(a1.settings, str(plans), kinds=[MIXED])
+    seen = []
+    monkeypatch.setattr(runner, "_run_one_plan", lambda row, *args, **kwargs: seen.append(row.kind) or False)
+    run_plans(a1, plans_dir=str(plans), kinds=[MIXED], tracking=False, run_name="mixed")
+    assert set(seen) == {MIXED, CONTROL}
+
+
+def test_the_evaluation_reads_a_real_run_end_to_end(demo_run):
+    from yg_eo_soilnet.a1 import evaluation
+
+    frame = evaluation.load_predictions(demo_run["result"].run_dir)
+    test = frame[(frame["split"] == TEST) & (frame["covariate_group"] == COMBINED_GROUP)]
+
+    scores = evaluation.grouped_metrics(test, ["kind", "model"])
+    assert set(scores["model"]) == {*MODELS, LOCAL} and scores["rmse"].gt(0).all()
+
+    boot = evaluation.block_bootstrap(test, ["kind", "model"], n=50, compare=[(PER_CLASS_MEASURED, GLOBAL)])
+    rmse = boot.intervals[boot.intervals["metric"] == "rmse"].dropna(subset=["low"])
+    assert not rmse.empty and (rmse["low"] <= rmse["estimate"]).all() and (rmse["estimate"] <= rmse["high"]).all()
+    assert set(boot.differences["kind"]) == {RANDOM, LOGO}
+    assert boot.differences["p_holm"].dropna().between(0, 1).all()
+
+    transfer = evaluation.transfer_table(frame)
+    logo_plans = frame.loc[frame["kind"] == LOGO, "plan_id"].nunique()
+    assert len(transfer) == logo_plans * (1 + len(demo_run["a1"].groups.names))
+    assert transfer["has_local"].all() and transfer["rmse_drop"].notna().all()

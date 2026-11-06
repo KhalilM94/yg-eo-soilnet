@@ -14,7 +14,12 @@ not computed again, so an interrupted run carries on where it stopped. Files are
 temporary name and renamed when complete, so a run killed mid-write never leaves a half-file that
 looks finished. The folder's ``manifest.json`` records what the outputs were made from - a hash of
 the settings and of every plan - and a run whose settings or plans differ refuses to add to it,
-since its files would silently mix two experiments; ``restart`` clears it instead.
+since its files would silently mix two experiments; ``restart`` clears it instead. The same goes
+for a folder written in an older file format (:data:`PREDICTION_FORMAT`).
+
+Every row of a predictions file carries what the evaluation needs without the data or the settings
+(:mod:`yg_eo_soilnet.a1.evaluation`): the plan's held-out region, share and repeat, and the point's
+position, from which the spatial blocks of the bootstrap are drawn.
 
 Each plan that computed something gets an MLflow sub-run with its scores; the run's parent records
 the git commit and the settings, and at the end a ``metrics.csv`` of every plan, model, group and
@@ -33,12 +38,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional
 
+import numpy as np
 import pandas as pd
 
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.features import build_table
-from yg_eo_soilnet.a1.plans import INDEX_FILE, LOGO
+from yg_eo_soilnet.a1.plans import CONTROL, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.stage2 import (
     GLOBAL_AUX,
     LOCAL,
@@ -56,9 +62,14 @@ from yg_eo_soilnet.metrics import regression_metrics
 PREDICTION_COLUMNS = (
     "plan_id",
     "kind",
+    "held_out",
+    "fraction",
+    "repeat",
     "point_id",
     "split",
     "region",
+    "lat",
+    "lon",
     "carbonate_class_measured",
     "carbonate_class_predicted",
     "model",
@@ -69,6 +80,9 @@ PREDICTION_COLUMNS = (
     "model_role",
     "tuned_params",
 )
+#: The version of that layout, recorded in the manifest. A run folder written in another version is
+#: refused like one made from other settings: its old files would sit beside new ones.
+PREDICTION_FORMAT = 2
 MANIFEST_FILE = "manifest.json"
 METRICS_FILE = "metrics.csv"
 
@@ -123,7 +137,8 @@ def run_plans(
     run_name : str, default "default"
         The run folder's name, under ``<output_dir>/runs/``.
     kinds : iterable of str, optional
-        Only plans of these kinds; every kind unless given.
+        Only plans of these kinds; every kind unless given. ``mixed`` brings its ``control`` plans
+        with it, as in ``make_plans.py``: a mixed score means little without them.
     groups : bool, default False
         Also fit ``global_aux`` per covariate group, and the ``local`` models of ``logo`` plans.
     restart : bool, default False
@@ -156,6 +171,8 @@ def run_plans(
     index = pd.read_csv(index_path, keep_default_na=False, na_values=[""])
     if kinds is not None:
         kinds = list(kinds)
+        if MIXED in kinds and CONTROL not in kinds:
+            kinds.append(CONTROL)
         index = index[index["kind"].isin(kinds)]
     run_dir = Path(settings.output_dir) / "runs" / run_name
     manifest = _check_manifest(a1, config, plans_path, index, run_dir, restart=restart, logger=logger)
@@ -277,13 +294,20 @@ def _auxiliary_from_frame(frame: pd.DataFrame, settings) -> AuxiliaryPredictions
 def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd.DataFrame:
     """The predictions table of one model on one plan."""
     ids = outcome.predicted.index
+    coordinates = table.coordinates.reindex(ids)
     return pd.DataFrame(
         {
             "plan_id": row.plan_id,
             "kind": row.kind,
+            "held_out": None if pd.isna(row.held_out) else str(row.held_out),
+            # Whole float columns even when empty: a column of bare NaN would be read back as object.
+            "fraction": np.full(len(ids), float(row.fraction) if pd.notna(row.fraction) else np.nan),
+            "repeat": np.full(len(ids), float(row.repeat) if pd.notna(row.repeat) else np.nan),
             "point_id": ids.to_numpy(),
             "split": context.split.reindex(ids).to_numpy(),
             "region": (region.reindex(ids).to_numpy() if region is not None else None),
+            "lat": coordinates["lat"].to_numpy(dtype=float),
+            "lon": coordinates["lon"].to_numpy(dtype=float),
             "carbonate_class_measured": context.class_measured.reindex(ids).astype(object).to_numpy(),
             "carbonate_class_predicted": context.class_predicted.reindex(ids).astype(object).to_numpy(),
             "model": model,
@@ -341,6 +365,10 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger) 
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         problems = []
+        if manifest.get("format") != PREDICTION_FORMAT:
+            problems.append(
+                f"its files are in format {manifest.get('format', 1)}, this code writes format {PREDICTION_FORMAT}"
+            )
         if manifest.get("config_hash") != fingerprint:
             problems.append("the settings differ")
         changed = [
@@ -367,6 +395,7 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger) 
         shutil.rmtree(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
+        "format": PREDICTION_FORMAT,
         "config_hash": fingerprint,
         "settings": a1.path,
         "git_commit": a1.git_commit,
