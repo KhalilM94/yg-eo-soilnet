@@ -579,7 +579,7 @@ def test_the_evaluation_script_writes_its_five_tables(demo_run):
     from experiments.a1.evaluate import TABLES
     from experiments.a1.evaluate import main as evaluate_main
 
-    tables = evaluate_main(["--config", str(demo_run["path"]), "--n-boot", "20"])
+    tables = evaluate_main(["--config", str(demo_run["path"]), "--n-boot", "20", "--no-mlflow"])
     out = demo_run["result"].run_dir / "evaluation"
     assert sorted(path.name for path in out.glob("*.csv")) == sorted(TABLES)
     assert {"kind", "model", "covariate_group", "split", "rmse", "rpiq", "small"} <= set(tables["scores.csv"].columns)
@@ -599,7 +599,9 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
         raise OSError("offline")
 
     monkeypatch.setattr(map_style, "cached_download", refuse)
-    drawn = figures_main(["--config", str(demo_run["path"]), "--out", str(tmp_path), "--n-boot", "20", "--no-relief"])
+    drawn = figures_main(
+        ["--config", str(demo_run["path"]), "--out", str(tmp_path), "--n-boot", "20", "--no-relief", "--no-mlflow"]
+    )
     plt.close("all")
     assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
         f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")

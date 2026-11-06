@@ -33,7 +33,7 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED
+from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED, RANDOM, SPATIAL_KFOLD, slug
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
 from yg_eo_soilnet.a1.stage2 import GLOBAL_AUX, LOCAL
 from yg_eo_soilnet.datamodules.splitting import TEST
@@ -659,3 +659,126 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
         table["n_repeats"] = table["n_repeats"].astype(int)
         table["has_local"] = table["has_local"].astype(bool)
     return table
+
+
+# --- headline metrics, for MLflow ---------------------------------------------------------------
+
+#: The scores logged as headline metrics.
+HEADLINE_SCORES = ("rmse", "mae", "r2", "bias", "rpiq")
+#: The scores whose bootstrap interval bounds are logged too (``__lo`` / ``__hi``).
+HEADLINE_INTERVALS = ("rmse", "r2")
+#: The covariate group whose name is left out of a headline metric's name: every covariate.
+DEFAULT_GROUP = "combined"
+
+
+def _pooled_scope(kind: str, block_size_m) -> str:
+    """``random``, or ``spatial_kfold_<size>m`` for one block size (``spatial_kfold`` without one)."""
+    if kind == SPATIAL_KFOLD and pd.notna(block_size_m):
+        return f"{SPATIAL_KFOLD}_{float(block_size_m):g}m"
+    return kind
+
+
+def headline_metrics(
+    frame: pd.DataFrame,
+    *,
+    intervals: Optional[pd.DataFrame] = None,
+    region_intervals: Optional[pd.DataFrame] = None,
+    transfer: Optional[pd.DataFrame] = None,
+) -> dict[str, float]:
+    """The scores of a run worth a glance in MLflow, named ``<score>__<plans>__<model>[__<group>]``.
+
+    On the test points only, for RMSE, MAE, R², bias and RPIQ:
+
+    - ``random``: all its test points;
+    - ``spatial_kfold_<size>m``: the test points of every fold of one block size, pooled - one value
+      per size, never pooled across sizes;
+    - ``logo_<region>``: one held-out region; and ``logo_mean``, the mean of the regions' scores.
+
+    ``__<group>`` is added for a model fitted on one covariate group only, and left out for every
+    covariate (``combined``). Also: the transfer drop per region and group
+    (``rmse_drop__logo_<region>__<group>`` and ``rmse_drop__logo_mean__<group>``), and the
+    bootstrap interval bounds of RMSE and R² (``...__lo`` / ``...__hi``) wherever ``intervals``
+    (pooled: random and each block size) or ``region_intervals`` (each region) hold them. Names are
+    MLflow-safe: lower-case letters, digits and underscores (:func:`~yg_eo_soilnet.a1.tracking.metric_name`).
+
+    Parameters
+    ----------
+    frame : pandas.DataFrame
+        Prediction rows (:func:`load_predictions`).
+    intervals : pandas.DataFrame, optional
+        :func:`block_bootstrap` intervals by ``kind, block_size_m, model``.
+    region_intervals : pandas.DataFrame, optional
+        Its intervals by ``kind, held_out, model``, on the ``logo`` rows.
+    transfer : pandas.DataFrame, optional
+        :func:`transfer_table`.
+
+    Returns
+    -------
+    dict of str to float
+        Undefined scores are left out.
+    """
+    from yg_eo_soilnet.a1.tracking import metric_name
+
+    def group_part(group):
+        return None if group == DEFAULT_GROUP else group
+
+    metrics: dict[str, float] = {}
+
+    def add(name: str, value) -> None:
+        if value is not None and np.isfinite(value):
+            metrics[name] = float(value)
+
+    test = frame[frame["split"] == TEST]
+    pooled = test[test["kind"].isin([RANDOM, SPATIAL_KFOLD])]
+    if not pooled.empty:
+        for row in grouped_metrics(pooled, ["kind", "block_size_m", "model", "covariate_group"], min_n=0).itertuples():
+            scope = _pooled_scope(row.kind, row.block_size_m)
+            for score in HEADLINE_SCORES:
+                add(metric_name(score, scope, row.model, group_part(row.covariate_group)), getattr(row, score))
+
+    logo = test[test["kind"] == LOGO]
+    if not logo.empty:
+        regions = grouped_metrics(logo, ["held_out", "model", "covariate_group"], min_n=0)
+        for row in regions.itertuples():
+            for score in HEADLINE_SCORES:
+                add(
+                    metric_name(score, f"logo_{row.held_out}", row.model, group_part(row.covariate_group)),
+                    getattr(row, score),
+                )
+        means = regions.groupby(["model", "covariate_group"], sort=True)[list(HEADLINE_SCORES)].mean()
+        for (model, group), row in means.iterrows():
+            for score in HEADLINE_SCORES:
+                add(metric_name(score, "logo_mean", model, group_part(group)), row[score])
+
+    if transfer is not None and not transfer.empty:
+        drops = transfer[(transfer["kind"] == LOGO) & transfer["has_local"]]
+        for row in drops.itertuples():
+            add(metric_name("rmse_drop", f"logo_{row.region}", row.covariate_group), row.rmse_drop)
+        for group, values in drops.groupby("covariate_group")["rmse_drop"]:
+            add(metric_name("rmse_drop", "logo_mean", group), values.mean())
+
+    for table, scope_of in (
+        (intervals, lambda row: _pooled_scope(row["kind"], row.get("block_size_m"))),
+        (region_intervals, lambda row: f"logo_{row['held_out']}"),
+    ):
+        if table is None or table.empty:
+            continue
+        for _, row in table[table["metric"].isin(HEADLINE_INTERVALS)].iterrows():
+            if row["kind"] not in (RANDOM, SPATIAL_KFOLD, LOGO) or (row["kind"] == LOGO and "held_out" not in row):
+                continue
+            for bound in ("low", "high"):
+                suffix = "lo" if bound == "low" else "hi"
+                add(metric_name(row["metric"], scope_of(row), row["model"], suffix), row[bound])
+    return metrics
+
+
+def region_names(frame: pd.DataFrame) -> dict[str, str]:
+    """Each held-out region's name as it appears in metric names, mapped to its real name.
+
+    Examples
+    --------
+    >>> region_names(pd.DataFrame({"kind": ["logo", "logo"], "held_out": ["Oum Er Rbia", "Guir - Ziz - Rhris"]}))
+    {'guir_ziz_rhris': 'Guir - Ziz - Rhris', 'oum_er_rbia': 'Oum Er Rbia'}
+    """
+    names = frame.loc[frame["kind"] == LOGO, "held_out"].dropna().unique()
+    return {slug(name): str(name) for name in sorted(names, key=slug)}

@@ -822,6 +822,16 @@ def _region_tag(population: PlanPopulation, region: int) -> str:
     >>> _region_tag(population, 7)
     'r07_cotiers_mediterranes'
     """
-    name = unicodedata.normalize("NFKD", str(population.region_names[region])).encode("ascii", "ignore").decode()
-    slug = re.sub(r"[^0-9a-z]+", "_", name.lower()).strip("_")
-    return f"r{region:02d}_{slug}"
+    return f"r{region:02d}_{slug(population.region_names[region])}"
+
+
+def slug(name) -> str:
+    """A name in plain lower-case ASCII letters, digits and underscores: safe in file and metric names.
+
+    Examples
+    --------
+    >>> slug("Côtiers Méditérranés"), slug("Guir - Ziz - Rhris"), slug("Oum Er Rbia")
+    ('cotiers_mediterranes', 'guir_ziz_rhris', 'oum_er_rbia')
+    """
+    plain = unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode()
+    return re.sub(r"[^0-9a-z]+", "_", plain.lower()).strip("_")

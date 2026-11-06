@@ -433,3 +433,106 @@ def test_spatial_scores_of_different_block_sizes_are_never_pooled():
     differences = result.differences[result.differences["metric"] == "rmse"]
     assert len(differences) == 3  # random, and each block size on its own
     assert (differences["n"] == len(points)).all() and (differences["n_unpaired"] == 0).all()
+
+
+def test_headline_metrics_are_named_per_plan_kind_block_size_region_and_group():
+    from yg_eo_soilnet.a1.evaluation import headline_metrics
+
+    points = _points(60)
+    rows = [
+        _rows(points, _noisy(points, 2, 1), model="global", block_size_m=np.nan),
+        _rows(points, _noisy(points, 2, 2), model="global_aux", covariate_group="terrain", block_size_m=np.nan),
+    ]
+    for size, sd in ((10_000.0, 3.0), (25_000.0, 6.0)):
+        rows.append(
+            _rows(
+                points,
+                _noisy(points, sd, int(size)),
+                model="global",
+                plan_id=f"kfold_{size:g}",
+                kind="spatial_kfold",
+                block_size_m=size,
+            )
+        )
+    for region, sd in (("Oum Er Rbia", 2.0), ("Guir - Ziz - Rhris", 4.0)):
+        rows.append(
+            _rows(
+                points,
+                _noisy(points, sd, len(region)),
+                model="global",
+                plan_id=f"logo_{region}",
+                kind=LOGO,
+                held_out=region,
+                block_size_m=np.nan,
+            )
+        )
+    frame = pd.concat(rows, ignore_index=True)
+    frame.loc[frame.index[:10], "split"] = VAL  # validation rows never count
+
+    metrics = headline_metrics(frame)
+    assert {"rmse__random__global", "rmse__random__global_aux__terrain", "rpiq__random__global"} <= set(metrics)
+    assert metrics["rmse__spatial_kfold_25000m__global"] > metrics["rmse__spatial_kfold_10000m__global"]  # not pooled
+    regions = [metrics["rmse__logo_oum_er_rbia__global"], metrics["rmse__logo_guir_ziz_rhris__global"]]
+    assert metrics["rmse__logo_mean__global"] == pytest.approx(np.mean(regions))
+    assert "rmse__logo__global" not in metrics
+    test_only = grouped_metrics(
+        frame[(frame["split"] == TEST) & (frame["kind"] == RANDOM) & (frame["model"] == "global")], "model"
+    )
+    assert metrics["rmse__random__global"] == pytest.approx(test_only["rmse"].iloc[0])
+
+
+def test_headline_metrics_add_interval_bounds_and_transfer_drops():
+    from yg_eo_soilnet.a1.evaluation import headline_metrics
+
+    intervals = pd.DataFrame(
+        {
+            "kind": ["random", "random", "spatial_kfold", "logo"],
+            "block_size_m": [np.nan, np.nan, 10_000.0, np.nan],
+            "model": "global",
+            "metric": ["rmse", "mae", "r2", "rmse"],
+            "estimate": 1.0,
+            "low": [0.5, 0.4, 0.6, 0.9],
+            "high": [1.5, 1.6, 0.8, 1.1],
+        }
+    )
+    region_intervals = pd.DataFrame(
+        {
+            "kind": "logo",
+            "held_out": ["Oum Er Rbia"],
+            "model": "local",
+            "metric": "rmse",
+            "estimate": 2.0,
+            "low": 1.8,
+            "high": 2.2,
+        }
+    )
+    transfer = pd.DataFrame(
+        {
+            "kind": [LOGO, LOGO, MIXED],
+            "region": ["Oum Er Rbia", "Sebou", "Sebou"],
+            "covariate_group": "combined",
+            "has_local": [True, True, True],
+            "rmse_drop": [1.0, 3.0, 9.0],
+        }
+    )
+    frame = _rows(_points(10), _points(10)["observed"], block_size_m=np.nan).iloc[0:0]
+    metrics = headline_metrics(frame, intervals=intervals, region_intervals=region_intervals, transfer=transfer)
+    assert metrics == {
+        "rmse__random__global__lo": 0.5,
+        "rmse__random__global__hi": 1.5,
+        "r2__spatial_kfold_10000m__global__lo": 0.6,
+        "r2__spatial_kfold_10000m__global__hi": 0.8,
+        "rmse__logo_oum_er_rbia__local__lo": 1.8,
+        "rmse__logo_oum_er_rbia__local__hi": 2.2,
+        "rmse_drop__logo_oum_er_rbia__combined": 1.0,
+        "rmse_drop__logo_sebou__combined": 3.0,
+        "rmse_drop__logo_mean__combined": 2.0,
+    }  # MAE has no interval metric; the pooled logo interval and the mixed drop are not headline ones
+
+
+def test_metric_names_are_mlflow_safe():
+    from yg_eo_soilnet.a1.tracking import metric_name
+
+    assert metric_name("rmse", "logo_Oum Er Rbia", "global") == "rmse__logo_oum_er_rbia__global"
+    assert metric_name("rmse", "logo_Guir - Ziz - Rhris", "local", None) == "rmse__logo_guir_ziz_rhris__local"
+    assert metric_name("r2", "logo_Côtiers Méditérranés", "global") == "r2__logo_cotiers_mediterranes__global"

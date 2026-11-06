@@ -53,6 +53,9 @@ from yg_eo_soilnet.a1.features import build_table
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.settings import dev_mode_settings
 from yg_eo_soilnet.a1.stage2 import (
+    DIAGNOSTIC_MODELS,
+    ROLE_DIAGNOSTIC,
+    ROLE_MODEL,
     GLOBAL_AUX,
     LOCAL,
     MODELS,
@@ -221,7 +224,11 @@ def run_plans(
     resolved = a1.resolve_groups(table, logger=logger)
     result = RunResult(run_dir=run_dir)
 
-    parent = _start_parent(a1, config, run_name, kinds, groups, dev_mode) if tracking else None
+    parent = (
+        _start_parent(a1, config, run_name, kinds, groups, dev_mode, manifest=manifest, run_dir=run_dir)
+        if tracking
+        else None
+    )
     try:
         for row in index.itertuples(index=False):
             computed_here = _run_one_plan(
@@ -577,17 +584,52 @@ def _write_json(path: Path, payload: dict) -> None:
 # --- MLflow ---------------------------------------------------------------------------------------
 
 
-def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool, dev_mode: bool = False):
-    """Open the run's parent MLflow run, with its provenance."""
+def _start_parent(
+    a1: A1Config,
+    config,
+    run_name: str,
+    kinds,
+    groups: bool,
+    dev_mode: bool = False,
+    *,
+    manifest: Optional[dict] = None,
+    run_dir: Optional[Path] = None,
+):
+    """Open the run folder's parent MLflow run, with its provenance - the same one on every resume.
+
+    The parent's ids are kept in the folder's manifest (:mod:`yg_eo_soilnet.a1.tracking`): a resumed
+    run reopens that parent, so a folder's child runs, evaluation and figures all sit under one run.
+    A folder without one (new, cleared by ``restart``, or run without MLflow until now) gets a new
+    parent. A recorded parent MLflow no longer has stops the run: its outputs would be split.
+    """
     import mlflow
 
+    from yg_eo_soilnet.a1.tracking import A1TrackingError, check_run, record_parent, recorded_run_id
     from yg_eo_soilnet.tracking import close_stale_runs, configure_tracking, log_params_once, run_owner_tags
 
     experiment = configure_tracking(config, a1.settings.mlflow_experiment)
     close_stale_runs(experiment)
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    run = mlflow.start_run(run_name=f"A1_{run_name}_{stamp}")
-    mlflow.set_tags({**run_owner_tags(), "a1_run_name": run_name})
+    existing = recorded_run_id(manifest or {})
+    if existing:
+        try:
+            check_run(existing, run_dir)
+        except A1TrackingError as error:
+            raise RunMismatch(str(error)) from error
+        run = mlflow.start_run(run_id=existing)
+    else:
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        run = mlflow.start_run(run_name=f"A1_{run_name}_{stamp}")
+    if manifest is not None and run_dir is not None:
+        record_parent(run_dir, manifest, run)
+    roles = {model: (ROLE_DIAGNOSTIC if model in DIAGNOSTIC_MODELS else ROLE_MODEL) for model in (*MODELS, LOCAL)}
+    mlflow.set_tags(
+        {
+            **run_owner_tags(),
+            "a1_run_name": run_name,
+            "model_role": json.dumps(roles),
+            "a1_diagnostic_models": ",".join(DIAGNOSTIC_MODELS),
+        }
+    )
     log_params_once(
         {
             **a1.describe(),
