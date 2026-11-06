@@ -5,14 +5,14 @@ front, as :class:`~yg_eo_soilnet.datamodules.splitting.SplitPlan` files, makes e
 same fixed split and lets anyone check which points a score came from. Five kinds:
 
 ``random``
-    The baseline: points held out one at a time, 70 / 15 / 15.
+    The baseline: points held out one at a time, 85 % training / 15 % test.
 ``spatial_kfold``
     Nearby points grouped into blocks (k-means or a grid), the blocks packed into folds, each fold
-    the test set once. Whole blocks, so a test point is never the near neighbour of a training
-    point.
+    the test set once; every other block is training. Whole blocks, so a test point is never the
+    near neighbour of a training point.
 ``logo``
-    Leave one region out: each region in turn is the test set, another whole region the
-    validation set, the rest training. Is a model trained elsewhere any good here?
+    Leave one region out: each region in turn is the test set, every other region training. Is a
+    model trained elsewhere any good here?
 ``mixed``
     A region held out as in ``logo``, but with a share of its points moved into training: how much
     does a little local data help a model trained elsewhere?
@@ -23,6 +23,13 @@ same fixed split and lets anyone check which points a score came from. Five kind
 
 A region with fewer than ``min_cell_size`` points is never held out and never used for
 validation: its score would rest on too few points. It stays in training.
+
+**No validation set, by default.** A1 chooses its settings by cross-validation inside the training
+points (grouped by block or region on the spatial plans) and fits both stages on the training points
+only, so validation points would never be fitted or tuned on: they would only take data away from
+training. ``plans.random.val_size``, ``plans.spatial_kfold.val_size`` and
+``plans.logo.validation_region`` (for ``logo`` and ``mixed``) still set one aside when asked, and
+loading such settings logs a warning.
 
 Every plan is checked before anything is written (:func:`validate_plan`): no point in two splits, a
 test set, no block or region divided between splits - except the held-out region of ``mixed`` and
@@ -233,9 +240,11 @@ def random_plan(population: PlanPopulation, settings: A1Settings) -> BuiltPlan:
 
 
 def spatial_kfold_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPlan]:
-    """One plan per fold of blocks: the fold is the test set, other whole blocks the validation set.
+    """One plan per fold of blocks: the fold is the test set, every other block training.
 
-    Points without coordinates are in no block and always in training.
+    With ``plans.spatial_kfold.val_size`` above 0, whole blocks of the other folds holding about
+    that share of the points are set aside for validation instead. Points without coordinates are in
+    no block and always in training.
 
     Returns
     -------
@@ -340,9 +349,8 @@ def whole_blocks_for(blocks: pd.Series, n_points: int, *, seed: int) -> pd.Index
 def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPlan]:
     """Leave one region out: each eligible region the test set once.
 
-    The validation set is one other eligible region, chosen with the run's seed and the held-out
-    region's number, so the same data always gives the same choice; with fewer than three eligible
-    regions there is none to spare and validation is empty.
+    Every other region is training. With ``plans.logo.validation_region``, one other eligible region
+    is set aside for validation instead (:func:`validation_region`).
 
     Returns
     -------
@@ -352,9 +360,8 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
     _require_regions(population, LOGO)
     plans = []
     for region in population.eligible:
-        validation = validation_region(population, region, settings.seed)
         test_ids = population.region_points(region)
-        val_ids = population.region_points(validation) if validation is not None else pd.Index([])
+        val_ids = _validation_points(population, region, settings)
         assignments = _assignments(population.ids, test=test_ids, val=val_ids)
         plan = _plan(assignments, LOGO, settings, clusters=population.region_ids, population=population)
         plans.append(
@@ -370,11 +377,23 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
 
 
 def validation_region(population: PlanPopulation, held_out: int, seed: int) -> Optional[int]:
-    """The region used for validation when ``held_out`` is the test set; None with fewer than 3 eligible."""
+    """The region set aside for validation when ``held_out`` is the test set and validation is asked for.
+
+    Chosen with the run's seed and the held-out region's number, so the same data always gives the
+    same choice; None with fewer than three eligible regions, when there is none to spare.
+    """
     others = [region for region in population.eligible if region != held_out]
     if len(population.eligible) < 3:
         return None
     return int(np.random.default_rng([seed, held_out]).choice(others))
+
+
+def _validation_points(population: PlanPopulation, held_out: int, settings: A1Settings) -> pd.Index:
+    """The validation points of a region plan: none, unless ``plans.logo.validation_region`` asks."""
+    if not settings.plans.logo.validation_region:
+        return pd.Index([])
+    validation = validation_region(population, held_out, settings.seed)
+    return population.region_points(validation) if validation is not None else pd.Index([])
 
 
 def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPlan]:
@@ -394,8 +413,7 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
     plans = []
     for region in population.eligible:
         region_ids = population.region_points(region)
-        validation = validation_region(population, region, settings.seed)
-        val_ids = population.region_points(validation) if validation is not None else pd.Index([])
+        val_ids = _validation_points(population, region, settings)
         tag = _region_tag(population, region)
         name = population.region_names[region]
         for repeat in range(options.n_repeats):

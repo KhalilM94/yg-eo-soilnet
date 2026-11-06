@@ -118,24 +118,33 @@ preflight:
 # Every split the experiments are scored on, written once by
 #   python experiments/a1/make_plans.py --config configs/a1/a1.yml
 # as <output_dir>/plans/<plan_id>.parquet plus index.csv. Regions with fewer than min_cell_size
-# points are never held out or used for validation; they stay in training.
+# points are never held out; they stay in training.
+#
+# No plan has a validation set. A1 fits both stages on the training points only and chooses their
+# settings by cross-validation inside them (grouped by block or region on the spatial plans), so
+# validation points would never be fitted or tuned on - they would only take data away from
+# training. val_size above 0, or validation_region: true, still sets them aside (scored like the
+# test points), and loading such settings logs a warning.
 plans:
-  # The baseline: points held out one at a time (shares of all points).
+  # The baseline: points held out one at a time (shares of all points): 85 % training, 15 % test.
   random:
     test_size: 0.15
-    val_size: 0.15
-  # Nearby points grouped into blocks, packed into folds; each fold is the test set once and
-  # validation is whole blocks of the other folds (val_size of all points). method: kmeans uses
-  # n_clusters blocks; method: grid uses squares of cell_size_m metres.
+    val_size: 0
+  # Nearby points grouped into blocks, packed into folds; each fold is the test set once and every
+  # other block is training. method: kmeans uses n_clusters blocks; method: grid uses squares of
+  # cell_size_m metres.
   spatial_kfold:
     method: kmeans
     n_clusters: 50
     cell_size_m: 10000
     n_folds: 5
-    val_size: 0.15
+    val_size: 0
+  # Leave one region out (logo) and its mixed variants: every region but the held-out one is
+  # training. validation_region: true would set a second whole region aside instead.
+  logo:
+    validation_region: false
   # Leave one region out, with a share of the region moved into training: each fraction, drawn
-  # n_repeats times. Each mixed plan also gets its control - the same moved points alone. The
-  # validation region is the one the region's leave-one-out plan uses.
+  # n_repeats times. Each mixed plan also gets its control - the same moved points alone.
   mixed:
     fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     n_repeats: 5

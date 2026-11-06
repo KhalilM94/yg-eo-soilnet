@@ -4,7 +4,8 @@ Stage 2 reads these predictions as inputs for SOM, so a prediction made by a mod
 that point's own CaCO3 would hand stage 2 information a new point never has, and flatter every
 score built on it. The rule is that no point is ever predicted by a model fitted on its lab value:
 
-* **validation and test points** are predicted by one model fitted on the training points;
+* **test points** (and validation points, when the plan has any) are predicted by one model fitted
+  on the training points;
 * **training points** are predicted *out of fold*: the training points are cut into folds, and each
   fold is predicted by a model fitted on the other folds (:func:`sklearn.model_selection.cross_val_predict`);
 * a training point whose own value was never measured contributed no label to any fit, so it is

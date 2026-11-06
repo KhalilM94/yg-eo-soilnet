@@ -83,12 +83,18 @@ def _synthetic_population(settings, region_sizes, *, seed=0):
 # --- random ---------------------------------------------------------------------------------
 
 
-def test_the_random_plan_is_70_15_15(plans, population):
+def test_the_random_plan_is_85_15_with_no_validation_set(plans, population):
     counts = plans[RANDOM][0].plan.counts()
     total = len(population.ids)
     assert counts["test"] == pytest.approx(0.15 * total, abs=2)
-    assert counts["val"] == pytest.approx(0.15 * total, abs=2)
-    assert sum(counts.values()) == total
+    assert counts["val"] == 0
+    assert counts["train"] + counts["test"] == total
+
+
+def test_a_random_validation_share_still_works_when_asked(population, a1_settings):
+    settings = a1_settings(plans={"random": {"test_size": 0.15, "val_size": 0.15}})
+    counts = random_plan(population, settings).plan.counts()
+    assert counts["val"] == pytest.approx(0.15 * len(population.ids), abs=2)
 
 
 def test_the_random_plan_is_the_same_for_the_same_seed_and_different_for_another(population, a1_settings):
@@ -114,8 +120,17 @@ def test_every_point_is_tested_exactly_once_over_the_folds(plans, population):
     assert set(tested) == set(population.ids)
 
 
-def test_no_block_is_divided_and_validation_is_about_15_percent(plans, population):
+def test_no_block_is_divided_and_every_block_outside_the_test_fold_is_training(plans, population):
     for built in plans[SPATIAL_KFOLD]:
+        frame = built.plan.to_frame()
+        assert (frame.groupby("cluster")["split"].nunique() == 1).all()
+        assert built.plan.counts()["val"] == 0
+        assert set(built.plan.point_ids_for(TRAIN)) == set(population.ids) - set(built.plan.point_ids_for(TEST))
+
+
+def test_a_kfold_validation_share_is_whole_blocks_of_about_that_size_when_asked(population, a1_settings):
+    settings = a1_settings(plans={"spatial_kfold": {"val_size": 0.15}})
+    for built in spatial_kfold_plans(population, settings)[:2]:
         frame = built.plan.to_frame()
         assert (frame.groupby("cluster")["split"].nunique() == 1).all()
         assert built.plan.counts()["val"] == pytest.approx(0.15 * len(population.ids), rel=0.2)
@@ -172,17 +187,30 @@ def test_each_region_is_the_test_set_once_and_wholly(plans, population):
         assert built.held_out == population.region_names[built.held_out_cluster]
 
 
-def test_validation_is_another_whole_region_and_the_choice_is_reproducible(plans, population, settings):
+def test_a_logo_plan_trains_on_every_region_but_the_held_out_one(plans, population):
     for built in plans[LOGO]:
+        assert built.plan.counts()["val"] == 0
+        held_out = set(population.region_points(built.held_out_cluster))
+        assert set(built.plan.point_ids_for(TRAIN)) == set(population.ids) - held_out
+        trained_regions = set(population.region_ids.reindex(list(built.plan.point_ids_for(TRAIN))))
+        assert trained_regions == set(population.region_ids) - {built.held_out_cluster}
+
+
+def test_a_validation_region_is_another_whole_region_only_when_asked(population, a1_settings):
+    settings = a1_settings(plans={"logo": {"validation_region": True}})
+    for built in logo_plans(population, settings):
         val = set(built.plan.point_ids_for(VAL))
         validation = validation_region(population, built.held_out_cluster, settings.seed)
         assert validation != built.held_out_cluster
         assert val == set(population.region_points(validation))
         assert validation == validation_region(population, built.held_out_cluster, settings.seed)
+        validate_plan(built)
+    mixed = [built for built in mixed_plans(population, settings) if built.kind == MIXED][:3]
+    assert all(built.plan.counts()["val"] > 0 for built in mixed)
 
 
-def test_with_only_two_regions_there_is_no_validation_set(a1_settings):
-    settings = a1_settings()
+def test_with_only_two_regions_there_is_no_validation_region_to_spare(a1_settings):
+    settings = a1_settings(plans={"logo": {"validation_region": True}})
     population = _synthetic_population(settings, {"A": 40, "B": 40})
     for built in logo_plans(population, settings):
         assert built.plan.counts()["val"] == 0
@@ -240,6 +268,18 @@ def test_the_control_trains_on_only_the_moved_points_and_tests_on_the_same_point
         assert set(control.plan.point_ids_for(TRAIN)) == set(mixed.moved)
         assert set(control.plan.point_ids_for(TEST)) == set(mixed.plan.point_ids_for(TEST))
         assert control.plan.counts()["val"] == 0
+
+
+def test_mixed_and_control_plans_have_no_validation_set(plans):
+    for mixed, control in _pairs(plans):
+        assert mixed.plan.counts()["val"] == 0 and control.plan.counts()["val"] == 0
+
+
+def test_an_empty_validation_set_passes_the_checks(plans):
+    for kind in (RANDOM, SPATIAL_KFOLD, LOGO):
+        built = plans[kind][0]
+        assert built.plan.counts()["val"] == 0
+        validate_plan(built)
 
 
 def test_a_mixed_plan_keeps_the_logo_assignment_outside_the_held_out_region(plans, population):
@@ -443,7 +483,9 @@ def main_config(tmp_path):
         ({"mixed": {"fractions": [0.0, 0.5]}}, "fractions must lie strictly"),
         ({"mixed": {"fractions": [0.5, 0.5]}}, "repeats a value"),
         ({"mixed": {"n_repeats": 0}}, "n_repeats"),
-        ({"logo": {}}, r"Unknown setting.*plans"),
+        ({"logo": {"validation_region": "yes"}}, "true or false"),
+        ({"logo": {"validation": True}}, r"Unknown setting.*plans.logo"),
+        ({"random": {"val_size": -0.1}}, "at least 0"),
         ({"mixed": {"repeats": 3}}, r"Unknown setting.*plans.mixed"),
     ],
 )
@@ -454,7 +496,8 @@ def test_plan_settings_that_cannot_make_a_sound_plan_are_refused(main_config, pl
 
 def test_the_default_plan_settings_are_the_ones_agreed(main_config):
     plans = settings_from_mapping({"main_config": str(main_config)}).plans
-    assert (plans.random.test_size, plans.random.val_size) == (0.15, 0.15)
+    assert (plans.random.test_size, plans.random.val_size) == (0.15, 0.0)
+    assert plans.spatial_kfold.val_size == 0.0 and plans.logo.validation_region is False
     assert (plans.spatial_kfold.method, plans.spatial_kfold.n_clusters, plans.spatial_kfold.n_folds) == (
         "kmeans",
         50,

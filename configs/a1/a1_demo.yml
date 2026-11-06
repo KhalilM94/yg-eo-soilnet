@@ -65,16 +65,19 @@ preflight:
     caco3_pct_total: caco3_pct_total__TabICL
     c_e_c_meq_100g: c_e_c_meq_100g__TabICL
 
+# No validation sets: A1 never fits or tunes on validation points (see configs/a1/a1.yml).
 plans:
   random:
     test_size: 0.15
-    val_size: 0.15
+    val_size: 0
   spatial_kfold:
     method: kmeans
     n_clusters: 50
     cell_size_m: 10000
     n_folds: 5
-    val_size: 0.15
+    val_size: 0
+  logo:
+    validation_region: false
   mixed:
     fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
     n_repeats: 5

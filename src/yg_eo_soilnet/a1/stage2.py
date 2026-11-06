@@ -2,7 +2,8 @@
 
 Every model is fitted on the training points of one split plan, its settings tuned by inner
 cross-validation over the same folds stage 1 used (grouped by the plan's blocks or regions when it
-has them), and scored on the validation and test points:
+has them), and scored on the test points - and on the validation points, when the plans have them
+(by default they do not: nothing is fitted or tuned on them, so they would only shrink training):
 
 ``global``
     Every covariate except the stage-1 predictions.
@@ -102,7 +103,7 @@ class Stage2Context:
 
     @property
     def held_out_ids(self) -> pd.Index:
-        """The validation and test points: what every model is scored on."""
+        """The held-out points - test, and validation when the plan has any: what every model is scored on."""
         return self.split.index[self.split.isin([VAL, TEST]).to_numpy()]
 
 
@@ -113,7 +114,7 @@ class ModelResult:
     Attributes
     ----------
     predicted : pandas.Series
-        Indexed by point id: every validation and test point.
+        Indexed by point id: every held-out point (test, and validation if any).
     fallback : pandas.Series
         True where the point was predicted by ``global_aux`` because its own class had no model.
     tuned_params : dict

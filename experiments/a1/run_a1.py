@@ -2,7 +2,8 @@
 
 For each plan of the plan index (``make_plans.py`` writes it), stage 1 predicts CaCO3 and CEC
 without ever seeing a point's own value, and the stage-2 soil organic matter models are fitted on
-the training points and scored on the validation and test points:
+the training points (their settings chosen by cross-validation inside them) and scored on the test
+points:
 
 ``global``, ``global_aux``
     Every covariate, without and with the predicted CaCO3 and CEC.

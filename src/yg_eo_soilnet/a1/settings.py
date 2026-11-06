@@ -13,6 +13,7 @@ configuration and the data.
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Optional
@@ -21,6 +22,8 @@ import yaml
 
 # Re-exported: the classes are defined in strata, beside the function that cuts them.
 from yg_eo_soilnet.a1.strata import FAO_CARBONATE_EDGES, FAO_CARBONATE_LABELS
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "FAO_CARBONATE_EDGES",
@@ -31,6 +34,7 @@ __all__ = [
     "BootstrapSettings",
     "CarbonateSettings",
     "KFoldPlanSettings",
+    "LogoPlanSettings",
     "MixedPlanSettings",
     "PercentileSettings",
     "PlanSettings",
@@ -201,12 +205,16 @@ class RandomPlanSettings:
 
     Attributes
     ----------
-    test_size, val_size : float
-        Shares of all the points.
+    test_size : float
+        The share of all the points held out for testing.
+    val_size : float, default 0
+        The share of all the points set aside for validation. A1 never fits or tunes on validation
+        points - settings are chosen by cross-validation inside the training points - so a
+        validation set only takes points away from training. Setting it logs a warning.
     """
 
     test_size: float = 0.15
-    val_size: float = 0.15
+    val_size: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -223,15 +231,34 @@ class KFoldPlanSettings:
         With ``grid``, the side of a square, in metres.
     n_folds : int
         How many folds the blocks are packed into; one plan per fold.
-    val_size : float
-        The share of all points held out for validation, as whole blocks of the other folds.
+    val_size : float, default 0
+        The share of all points set aside for validation, as whole blocks of the other folds. With
+        0, every block not in the test fold is training. As for the random split, validation
+        points are never fitted or tuned on; setting it logs a warning.
     """
 
     method: str = "kmeans"
     n_clusters: int = 50
     cell_size_m: float = 10_000.0
     n_folds: int = 5
-    val_size: float = 0.15
+    val_size: float = 0.0
+
+
+@dataclass(frozen=True)
+class LogoPlanSettings:
+    """The region splits: ``logo`` (leave one region out) and ``mixed``.
+
+    Attributes
+    ----------
+    validation_region : bool, default False
+        Set a second whole region aside as validation (the one
+        :func:`~yg_eo_soilnet.a1.plans.validation_region` picks). Off, every region but the
+        held-out one is training. Validation points are never fitted or tuned on, so turning it on
+        only trains the models on one region fewer; it logs a warning. Applies to the ``mixed``
+        plans too, which hold out the same region.
+    """
+
+    validation_region: bool = False
 
 
 @dataclass(frozen=True)
@@ -256,6 +283,7 @@ class PlanSettings:
 
     random: RandomPlanSettings = field(default_factory=RandomPlanSettings)
     spatial_kfold: KFoldPlanSettings = field(default_factory=KFoldPlanSettings)
+    logo: LogoPlanSettings = field(default_factory=LogoPlanSettings)
     mixed: MixedPlanSettings = field(default_factory=MixedPlanSettings)
 
 
@@ -522,7 +550,30 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
             kwargs[name] = int(raw[name])
     if "seeds" in raw:
         kwargs["seeds"] = tuple(int(seed) for seed in _strings(raw["seeds"], "seeds"))
-    return A1Settings(**kwargs)
+    settings = A1Settings(**kwargs)
+    _warn_about_validation(settings)
+    return settings
+
+
+def _warn_about_validation(settings: A1Settings) -> None:
+    """Say plainly that a validation set, if one is asked for, only takes points away from training."""
+    plans = settings.plans
+    asked = [
+        f"{name} = {value}"
+        for name, value, on in (
+            ("plans.random.val_size", plans.random.val_size, plans.random.val_size > 0),
+            ("plans.spatial_kfold.val_size", plans.spatial_kfold.val_size, plans.spatial_kfold.val_size > 0),
+            ("plans.logo.validation_region", plans.logo.validation_region, plans.logo.validation_region),
+        )
+        if on
+    ]
+    if asked:
+        logger.warning(
+            f"{', '.join(asked)}: the plans will set validation points aside. A1 never fits or tunes on "
+            "validation points - both stages are fitted on the training points, and their settings are "
+            "chosen by cross-validation inside them - so a validation set only removes training data; its "
+            "points are scored like the test points. Set these to 0 / false to train on them."
+        )
 
 
 # --- reading each section -----------------------------------------------------------
@@ -624,6 +675,7 @@ def _plan_settings(values: Mapping) -> PlanSettings:
     return PlanSettings(
         random=_section(values, "random", RandomPlanSettings, _typed(RandomPlanSettings), prefix="plans."),
         spatial_kfold=_section(values, "spatial_kfold", KFoldPlanSettings, _typed(KFoldPlanSettings), prefix="plans."),
+        logo=_section(values, "logo", LogoPlanSettings, _logo_kwargs, prefix="plans."),
         mixed=_section(values, "mixed", MixedPlanSettings, _mixed_kwargs, prefix="plans."),
     )
 
@@ -637,6 +689,17 @@ def _typed(cls):
         return {key: type(defaults[key])(value) for key, value in values.items() if value is not None}
 
     return read
+
+
+def _logo_kwargs(values: Mapping) -> dict:
+    """The region-plan section's settings: ``validation_region`` must be a real true or false."""
+    kwargs = {}
+    if values.get("validation_region") is not None:
+        value = values["validation_region"]
+        if not isinstance(value, bool):
+            raise ValueError(f"plans.logo.validation_region must be true or false; got {value!r}")
+        kwargs["validation_region"] = value
+    return kwargs
 
 
 def _mixed_kwargs(values: Mapping) -> dict:
@@ -727,9 +790,10 @@ def _validate(settings: A1Settings) -> None:
 def _validate_plans(plans: PlanSettings) -> None:
     """Refuse split-plan settings that could not produce a sound plan."""
     random = plans.random
-    for name, value in (("test_size", random.test_size), ("val_size", random.val_size)):
-        if not 0.0 < value < 1.0:
-            raise ValueError(f"plans.random.{name} must lie strictly between 0 and 1; got {value}")
+    if not 0.0 < random.test_size < 1.0:
+        raise ValueError(f"plans.random.test_size must lie strictly between 0 and 1; got {random.test_size}")
+    if not 0.0 <= random.val_size < 1.0:
+        raise ValueError(f"plans.random.val_size must be at least 0 and below 1; got {random.val_size}")
     if random.test_size + random.val_size >= 1.0:
         raise ValueError(
             f"plans.random.test_size + val_size must leave a training set; got {random.test_size} + {random.val_size}"

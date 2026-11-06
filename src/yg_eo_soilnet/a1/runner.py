@@ -4,8 +4,8 @@ For each plan of ``index.csv`` (written by ``experiments/a1/make_plans.py``):
 
 1. stage 1 predicts CaCO3 and CEC for every point (:func:`~yg_eo_soilnet.a1.auxiliary.predict_auxiliary`);
    its audit table is saved as ``stage1/<plan_id>.parquet``;
-2. each stage-2 model (:mod:`yg_eo_soilnet.a1.stage2`) is fitted and its validation and test
-   predictions saved as ``predictions/<plan_id>/<model>__<covariate group>.parquet``;
+2. each stage-2 model (:mod:`yg_eo_soilnet.a1.stage2`) is fitted and its test predictions (and
+   validation predictions, when the plans have a validation set; by default they do not) saved as ``predictions/<plan_id>/<model>__<covariate group>.parquet``;
 3. with ``groups``, ``global_aux`` is also fitted on each covariate group alone, and for ``logo``
    plans a within-region ``local`` model is scored inside the held-out region.
 
@@ -582,7 +582,7 @@ def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool, dev_
 
 
 def _log_plan(row, run_dir: Path) -> None:
-    """One sub-run per plan, with every model's scores on validation and test."""
+    """One sub-run per plan, with every model's scores on the test points (and validation, if any)."""
     import mlflow
 
     from yg_eo_soilnet.tracking import start_child_run

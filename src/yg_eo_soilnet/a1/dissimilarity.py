@@ -365,7 +365,7 @@ def plan_dissimilarity(
 ) -> pd.DataFrame:
     """The DI, AOA and MESS of every point of one plan, against that plan's training points.
 
-    Validation and test points are compared with the training points; each training point carries
+    Test points (and validation points, if any) are compared with the training points; each training point carries
     its cross-validated DI (against the training points outside its fold) and its MESS against the
     training points, which is never negative.
 

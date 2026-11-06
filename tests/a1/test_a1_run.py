@@ -365,7 +365,9 @@ def test_the_run_is_recorded_in_mlflow_with_the_commit_and_every_plans_scores(de
     for run in children:
         assert run.data.tags["kind"] in (RANDOM, LOGO)
         assert "rmse_test__global__combined" in run.data.metrics
-        assert "rmse_val__per_class_predicted__combined" in run.data.metrics
+        assert "rmse_test__per_class_predicted__combined" in run.data.metrics
+        # No plan has a validation set, so nothing is scored on one.
+        assert not any(name.startswith(("rmse_val", "n_val")) for name in run.data.metrics)
     artifacts = {item.path for item in client.list_artifacts(parents[0].info.run_id)}
     assert {METRICS_FILE, MANIFEST_FILE} <= artifacts
 
@@ -374,7 +376,7 @@ def test_metrics_cover_every_file_and_split(demo_run):
     metrics = collect_metrics(demo_run["result"].run_dir)
     files = list((demo_run["result"].run_dir / "predictions").glob("*/*.parquet"))
     assert len(metrics) >= len(files)
-    assert set(metrics["split"]) == {VAL, TEST}
+    assert set(metrics["split"]) == {TEST}  # no validation set by default
     assert (demo_run["result"].run_dir / METRICS_FILE).exists()
 
 

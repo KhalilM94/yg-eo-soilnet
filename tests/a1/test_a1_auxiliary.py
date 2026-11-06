@@ -204,11 +204,11 @@ def test_validation_and_test_points_come_from_the_full_training_fit(demo_plans, 
 
 
 def test_with_fewer_groups_than_folds_the_folds_are_reduced(demo_plans, a1_demo_settings, caplog):
-    built = demo_plans[LOGO]  # 4 regions: one test, one validation, two to train on
+    built = demo_plans[LOGO]  # 4 regions: one test, the other three to train on (no validation region)
     with caplog.at_level(logging.WARNING):
         folds, _ = inner_folds(built.plan, a1_demo_settings, kind=LOGO)
-    assert folds.nunique() == 2
-    assert "using 2 fold(s)" in caplog.text
+    assert folds.nunique() == 3
+    assert "using 3 fold(s)" in caplog.text
 
 
 def test_a_plan_read_from_a_file_is_grouped_by_its_clusters(demo_plans, a1_demo_settings):

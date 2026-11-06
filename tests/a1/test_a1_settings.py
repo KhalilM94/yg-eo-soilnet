@@ -274,3 +274,34 @@ def test_dev_mode_cuts_both_stages_down_and_leaves_the_rest():
     assert quick.inner_cv_folds == 2
     assert full.stage1.estimator == "TabICL" and full.inner_cv_folds == 5  # the original is untouched
     assert dataclasses.replace(quick, stage1=full.stage1, stage2=full.stage2, inner_cv_folds=5) == full
+
+
+@pytest.mark.parametrize(
+    "plans_section, named",
+    [
+        ({"random": {"val_size": 0.15}}, "plans.random.val_size = 0.15"),
+        ({"spatial_kfold": {"val_size": 0.1}}, "plans.spatial_kfold.val_size = 0.1"),
+        ({"logo": {"validation_region": True}}, "plans.logo.validation_region = True"),
+    ],
+)
+def test_asking_for_a_validation_set_works_and_warns_that_it_is_never_used(main_config, caplog, plans_section, named):
+    from yg_eo_soilnet.a1.settings import settings_from_mapping
+
+    with caplog.at_level("WARNING", logger="yg_eo_soilnet.a1.settings"):
+        settings = settings_from_mapping({"main_config": str(main_config), "plans": plans_section})
+    assert named in caplog.text
+    assert "never fits or tunes on validation points" in caplog.text
+    kind, values = next(iter(plans_section.items()))
+    assert getattr(getattr(settings.plans, kind), next(iter(values))) == next(iter(values.values()))
+
+
+def test_the_default_plans_have_no_validation_and_say_nothing(main_config, caplog):
+    from yg_eo_soilnet.a1.settings import load_settings, settings_from_mapping
+
+    with caplog.at_level("WARNING", logger="yg_eo_soilnet.a1.settings"):
+        plans = settings_from_mapping({"main_config": str(main_config)}).plans
+        shipped = [load_settings(f"configs/a1/{name}").plans for name in ("a1.yml", "a1_demo.yml")]
+    assert "validation" not in caplog.text
+    for section in (plans, *shipped):
+        assert section.random.val_size == 0 and section.spatial_kfold.val_size == 0
+        assert section.logo.validation_region is False
