@@ -102,9 +102,15 @@ class StageSettings:
     estimator : str
         The scikit-learn model-list entry (``configs/sklearn/model_registry.yml``) it trains. The
         entry does not need ``enabled: true`` there to be used here.
+    import_path : str or None
+        Replaces the entry's ``import_path`` (the estimator class), when set.
+    init_args : dict
+        Laid over the entry's ``init_args``: a key here replaces the entry's, the others are kept.
     """
 
     estimator: str
+    import_path: Optional[str] = None
+    init_args: Mapping[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -502,7 +508,14 @@ def _stage_kwargs(name: str):
         """The stage's settings, converted to their types."""
         if not values.get("estimator"):
             raise ValueError(f"{name}.estimator must name a scikit-learn model-list entry.")
-        return {"estimator": str(values["estimator"])}
+        kwargs: dict[str, Any] = {"estimator": str(values["estimator"])}
+        if values.get("import_path"):
+            kwargs["import_path"] = str(values["import_path"])
+        init_args = values.get("init_args") or {}
+        if not isinstance(init_args, Mapping):
+            raise ValueError(f"{name}.init_args must be a mapping of argument to value; got {init_args!r}")
+        kwargs["init_args"] = dict(init_args)
+        return kwargs
 
     return read
 

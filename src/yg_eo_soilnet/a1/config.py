@@ -468,10 +468,18 @@ def _check_data_block(settings: A1Settings, config) -> None:
 
 
 def _check_estimators(settings: A1Settings, config) -> None:
-    """Refuse a model stage whose estimator is not in the scikit-learn model list."""
+    """Refuse a model stage whose estimator is not in the model list, or whose class does not import."""
     registry = getattr(config, "MODEL_REGISTRY", {}) or {}
     for stage in ("stage1", "stage2"):
-        name = getattr(settings, stage).estimator
+        stage_settings = getattr(settings, stage)
+        name = stage_settings.estimator
+        if stage_settings.import_path:
+            from yg_eo_soilnet.models import ModelConfigFactory  # local: avoids a circular import
+
+            try:
+                ModelConfigFactory._dynamic_import(stage_settings.import_path)
+            except (ImportError, AttributeError, ValueError) as error:
+                raise ValueError(f"{stage}.import_path {stage_settings.import_path!r} does not import: {error}")
         if name not in registry:
             raise ValueError(
                 f"{stage}.estimator {name!r} is not an entry of the scikit-learn model list "
