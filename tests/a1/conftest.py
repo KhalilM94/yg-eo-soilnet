@@ -32,21 +32,13 @@ def a1_demo_dir(tmp_path_factory) -> Path:
     return folder
 
 
-@pytest.fixture
-def a1_settings(a1_demo_dir, tmp_path):
-    """Build A1 settings over the demo dataset; keyword arguments override the shipped demo file.
-
-    The main configuration is the shipped ``configs/a1/demo_main_config.yml`` with the data folder
-    pointed at the generated dataset and every other path made absolute, so the test does not depend
-    on the directory pytest runs from. ``main_overrides`` edits its ``common`` block; ``groups``
-    replaces the covariate groups; ``as_file=True`` writes the settings to a file and returns its
-    path, for :func:`~yg_eo_soilnet.a1.config.load_a1_config`.
-    """
+def _settings_builder(demo_dir: Path, folder: Path):
+    """The builder behind :func:`a1_settings`, writing its files into ``folder``."""
 
     def build(main_overrides=None, *, as_file=False, groups=None, **overrides):
         main = yaml.safe_load((A1_CONFIGS / "demo_main_config.yml").read_text())
         common = main["common"]
-        common["data"]["root"] = str(a1_demo_dir)
+        common["data"]["root"] = str(demo_dir)
         for key in (
             "DATA_SPEC_PATH",
             "SKLEARN_CONFIG_PATH",
@@ -57,24 +49,43 @@ def a1_settings(a1_demo_dir, tmp_path):
             common[key] = str((A1_CONFIGS / common[key]).resolve())
         for key, value in (main_overrides or {}).items():
             common[key] = value
-        main_path = tmp_path / "main_config.yml"
+        main_path = folder / "main_config.yml"
         main_path.write_text(yaml.safe_dump(main))
 
         raw = yaml.safe_load((A1_CONFIGS / "a1_demo.yml").read_text())
         raw["main_config"] = str(main_path)
-        raw["data"] = {**raw["data"], "root": str(a1_demo_dir)}
+        raw["data"] = {**raw["data"], "root": str(demo_dir)}
         if (main_overrides or {}).get("data"):
             raw["data"] = {key: main_overrides["data"][key] for key in raw["data"] if key in main_overrides["data"]}
         groups_path = A1_CONFIGS / raw["covariate_groups"]
         if groups is not None:
-            groups_path = tmp_path / "covariate_groups.yml"
+            groups_path = folder / "covariate_groups.yml"
             groups_path.write_text(yaml.safe_dump(groups, sort_keys=False))
         raw["covariate_groups"] = str(groups_path)
         raw.update(overrides)
         if as_file:
-            path = tmp_path / "a1.yml"
+            path = folder / "a1.yml"
             path.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False))
             return path
         return settings_from_mapping(raw)
 
     return build
+
+
+@pytest.fixture
+def a1_settings(a1_demo_dir, tmp_path):
+    """Build A1 settings over the demo dataset; keyword arguments override the shipped demo file.
+
+    The main configuration is the shipped ``configs/a1/demo_main_config.yml`` with the data folder
+    pointed at the generated dataset and every other path made absolute, so the test does not depend
+    on the directory pytest runs from. ``main_overrides`` edits its ``common`` block; ``groups``
+    replaces the covariate groups; ``as_file=True`` writes the settings to a file and returns its
+    path, for :func:`~yg_eo_soilnet.a1.config.load_a1_config`.
+    """
+    return _settings_builder(a1_demo_dir, tmp_path)
+
+
+@pytest.fixture(scope="session")
+def a1_demo_settings(a1_demo_dir, tmp_path_factory):
+    """The shipped demo settings over the demo dataset, built once, for module-scoped fixtures."""
+    return _settings_builder(a1_demo_dir, tmp_path_factory.mktemp("a1_demo_settings"))()

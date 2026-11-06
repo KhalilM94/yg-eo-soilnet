@@ -30,8 +30,12 @@ __all__ = [
     "AuxiliarySettings",
     "BootstrapSettings",
     "CarbonateSettings",
+    "KFoldPlanSettings",
+    "MixedPlanSettings",
     "PercentileSettings",
+    "PlanSettings",
     "PreflightSettings",
+    "RandomPlanSettings",
     "RegionSettings",
     "SampleYearSettings",
     "StageSettings",
@@ -48,6 +52,9 @@ REGION_SOURCES = (REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS)
 
 #: The estimators stage 1 may use to predict the auxiliary properties.
 STAGE1_ESTIMATORS = ("TabICL", "XGBoost")
+
+#: ``plans.spatial_kfold.method``: blocks from k-means on the coordinates, or from a regular grid.
+KFOLD_METHODS = ("kmeans", "grid")
 
 #: The keys of the ``data:`` block, which must agree with the main configuration's.
 DATA_KEYS = ("root", "static", "targets", "timeseries")
@@ -177,6 +184,70 @@ class SampleYearSettings:
     file: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class RandomPlanSettings:
+    """The random baseline split: points held out one at a time.
+
+    Attributes
+    ----------
+    test_size, val_size : float
+        Shares of all the points.
+    """
+
+    test_size: float = 0.15
+    val_size: float = 0.15
+
+
+@dataclass(frozen=True)
+class KFoldPlanSettings:
+    """The spatial k-fold splits: blocks of nearby points, packed into folds, each fold tested once.
+
+    Attributes
+    ----------
+    method : {"kmeans", "grid"}
+        How the blocks are made: k-means on the coordinates, or the squares of a regular grid.
+    n_clusters : int
+        With ``kmeans``, how many blocks.
+    cell_size_m : float
+        With ``grid``, the side of a square, in metres.
+    n_folds : int
+        How many folds the blocks are packed into; one plan per fold.
+    val_size : float
+        The share of all points held out for validation, as whole blocks of the other folds.
+    """
+
+    method: str = "kmeans"
+    n_clusters: int = 50
+    cell_size_m: float = 10_000.0
+    n_folds: int = 5
+    val_size: float = 0.15
+
+
+@dataclass(frozen=True)
+class MixedPlanSettings:
+    """The mixed-transfer splits: a share of the held-out region moved into training.
+
+    Attributes
+    ----------
+    fractions : tuple of float
+        The shares of the region's points moved into training, strictly between 0 and 1.
+    n_repeats : int
+        How many different draws of each share; repeat ``r`` is drawn with seed ``seed + r``.
+    """
+
+    fractions: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
+    n_repeats: int = 5
+
+
+@dataclass(frozen=True)
+class PlanSettings:
+    """The split plans ``experiments/a1/make_plans.py`` writes; see :mod:`yg_eo_soilnet.a1.plans`."""
+
+    random: RandomPlanSettings = field(default_factory=RandomPlanSettings)
+    spatial_kfold: KFoldPlanSettings = field(default_factory=KFoldPlanSettings)
+    mixed: MixedPlanSettings = field(default_factory=MixedPlanSettings)
+
+
 def _default_prediction_columns() -> dict[str, str]:
     """``<target>__TabICL`` for each default auxiliary target."""
     return {target: f"{target}__TabICL" for target in AuxiliarySettings().targets}
@@ -230,7 +301,7 @@ class A1Settings:
         The covariate-groups file, already resolved to a full path.
     data : dict of str to str
         The ``data:`` block, as written; checked against the main configuration's.
-    percentiles, auxiliary, bootstrap, carbonate, regions, sample_year, preflight
+    percentiles, auxiliary, bootstrap, carbonate, regions, sample_year, preflight, plans
         The settings of each part; see their own classes.
     source_path : str or None
         The file these settings were read from.
@@ -254,6 +325,7 @@ class A1Settings:
     regions: RegionSettings = field(default_factory=RegionSettings)
     sample_year: SampleYearSettings = field(default_factory=SampleYearSettings)
     preflight: PreflightSettings = field(default_factory=PreflightSettings)
+    plans: PlanSettings = field(default_factory=PlanSettings)
     source_path: Optional[str] = None
 
     def __post_init__(self):
@@ -359,6 +431,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "regions",
         "sample_year",
         "preflight",
+        "plans",
     }
     _refuse_unknown(raw, known, "the A1 settings")
     main_config = raw.get("main_config")
@@ -385,6 +458,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "regions": _section(raw, "regions", RegionSettings, _region_kwargs),
         "sample_year": _section(raw, "sample_year", SampleYearSettings, _optional_strings),
         "preflight": _section(raw, "preflight", PreflightSettings, _preflight_kwargs),
+        "plans": _plan_settings(raw.get("plans") or {}),
         "source_path": source_path,
     }
     for name in ("stage1", "stage2"):
@@ -412,12 +486,12 @@ def _existing_path(path: str, base_dir: str, setting: str) -> str:
     return resolved
 
 
-def _section(raw: Mapping, name: str, cls, to_kwargs):
+def _section(raw: Mapping, name: str, cls, to_kwargs, *, prefix: str = ""):
     """One section of the file as its settings class; a missing section takes every default."""
     values = raw.get(name) or {}
     if not isinstance(values, Mapping):
-        raise ValueError(f"{name} must be a mapping of settings; got {type(values).__name__}")
-    _refuse_unknown(values, set(cls.__dataclass_fields__), name)
+        raise ValueError(f"{prefix}{name} must be a mapping of settings; got {type(values).__name__}")
+    _refuse_unknown(values, set(cls.__dataclass_fields__), f"{prefix}{name}")
     return cls(**to_kwargs(values))
 
 
@@ -475,6 +549,39 @@ def _region_kwargs(values: Mapping) -> dict:
 def _optional_strings(values: Mapping) -> dict:
     """Every setting of a section that is set, as a string."""
     return {key: str(value) for key, value in values.items() if value is not None}
+
+
+def _plan_settings(values: Mapping) -> PlanSettings:
+    """The ``plans:`` section, one sub-section per kind of plan."""
+    if not isinstance(values, Mapping):
+        raise ValueError(f"plans must be a mapping of settings; got {type(values).__name__}")
+    _refuse_unknown(values, set(PlanSettings.__dataclass_fields__), "plans")
+    return PlanSettings(
+        random=_section(values, "random", RandomPlanSettings, _typed(RandomPlanSettings), prefix="plans."),
+        spatial_kfold=_section(values, "spatial_kfold", KFoldPlanSettings, _typed(KFoldPlanSettings), prefix="plans."),
+        mixed=_section(values, "mixed", MixedPlanSettings, _mixed_kwargs, prefix="plans."),
+    )
+
+
+def _typed(cls):
+    """A reader converting each setting of a section to the type of its default."""
+    defaults = {name: spec.default for name, spec in cls.__dataclass_fields__.items()}
+
+    def read(values: Mapping) -> dict:
+        """The section's settings, converted to their types."""
+        return {key: type(defaults[key])(value) for key, value in values.items() if value is not None}
+
+    return read
+
+
+def _mixed_kwargs(values: Mapping) -> dict:
+    """The mixed-plan section's settings, converted to their types."""
+    kwargs: dict[str, Any] = {}
+    if "fractions" in values:
+        kwargs["fractions"] = tuple(float(p) for p in _strings(values["fractions"], "plans.mixed.fractions"))
+    if "n_repeats" in values:
+        kwargs["n_repeats"] = int(values["n_repeats"])
+    return kwargs
 
 
 def _preflight_kwargs(values: Mapping) -> dict:
@@ -541,6 +648,46 @@ def _validate(settings: A1Settings) -> None:
         raise ValueError("sample_year.file needs sample_year.column, the column in it holding the date or year.")
     if settings.preflight.overfit_r2_gap < 0:
         raise ValueError(f"preflight.overfit_r2_gap must not be negative; got {settings.preflight.overfit_r2_gap}")
+
+    _validate_plans(settings.plans)
+
+
+def _validate_plans(plans: PlanSettings) -> None:
+    """Refuse split-plan settings that could not produce a sound plan."""
+    random = plans.random
+    for name, value in (("test_size", random.test_size), ("val_size", random.val_size)):
+        if not 0.0 < value < 1.0:
+            raise ValueError(f"plans.random.{name} must lie strictly between 0 and 1; got {value}")
+    if random.test_size + random.val_size >= 1.0:
+        raise ValueError(
+            f"plans.random.test_size + val_size must leave a training set; got {random.test_size} + {random.val_size}"
+        )
+
+    kfold = plans.spatial_kfold
+    if kfold.method not in KFOLD_METHODS:
+        raise ValueError(f"plans.spatial_kfold.method must be one of {list(KFOLD_METHODS)}; got {kfold.method!r}")
+    if kfold.n_folds < 2:
+        raise ValueError(f"plans.spatial_kfold.n_folds must be at least 2; got {kfold.n_folds}")
+    if kfold.method == "kmeans" and kfold.n_clusters < kfold.n_folds:
+        raise ValueError(
+            f"plans.spatial_kfold.n_clusters ({kfold.n_clusters}) must be at least n_folds ({kfold.n_folds}): "
+            "every fold needs a block of its own."
+        )
+    if kfold.method == "grid" and not kfold.cell_size_m > 0:
+        raise ValueError(f"plans.spatial_kfold.cell_size_m must be greater than 0; got {kfold.cell_size_m}")
+    if not 0.0 <= kfold.val_size < 1.0 - 1.0 / kfold.n_folds:
+        raise ValueError(
+            f"plans.spatial_kfold.val_size must be at least 0 and leave a training set beside one test fold; "
+            f"got {kfold.val_size}"
+        )
+
+    mixed = plans.mixed
+    if not mixed.fractions or any(not 0.0 < p < 1.0 for p in mixed.fractions):
+        raise ValueError(f"plans.mixed.fractions must lie strictly between 0 and 1; got {list(mixed.fractions)}")
+    if len(set(mixed.fractions)) != len(mixed.fractions):
+        raise ValueError(f"plans.mixed.fractions repeats a value: {list(mixed.fractions)}")
+    if mixed.n_repeats < 1:
+        raise ValueError(f"plans.mixed.n_repeats must be at least 1; got {mixed.n_repeats}")
 
 
 def _validate_regions(regions: RegionSettings) -> None:

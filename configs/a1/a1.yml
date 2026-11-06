@@ -108,6 +108,32 @@ preflight:
     caco3_pct_total: caco3_pct_total_baseline
     c_e_c_meq_100g: c_e_c_meq_100g_baseline
 
+# --- split plans --------------------------------------------------------------------------------
+# Every split the experiments are scored on, written once by
+#   python experiments/a1/make_plans.py --config configs/a1/a1.yml
+# as <output_dir>/plans/<plan_id>.parquet plus index.csv. Regions with fewer than min_cell_size
+# points are never held out or used for validation; they stay in training.
+plans:
+  # The baseline: points held out one at a time (shares of all points).
+  random:
+    test_size: 0.15
+    val_size: 0.15
+  # Nearby points grouped into blocks, packed into folds; each fold is the test set once and
+  # validation is whole blocks of the other folds (val_size of all points). method: kmeans uses
+  # n_clusters blocks; method: grid uses squares of cell_size_m metres.
+  spatial_kfold:
+    method: kmeans
+    n_clusters: 50
+    cell_size_m: 10000
+    n_folds: 5
+    val_size: 0.15
+  # Leave one region out, with a share of the region moved into training: each fraction, drawn
+  # n_repeats times. Each mixed plan also gets its control - the same moved points alone. The
+  # validation region is the one the region's leave-one-out plan uses.
+  mixed:
+    fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    n_repeats: 5
+
 # --- where the results go -----------------------------------------------------------------------
 # Tables and figures, one folder per experiment.
 output_dir: results/a1
