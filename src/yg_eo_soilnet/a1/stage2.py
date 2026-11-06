@@ -17,7 +17,9 @@ has them), and scored on the test points - and on the validation points, when th
     The same, with each point placed by its **predicted** CaCO3: the usable version.
 ``local``
     Within one region only: out-of-fold predictions inside the held-out region of a ``logo`` plan,
-    with no data from elsewhere. What a survey of that region alone would give.
+    with no data from elsewhere - what a survey of that region alone would give. Built like the
+    others so the transfer loss is fair (:func:`local_folds`, :func:`run_local`): outer folds of whole
+    spatial blocks, stage 1 refitted inside the region for each fold, stage 2 tuned on the same grid.
 
 A carbonate class with fewer than ``min_cell_size`` training points gets no model of its own; its
 points - and points with no class - are predicted by ``global_aux``, and flagged.
@@ -33,7 +35,7 @@ from typing import Mapping, Optional, Sequence
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.model_selection import GridSearchCV, KFold, cross_val_predict
+from sklearn.model_selection import GridSearchCV
 
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions
 from yg_eo_soilnet.a1.config import stage1_prediction_column
@@ -121,6 +123,8 @@ class ModelResult:
         The settings chosen; per class for the per-class models.
     role : str
         ``model``, or ``diagnostic_upper_bound`` for a model reading what a new point lacks.
+    local_fold, local_block : pandas.Series or None
+        For the ``local`` model, each point's outer fold and spatial block.
     fitted : sklearn.pipeline.Pipeline or None
         The fitted pipeline, for a model fitted once on every training point (``global``,
         ``global_aux``, a covariate group); None for the per-class and local models. The
@@ -132,6 +136,8 @@ class ModelResult:
     tuned_params: dict
     role: str = ROLE_MODEL
     fitted: object = field(default=None, compare=False, repr=False)
+    local_fold: Optional[pd.Series] = field(default=None, compare=False, repr=False)
+    local_block: Optional[pd.Series] = field(default=None, compare=False, repr=False)
 
     @property
     def tuned_params_json(self) -> str:
@@ -273,39 +279,180 @@ def run_group(context: Stage2Context, columns: Sequence[str]) -> ModelResult:
     return _single_model(context, list(columns))
 
 
-def run_local(context: Stage2Context, columns: Sequence[str], region_ids: pd.Index) -> Optional[ModelResult]:
-    """Out-of-fold predictions inside one region, from that region's own points alone.
+#: The fewest spatial blocks a region needs for a ``local`` score: with 3 or more, every outer
+#: training fold holds at least 2 blocks, so stage 1 can be cross-fitted, and stage 2 tuned, by block.
+MIN_LOCAL_BLOCKS = 3
+#: Where :func:`local_folds` keeps its result in a plan's :class:`Stage2Context`, for every group.
+LOCAL_CACHE_KEY = "local_folds"
 
-    The region's points are cut into ``inner_cv_folds`` random folds; each fold is predicted by a
-    model fitted on the region's other folds, with the first grid point (too few points to tune).
+
+@dataclass
+class LocalFolds:
+    """The outer folds of a ``local`` score inside one region, each with its own stage 1.
+
+    Attributes
+    ----------
+    folds : list of (int, Stage2Context)
+        Per outer fold, the context of a sub-plan of the region: the other folds train, this fold
+        tests, the stage-1 predictions are refitted on those training points alone.
+    block : pandas.Series
+        Each measured point of the region's spatial block.
+    outer_fold : pandas.Series
+        Each measured point's outer fold.
+    reason : str or None
+        Why there is no ``local`` score, when there is none; ``folds`` is then empty.
+    """
+
+    folds: list = field(default_factory=list)
+    block: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    outer_fold: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
+    reason: Optional[str] = None
+
+
+def local_folds(
+    context: Stage2Context,
+    region_ids: pd.Index,
+    table: A1Table,
+    *,
+    estimator_factory=None,
+    logger: Optional[logging.Logger] = None,
+) -> LocalFolds:
+    """Cut one held-out region into spatial-block folds and give each its own, local, stage 1.
+
+    The ``local`` model is the reference a transferred model's loss is measured against, so it is
+    built as the transferred one is, but from the region's own points alone:
+
+    1. the region's points with a measured target are placed in square blocks of
+       ``bootstrap.block_size_km`` (:func:`~yg_eo_soilnet.a1.evaluation.spatial_blocks`), and the
+       blocks packed into ``min(inner_cv_folds, blocks)`` outer folds - whole blocks, so a point is
+       never predicted from its neighbours;
+    2. for each outer fold, a sub-plan of the region (the other folds train, this one tests) goes
+       through :func:`~yg_eo_soilnet.a1.auxiliary.predict_auxiliary`: stage 1 is fitted on that
+       fold's training points only, its training points cross-fitted through folds of whole blocks.
+       The logo plan's own stage 1, fitted on the other regions, is not used.
+
+    The result is kept in ``context.cache`` and reused by every covariate group, so each region's
+    stage 1 is fitted once per fold.
 
     Parameters
     ----------
     context : Stage2Context
+        The ``logo`` plan's context: its settings, configuration and measured target.
+    region_ids : pandas.Index
+        The held-out region's points - the plan's test points.
+    table : A1Table
+        The A1 points table, for the coordinates and the stage-1 inputs.
+    estimator_factory : callable, optional
+        Passed to :func:`~yg_eo_soilnet.a1.auxiliary.predict_auxiliary` (tests use it to watch what
+        each stage-1 fit sees).
+    logger : logging.Logger, optional
+
+    Returns
+    -------
+    LocalFolds
+        With ``reason`` set and no folds when the region holds fewer than ``min_cell_size``
+        measured points or fewer than :data:`MIN_LOCAL_BLOCKS` blocks.
+    """
+    from sklearn.model_selection import GroupKFold
+
+    from yg_eo_soilnet.a1.auxiliary import predict_auxiliary
+    from yg_eo_soilnet.a1.evaluation import spatial_blocks
+    from yg_eo_soilnet.a1.plans import SPATIAL_KFOLD
+
+    if LOCAL_CACHE_KEY in context.cache:
+        return context.cache[LOCAL_CACHE_KEY]
+    logger = logger or logging.getLogger(__name__)
+    settings = context.settings
+    block_km = settings.bootstrap.block_size_km
+    measured = region_ids[context.y.reindex(region_ids).notna().to_numpy()]
+
+    if len(measured) < settings.min_cell_size:
+        local = LocalFolds(
+            reason=f"the region holds {len(measured)} measured point(s), fewer than min_cell_size="
+            f"{settings.min_cell_size}"
+        )
+    else:
+        coordinates = table.coordinates.reindex(measured).rename_axis("point_id").reset_index()
+        block = pd.Series(spatial_blocks(coordinates, block_km).to_numpy(), index=measured, name="block")
+        n_blocks = int(block.nunique())
+        if n_blocks < MIN_LOCAL_BLOCKS:
+            local = LocalFolds(
+                block=block,
+                reason=f"the region's points fall in {n_blocks} spatial block(s) of {block_km:g} km; at least "
+                f"{MIN_LOCAL_BLOCKS} are needed to fit and tune it without a block on both sides",
+            )
+        else:
+            n_folds = min(settings.inner_cv_folds, n_blocks)
+            outer = pd.Series(-1, index=measured, name="outer_fold")
+            splits = GroupKFold(n_splits=n_folds).split(np.zeros((len(measured), 1)), groups=block.to_numpy())
+            for fold, (_, test_positions) in enumerate(splits):
+                outer.iloc[test_positions] = fold
+            folds = []
+            for fold in range(n_folds):
+                assignments = pd.Series(
+                    np.where(outer.to_numpy() == fold, TEST, TRAIN), index=pd.Index(measured, name="point_id")
+                )
+                subplan = SplitPlan(
+                    assignments=assignments,
+                    strategy=SPATIAL_KFOLD,
+                    test_size=round(float((outer == fold).mean()), 6),
+                    val_size=0.0,
+                    seed=settings.seed,
+                    population_policy="intersect",
+                    eligibility={"sklearn": frozenset(measured)},
+                    clusters=block.astype(int),
+                )
+                auxiliary = predict_auxiliary(
+                    table,
+                    subplan,
+                    settings,
+                    context.config,
+                    kind=SPATIAL_KFOLD,
+                    estimator_factory=estimator_factory,
+                    logger=logger,
+                )
+                folds.append((fold, build_context(table, subplan, auxiliary, settings, context.config)))
+            local = LocalFolds(folds=folds, block=block, outer_fold=outer)
+    context.cache[LOCAL_CACHE_KEY] = local
+    return local
+
+
+def run_local(context: Stage2Context, columns: Sequence[str], local: LocalFolds) -> Optional[ModelResult]:
+    """Out-of-fold predictions inside one region, from that region's own points alone, fitted fairly.
+
+    Each outer fold of :func:`local_folds` gets the same model ``global_aux`` gets on a split - the
+    same inputs and the same settings grid, tuned by :func:`fit_tuned` through folds of whole blocks
+    of the fold's training points (the ones its stage 1 was cross-fitted through) - and predicts
+    the fold's points.
+
+    Parameters
+    ----------
+    context : Stage2Context
+        The ``logo`` plan's context (unused but for symmetry with the other models).
     columns : sequence of str
         The inputs.
-    region_ids : pandas.Index
-        The region's points - the test set of a ``logo`` plan.
+    local : LocalFolds
 
     Returns
     -------
     ModelResult or None
-        None when the region holds fewer than ``min_cell_size`` points with a measured target.
+        Every measured point of the region once, with ``local_fold`` and ``local_block``; None when
+        ``local.reason`` says there is no local score.
     """
-    settings = context.settings
-    measured = region_ids[context.y.reindex(region_ids).notna().to_numpy()]
-    if len(measured) < settings.min_cell_size:
+    if local.reason is not None:
         return None
-    pipeline, grid = build_stage_pipeline(
-        settings, context.config, columns, context.categorical, stage=settings.stage2, target=settings.target
-    )
-    n_folds = min(settings.inner_cv_folds, len(measured))
-    cv = KFold(n_splits=n_folds, shuffle=True, random_state=settings.seed)
-    predicted = cross_val_predict(pipeline, context.X.loc[measured, list(columns)], context.y.loc[measured], cv=cv)
+    predicted, params = [], {}
+    for fold, sub_context in local.folds:
+        outcome = _single_model(sub_context, list(columns))
+        predicted.append(outcome.predicted)
+        params[f"fold_{fold}"] = outcome.tuned_params
+    predicted = pd.concat(predicted).reindex(local.outer_fold.index)
     return ModelResult(
-        predicted=pd.Series(predicted, index=measured, dtype=float),
-        fallback=pd.Series(False, index=measured),
-        tuned_params={**{name: values[0] for name, values in grid.items()}, "tuned": False, "n_folds": n_folds},
+        predicted=predicted.astype(float),
+        fallback=pd.Series(False, index=predicted.index),
+        tuned_params={**params, "n_folds": len(local.folds)},
+        local_fold=local.outer_fold.astype(float),
+        local_block=local.block.astype(float),
     )
 
 

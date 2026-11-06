@@ -635,3 +635,16 @@ def test_an_index_from_an_older_make_plans_is_refused_with_how_to_fix_it(demo_ru
     old.to_csv(plans / "index.csv", index=False)
     with pytest.raises(ValueError, match="older make_plans.py.*Write them again"):
         run_plans(a1, plans_dir=str(plans), tracking=False, run_name="old_index")
+
+
+def test_local_rows_carry_their_outer_fold_and_block_and_no_other_row_does(demo_run):
+    frame = _predictions(demo_run)
+    local = frame[frame["model"] == LOCAL]
+    others = frame[frame["model"] != LOCAL]
+    assert not local.empty and local["local_fold"].notna().all() and local["local_block"].notna().all()
+    assert others["local_fold"].isna().all() and others["local_block"].isna().all()
+    # Every covariate group's local model uses the same folds: stage 1 is fitted once per region and fold.
+    folds = local.groupby(["plan_id", "point_id"])["local_fold"].nunique()
+    assert (folds == 1).all()
+    params = json.loads(local["tuned_params"].iloc[0])
+    assert any(key.startswith("fold_") for key in params)

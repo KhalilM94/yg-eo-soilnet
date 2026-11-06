@@ -59,6 +59,7 @@ from yg_eo_soilnet.a1.stage2 import (
     ModelResult,
     build_context,
     run_group,
+    local_folds,
     run_local,
     run_model,
 )
@@ -85,12 +86,14 @@ PREDICTION_COLUMNS = (
     "observed",
     "predicted",
     "fallback",
+    "local_fold",
+    "local_block",
     "model_role",
     "tuned_params",
 )
 #: The version of that layout, recorded in the manifest. A run folder written in another version is
 #: refused like one made from other settings: its old files would sit beside new ones.
-PREDICTION_FORMAT = 3
+PREDICTION_FORMAT = 4
 MANIFEST_FILE = "manifest.json"
 METRICS_FILE = "metrics.csv"
 DISSIMILARITY_DIR = "dissimilarity"
@@ -285,13 +288,12 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
     for model, group in todo:
         if model == LOCAL:
             columns = list(resolved.combined) if group == COMBINED_GROUP else list(resolved.groups[group])
-            region_ids = plan.point_ids_for(TEST)
-            outcome = run_local(context, columns, region_ids)
+            local = local_folds(context, plan.point_ids_for(TEST), table, logger=logger)
+            outcome = run_local(context, columns, local)
             if outcome is None:
-                result.notes.append(
-                    f"{row.plan_id}: no local {group} score, the held-out region has fewer than "
-                    f"{settings.min_cell_size} points"
-                )
+                note = f"{row.plan_id}: no local score - {local.reason}"
+                if note not in result.notes:
+                    result.notes.append(note)
                 continue
         elif group == COMBINED_GROUP:
             outcome = run_model(
@@ -410,11 +412,20 @@ def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd
             "observed": context.y.reindex(ids).to_numpy(dtype=float),
             "predicted": outcome.predicted.to_numpy(dtype=float),
             "fallback": outcome.fallback.reindex(ids).fillna(False).to_numpy(dtype=bool),
+            "local_fold": _local_column(outcome.local_fold, ids),
+            "local_block": _local_column(outcome.local_block, ids),
             "model_role": outcome.role,
             "tuned_params": outcome.tuned_params_json,
         },
         columns=list(PREDICTION_COLUMNS),
     )
+
+
+def _local_column(values: Optional[pd.Series], ids: pd.Index) -> np.ndarray:
+    """A ``local`` model's per-point fold or block, as floats; NaN for every other model."""
+    if values is None:
+        return np.full(len(ids), np.nan)
+    return values.reindex(ids).to_numpy(dtype=float)
 
 
 # --- scores ------------------------------------------------------------------------------------
