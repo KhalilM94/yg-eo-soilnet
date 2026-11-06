@@ -402,3 +402,34 @@ def test_load_predictions_refuses_a_file_in_the_older_format(tmp_path):
         load_predictions(tmp_path)
     with pytest.raises(FileNotFoundError):
         load_predictions(tmp_path / "nothing")
+
+
+def test_spatial_scores_of_different_block_sizes_are_never_pooled():
+    points = _points(120)
+    rows = []
+    for size, sd in ((10_000.0, 2.0), (25_000.0, 6.0)):
+        for model, extra in (("a", 0.0), ("b", 1.0)):
+            rows.append(
+                _rows(
+                    points,
+                    _noisy(points, sd + extra, int(size)),
+                    model=model,
+                    plan_id=f"kfold_{size:g}",
+                    kind="spatial_kfold",
+                    block_size_m=size,
+                )
+            )
+    rows.append(_rows(points, _noisy(points, 3, 1), model="a", block_size_m=np.nan))  # random: no block size
+    rows.append(_rows(points, _noisy(points, 4, 2), model="b", block_size_m=np.nan))
+    frame = pd.concat(rows, ignore_index=True)
+
+    table = grouped_metrics(frame, ["kind", "block_size_m", "model"])
+    kfold = table[table["kind"] == "spatial_kfold"]
+    assert len(kfold) == 4 and (kfold["n"] == len(points)).all()  # each size scores each point once
+    by_size = kfold.pivot(index="model", columns="block_size_m", values="rmse")
+    assert (by_size[25_000.0] > by_size[10_000.0]).all()  # the noisier size keeps its own, larger, RMSE
+
+    result = block_bootstrap(frame, ["kind", "block_size_m", "model"], n=30, compare=[("a", "b")])
+    differences = result.differences[result.differences["metric"] == "rmse"]
+    assert len(differences) == 3  # random, and each block size on its own
+    assert (differences["n"] == len(points)).all() and (differences["n_unpaired"] == 0).all()

@@ -50,7 +50,7 @@ from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
 from yg_eo_soilnet.a1.features import build_table
-from yg_eo_soilnet.a1.plans import CONTROL, INDEX_FILE, LOGO, MIXED
+from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.settings import dev_mode_settings
 from yg_eo_soilnet.a1.stage2 import (
     GLOBAL_AUX,
@@ -72,6 +72,7 @@ PREDICTION_COLUMNS = (
     "held_out",
     "fraction",
     "repeat",
+    "block_size_m",
     "point_id",
     "split",
     "region",
@@ -89,7 +90,7 @@ PREDICTION_COLUMNS = (
 )
 #: The version of that layout, recorded in the manifest. A run folder written in another version is
 #: refused like one made from other settings: its old files would sit beside new ones.
-PREDICTION_FORMAT = 2
+PREDICTION_FORMAT = 3
 MANIFEST_FILE = "manifest.json"
 METRICS_FILE = "metrics.csv"
 DISSIMILARITY_DIR = "dissimilarity"
@@ -196,6 +197,13 @@ def run_plans(
             f"--config {settings.source_path or '<settings>'}"
         )
     index = pd.read_csv(index_path, keep_default_na=False, na_values=[""])
+    missing = [column for column in INDEX_COLUMNS if column not in index.columns]
+    if missing:
+        raise ValueError(
+            f"{index_path} has no {missing}: the plans were written by an older make_plans.py. Write them again "
+            f"(python experiments/a1/make_plans.py --config {settings.source_path or '<settings>'}), then run with "
+            "--restart."
+        )
     if kinds is not None:
         kinds = list(kinds)
         if MIXED in kinds and CONTROL not in kinds:
@@ -389,6 +397,7 @@ def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd
             # Whole float columns even when empty: a column of bare NaN would be read back as object.
             "fraction": np.full(len(ids), float(row.fraction) if pd.notna(row.fraction) else np.nan),
             "repeat": np.full(len(ids), float(row.repeat) if pd.notna(row.repeat) else np.nan),
+            "block_size_m": np.full(len(ids), float(row.block_size_m) if pd.notna(row.block_size_m) else np.nan),
             "point_id": ids.to_numpy(),
             "split": context.split.reindex(ids).to_numpy(),
             "region": (region.reindex(ids).to_numpy() if region is not None else None),
@@ -574,6 +583,13 @@ def _start_parent(a1: A1Config, config, run_name: str, kinds, groups: bool, dev_
             "a1_kinds": ",".join(kinds) if kinds else "all",
             "a1_groups": groups,
             "a1_dev_mode": dev_mode,
+            "a1_logo_min_points": a1.settings.plans.logo.min_points,
+            "a1_logo_held_out": ";".join(a1.settings.plans.logo.held_out or ()) or "all eligible",
+            "a1_kfold_method": a1.settings.plans.spatial_kfold.method,
+            "a1_kfold_block_sizes_m": ",".join(
+                f"{size:g}" for size in a1.settings.plans.spatial_kfold.block_sizes_m() if size is not None
+            )
+            or "none",
             "a1_min_cell_size": a1.settings.min_cell_size,
         }
     )

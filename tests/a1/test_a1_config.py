@@ -300,16 +300,23 @@ def test_the_a1_data_spec_makes_the_soil_map_layers_inputs():
     assert not labels & set(LEGACY_SOIL)
     # The lab values themselves, and the earlier predictions, are still never inputs.
     assert {"organic_matter_g_kg", *AUXILIARY, "caco3_pct_total_baseline", "c_e_c_meq_100g_baseline"} <= labels
-    assert "landform_class" in labels
+
+
+def test_the_a1_data_spec_makes_landform_class_a_categorical_terrain_input():
+    spec = _spec(A1_CONFIGS / "data_spec.yml")
+    assert "landform_class" not in spec["LABEL_COLUMNS"]
+    assert "landform_class" in spec["CATEGORICAL_FEATURES"]
+    groups = yaml.safe_load((A1_CONFIGS / "covariate_groups.yml").read_text())
+    assert "landform_class" in groups["terrain"]["columns"]
 
 
 def test_the_a1_data_spec_differs_from_the_projects_only_in_those_layers():
     project, a1 = _spec(PROJECT_ROOT / "configs" / "data_spec.yml"), _spec(A1_CONFIGS / "data_spec.yml")
 
     moved = set(project["LABEL_COLUMNS"]) - set(a1["LABEL_COLUMNS"])
-    assert moved == set(LEGACY_SOIL) | {"silt_median_0_30cm"}
+    assert moved == set(LEGACY_SOIL) | {"silt_median_0_30cm", "landform_class"}
     assert set(a1["LABEL_COLUMNS"]) <= set(project["LABEL_COLUMNS"])
-    assert a1["CATEGORICAL_FEATURES"] == ["texture_20cm"]
+    assert a1["CATEGORICAL_FEATURES"] == ["texture_20cm", "landform_class"]
     for key in set(project) - {"LABEL_COLUMNS", "CATEGORICAL_FEATURES"}:
         assert a1[key] == project[key], key
 

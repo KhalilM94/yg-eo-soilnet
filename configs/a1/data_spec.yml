@@ -1,13 +1,15 @@
-# The data spec of the Paper A1 experiments: configs/data_spec.yml, with ONE deliberate difference.
+# The data spec of the Paper A1 experiments: configs/data_spec.yml, with TWO deliberate differences.
 #
 #   The existing soil-map layers - bd, clay, ph, sand, soc, som and swc medians over 0-30 cm, and
 #   the texture class texture_20cm - are inputs here, the `legacy_soil` covariate group, rather
 #   than LABEL_COLUMNS. main.py keeps them out so its models learn from the satellite data rather
 #   than echo the map; A1 measures what the map adds, so it needs them in.
 #
-# texture_20cm is a class, so it is also declared under CATEGORICAL_FEATURES. landform_class stays a
-# lab column, as in configs/data_spec.yml. Everything else is a copy: when configs/data_spec.yml
-# changes, change this file to match.
+#   landform_class, the terrain class, is an input too (the terrain covariate group), not a lab
+#   column: it is computed from the elevation model, not measured in the lab.
+#
+# texture_20cm and landform_class are classes, so both are declared under CATEGORICAL_FEATURES.
+# Everything else is a copy: when configs/data_spec.yml changes, change this file to match.
 #
 # Every column in your data that is a real, measured lab value - not something a model should
 # ever be given as an input. A column listed here is NEVER used as a feature, whether or not
@@ -49,7 +51,7 @@ LABEL_COLUMNS:
   # The existing soil-map layers (*_median_0_30cm, texture_20cm) are NOT here, unlike in
   # configs/data_spec.yml: A1 uses them as inputs (the legacy_soil covariate group). Two more
   # layers named for A1, silt_median_0_30cm and SU_WRB1_PH, are not in the current static file.
-  - landform_class
+  # landform_class is not here either: A1 uses it as a terrain input (CATEGORICAL_FEATURES below).
 
   - ph_water_base
   - organic_matter_g_kg_baseline
@@ -165,6 +167,8 @@ ELIMINATED_FEATURES: *ignored_columns
 CATEGORICAL_FEATURES:
   # The soil-map texture class, an A1 input (configs/data_spec.yml keeps it a lab column).
   - texture_20cm
+  # The terrain class, an A1 terrain input (configs/data_spec.yml keeps it a lab column).
+  - landform_class
 
 existing_hs_features:
   # Off by default, and not commonly needed. Lets you tell the pipeline to ignore a set of

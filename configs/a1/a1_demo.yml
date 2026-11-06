@@ -70,13 +70,18 @@ plans:
   random:
     test_size: 0.15
     val_size: 0
+  # 10 km grid squares, and a 25 km set of folds beside them: the block-size sensitivity check.
   spatial_kfold:
-    method: kmeans
+    method: grid
     n_clusters: 50
     cell_size_m: 10000
+    cell_sizes_m: [10000, 25000]
     n_folds: 5
     val_size: 0
+  # Two of the four demo regions held out; the other two always stay in training.
   logo:
+    min_points: 100
+    held_out: [North-East, South-West]
     validation_region: false
   mixed:
     fractions: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]

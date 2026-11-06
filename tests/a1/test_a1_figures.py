@@ -335,3 +335,19 @@ def test_tree_shap_values_add_up_to_the_models_predictions():
     base = model.get_booster().predict(__import__("xgboost").DMatrix(X), pred_contribs=True)[:, -1]
     assert values.sum(axis=1) + base == pytest.approx(model.predict(X), abs=1e-3)
     assert np.abs(values).mean(axis=0).argmax() == 0  # the strongest input leads
+
+
+def test_the_class_scores_keep_only_the_primary_block_size():
+    predictions = pd.concat(
+        [
+            _prediction_rows(RANDOM, "random").assign(block_size_m=np.nan),
+            _prediction_rows(SPATIAL_KFOLD, "kfold_10km_f0", seed=1).assign(block_size_m=10_000.0),
+            _prediction_rows(SPATIAL_KFOLD, "kfold_25km_f0", seed=2).assign(block_size_m=25_000.0),
+        ]
+    )
+    primary = figures.class_scores(predictions, n=20, block_size_m=10_000)
+    pooled = figures.class_scores(predictions, n=20)
+    kfold = primary[(primary["kind"] == SPATIAL_KFOLD) & (primary["metric"] == "rpiq")]
+    assert kfold["n"].sum() == 4 * 120  # four models, each scored on one size's 120 test points once
+    assert pooled[(pooled["kind"] == SPATIAL_KFOLD) & (pooled["metric"] == "rpiq")]["n"].sum() == 4 * 240
+    assert set(primary.loc[primary["kind"] == RANDOM, "n"]) == set(pooled.loc[pooled["kind"] == RANDOM, "n"])

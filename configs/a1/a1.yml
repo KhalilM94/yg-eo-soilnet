@@ -41,13 +41,20 @@ covariate_groups: covariate_groups.yml
 #                 polygons_path: <the file>
 #                 name_field: <the field holding each region's name>
 #   null      - no regions yet: the steps that need them say so and are skipped.
-# The regions of this paper are the hydraulic sub-basins (34 outlines, in the Merchich datum; each
-# point is matched after reprojecting them to latitude/longitude).
+# The regions of this paper are the 10 major hydraulic basins (in the Merchich datum; each point is
+# matched after reprojecting them to latitude/longitude). Every sample point falls in one: Oum Er
+# Rbia 2,024, Sebou 1,312, Tensift 1,085, Bouregreg 300, Loukkous 290, Moulouya 154, Souss Massa 97,
+# Daraa 19, Guir - Ziz - Rhris 14. plans.logo.held_out below picks the ones held out.
 regions:
   source: polygons
   column: null
-  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/SousBassinsHydrauliques.shp
-  name_field: SousBassin
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+# The alternative: the 34 hydraulic sub-basins, finer but smaller (6 hold fewer than 30 points).
+# With them, drop plans.logo.held_out so every sub-basin of at least min_points is held out:
+#   polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/SousBassinsHydrauliques.shp
+#   name_field: SousBassin
+# and, under plans.logo: min_points: 100
 
 # --- models -------------------------------------------------------------------------------------
 # Entries of the scikit-learn model list (configs/sklearn/model_registry.yml); they need not be
@@ -131,17 +138,26 @@ plans:
     test_size: 0.15
     val_size: 0
   # Nearby points grouped into blocks, packed into folds; each fold is the test set once and every
-  # other block is training. method: kmeans uses n_clusters blocks; method: grid uses squares of
-  # cell_size_m metres.
+  # other block is training. Grid squares of cell_size_m metres, the same 10 km as the bootstrap's
+  # blocks. (method: kmeans with n_clusters: 50 made blocks tens of km across, which made spatial CV
+  # pessimistic.)
   spatial_kfold:
-    method: kmeans
+    method: grid
     n_clusters: 50
     cell_size_m: 10000
     n_folds: 5
     val_size: 0
+    # A block-size sensitivity check: one whole set of folds per size listed (cell_size_m stays the
+    # one the paper's spatial scores use). Triples the spatial plans and their run time.
+    # cell_sizes_m: [5000, 10000, 25000]
   # Leave one region out (logo) and its mixed variants: every region but the held-out one is
+  # training. min_points is the fewest points a region needs to be held out (separate from
+  # min_cell_size, the smallest carbonate class with a model of its own); held_out names the
+  # regions held out, each with at least min_points points. Every other region always stays in
   # training. validation_region: true would set a second whole region aside instead.
   logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou, Tensift, Loukkous, Bouregreg]
     validation_region: false
   # Leave one region out, with a share of the region moved into training: each fraction, drawn
   # n_repeats times. Each mixed plan also gets its control - the same moved points alone.

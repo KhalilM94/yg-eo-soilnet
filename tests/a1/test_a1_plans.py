@@ -112,12 +112,27 @@ def test_the_random_plan_is_saved_without_a_cluster_column(plans):
 # --- spatial k-fold -----------------------------------------------------------------------------
 
 
-def test_every_point_is_tested_exactly_once_over_the_folds(plans, population):
-    folds = plans[SPATIAL_KFOLD]
-    assert [built.plan_id for built in folds] == [f"kfold_f{i}" for i in range(5)]
+def test_each_block_size_gets_its_own_set_of_folds_named_after_it(plans):
+    # The demo asks for 10 km squares (cell_size_m) and 25 km squares (cell_sizes_m).
+    assert [built.plan_id for built in plans[SPATIAL_KFOLD]] == [
+        *(f"kfold_10km_f{i}" for i in range(5)),
+        *(f"kfold_25km_f{i}" for i in range(5)),
+    ]
+    assert [built.block_size_m for built in plans[SPATIAL_KFOLD]] == [10_000.0] * 5 + [25_000.0] * 5
+
+
+@pytest.mark.parametrize("size", [10_000.0, 25_000.0])
+def test_every_point_is_tested_exactly_once_over_the_folds_of_each_size(plans, population, size):
+    folds = [built for built in plans[SPATIAL_KFOLD] if built.block_size_m == size]
     tested = pd.concat([pd.Series(built.plan.point_ids_for(TEST)) for built in folds])
+    assert len(folds) == 5
     assert not tested.duplicated().any()
     assert set(tested) == set(population.ids)
+
+
+def test_larger_squares_make_fewer_blocks(plans):
+    blocks = {built.block_size_m: built.plan.clusters.nunique() for built in plans[SPATIAL_KFOLD]}
+    assert blocks[25_000.0] < blocks[10_000.0]
 
 
 def test_no_block_is_divided_and_every_block_outside_the_test_fold_is_training(plans, population):
@@ -136,8 +151,12 @@ def test_a_kfold_validation_share_is_whole_blocks_of_about_that_size_when_asked(
         assert built.plan.counts()["val"] == pytest.approx(0.15 * len(population.ids), rel=0.2)
 
 
-def test_the_folds_have_fifty_blocks_between_them(plans):
-    assert plans[SPATIAL_KFOLD][0].plan.clusters.nunique() == 50
+def test_kmeans_blocks_are_fifty_and_named_after_their_count(population, a1_settings):
+    settings = a1_settings(plans={"spatial_kfold": {"method": "kmeans", "n_clusters": 50}})
+    folds = spatial_kfold_plans(population, settings)
+    assert [built.plan_id for built in folds] == [f"kfold_k50_f{i}" for i in range(5)]
+    assert folds[0].plan.clusters.nunique() == 50
+    assert all(built.block_size_m is None for built in folds)
 
 
 def test_a_grid_makes_the_blocks_instead_when_asked(population, a1_settings):
@@ -149,7 +168,7 @@ def test_a_grid_makes_the_blocks_instead_when_asked(population, a1_settings):
 
 
 def test_too_few_points_for_the_blocks_is_reported(a1_settings):
-    settings = a1_settings()
+    settings = a1_settings(plans={"spatial_kfold": {"method": "kmeans", "n_clusters": 50}, "logo": {"min_points": 10}})
     small = _synthetic_population(settings, {"A": 20})
     with pytest.raises(PlanError, match="at least n_clusters=50"):
         spatial_kfold_plans(small, settings)
@@ -178,9 +197,11 @@ def test_no_block_is_drawn_for_a_target_of_zero_or_from_a_single_block():
 # --- leave one region out -------------------------------------------------------------------
 
 
-def test_each_region_is_the_test_set_once_and_wholly(plans, population):
+def test_only_the_listed_regions_are_held_out_each_once_and_wholly(plans, population):
     logo = plans[LOGO]
-    assert len(logo) == 4
+    # The demo lists North-East and South-West; the other two regions always stay in training.
+    assert [built.held_out for built in logo] == ["North-East", "South-West"]
+    assert [population.region_names[region] for region in population.held_out] == ["North-East", "South-West"]
     for built in logo:
         region = set(population.region_points(built.held_out_cluster))
         assert set(built.plan.point_ids_for(TEST)) == region
@@ -210,7 +231,7 @@ def test_a_validation_region_is_another_whole_region_only_when_asked(population,
 
 
 def test_with_only_two_regions_there_is_no_validation_region_to_spare(a1_settings):
-    settings = a1_settings(plans={"logo": {"validation_region": True}})
+    settings = a1_settings(plans={"logo": {"validation_region": True, "min_points": 30}})
     population = _synthetic_population(settings, {"A": 40, "B": 40})
     for built in logo_plans(population, settings):
         assert built.plan.counts()["val"] == 0
@@ -218,7 +239,7 @@ def test_with_only_two_regions_there_is_no_validation_region_to_spare(a1_setting
 
 
 def test_a_small_region_is_never_held_out_nor_used_for_validation(a1_settings, caplog):
-    settings = a1_settings()
+    settings = a1_settings(plans={"logo": {"min_points": 30}})
     with caplog.at_level("WARNING"):
         population = _synthetic_population(settings, {"A": 60, "B": 60, "C": 60, "tiny": 10})
 
@@ -231,13 +252,46 @@ def test_a_small_region_is_never_held_out_nor_used_for_validation(a1_settings, c
         assert tiny <= set(built.plan.point_ids_for(TRAIN))
 
 
+def test_a_region_between_min_cell_size_and_min_points_is_not_held_out_and_stays_in_training(a1_settings):
+    settings = a1_settings(min_cell_size=30, plans={"logo": {"min_points": 100}})
+    population = _synthetic_population(settings, {"A": 150, "B": 150, "C": 150, "mid": 60})
+    mid = population.region_ids.max()
+
+    assert settings.min_cell_size == 30  # the carbonate-class threshold is not what decides here
+    assert population.too_small == {"mid": 60}
+    assert mid not in population.held_out
+    for built in logo_plans(population, settings):
+        assert set(population.region_points(mid)) <= set(built.plan.point_ids_for(TRAIN))
+
+
+def test_the_held_out_list_holds_out_only_those_regions_in_logo_and_mixed_plans(a1_settings):
+    settings = a1_settings(
+        plans={"logo": {"min_points": 100, "held_out": ["B"]}, "mixed": {"fractions": [0.5], "n_repeats": 1}}
+    )
+    population = _synthetic_population(settings, {"A": 150, "B": 150, "C": 150})
+    b = next(region for region, name in population.region_names.items() if name == "B")
+
+    logo = logo_plans(population, settings)
+    assert [built.held_out for built in logo] == ["B"]
+    assert set(logo[0].plan.point_ids_for(TRAIN)) == set(population.ids) - set(population.region_points(b))
+    mixed = mixed_plans(population, settings)
+    assert {built.held_out for built in mixed} == {"B"} and len(mixed) == 2  # one mixed plan and its control
+
+
+def test_a_listed_region_that_does_not_exist_is_refused_naming_the_real_ones(a1_settings):
+    settings = a1_settings(plans={"logo": {"held_out": ["B", "Atlantis"]}})
+    with pytest.raises(PlanError, match=r"\['Atlantis'\].*not regions of the data.*\['A', 'B'\]"):
+        _synthetic_population(settings, {"A": 150, "B": 150})
+
+
+def test_a_listed_region_under_min_points_is_refused_with_its_count(a1_settings):
+    settings = a1_settings(plans={"logo": {"min_points": 100, "held_out": ["A", "B"]}})
+    with pytest.raises(PlanError, match=r"\{'B': 60\}.*min_points=100"):
+        _synthetic_population(settings, {"A": 150, "B": 60})
+
+
 def test_region_plans_name_the_region_in_plain_letters(plans):
-    assert {built.plan_id for built in plans[LOGO]} == {
-        "logo_r01_north_east",
-        "logo_r02_north_west",
-        "logo_r03_south_east",
-        "logo_r04_south_west",
-    }
+    assert {built.plan_id for built in plans[LOGO]} == {"logo_r01_north_east", "logo_r04_south_west"}
 
 
 # --- mixed transfer and its controls ------------------------------------------------------------
@@ -245,7 +299,8 @@ def test_region_plans_name_the_region_in_plain_letters(plans):
 
 def test_every_region_share_and_repeat_has_a_mixed_plan_and_a_control(plans):
     kinds = pd.Series([built.kind for built in plans[MIXED]]).value_counts()
-    assert kinds.to_dict() == {MIXED: 4 * N_FRACTIONS * N_REPEATS, CONTROL: 4 * N_FRACTIONS * N_REPEATS}
+    # Two regions held out.
+    assert kinds.to_dict() == {MIXED: 2 * N_FRACTIONS * N_REPEATS, CONTROL: 2 * N_FRACTIONS * N_REPEATS}
 
 
 def _pairs(plans):
@@ -333,7 +388,8 @@ def test_a_divided_block_is_refused_in_a_kfold_plan(plans):
     built = plans[SPATIAL_KFOLD][0]
     assignments = built.plan.assignments.copy()
     block = built.plan.clusters.reindex(assignments.index)
-    one_test_block = block[assignments == TEST].iloc[0]
+    sizes = block[assignments == TEST].value_counts()
+    one_test_block = sizes.index[sizes >= 2][0]  # a block of one point cannot be divided
     first_of_it = assignments.index[(block == one_test_block).to_numpy()][0]
     assignments.loc[first_of_it] = TRAIN
     with pytest.raises(PlanError, match=f"cluster {one_test_block} is divided"):
@@ -395,7 +451,7 @@ def written(settings, population, tmp_path):
 def test_every_file_loads_as_a_split_plan_matching_the_index(written):
     index = pd.read_csv(written.out_dir / INDEX_FILE)
     assert list(index.columns) == list(INDEX_COLUMNS)
-    assert len(index) == 1 + 5 + 4 + 2 * 4 * N_FRACTIONS * N_REPEATS
+    assert len(index) == 1 + 2 * 5 + 2 + 2 * 2 * N_FRACTIONS * N_REPEATS
     for row in index.itertuples():
         plan = SplitPlan.from_frame(pd.read_parquet(written.out_dir / f"{row.plan_id}.parquet"))
         assert plan.counts() == {"train": row.n_train, "val": row.n_val, "test": row.n_test}
@@ -404,7 +460,7 @@ def test_every_file_loads_as_a_split_plan_matching_the_index(written):
 def test_the_saved_files_hold_exactly_the_split_plan_columns(written):
     for plan_id, expected in [
         ("random", ["point_id", "split", "eligible_sklearn"]),
-        ("kfold_f0", ["point_id", "split", "cluster", "eligible_sklearn"]),
+        ("kfold_10km_f0", ["point_id", "split", "cluster", "eligible_sklearn"]),
         ("logo_r01_north_east", ["point_id", "split", "cluster", "eligible_sklearn"]),
         ("control_r01_north_east_p10_s0", ["point_id", "split", "cluster", "eligible_sklearn"]),
     ]:
@@ -413,11 +469,28 @@ def test_the_saved_files_hold_exactly_the_split_plan_columns(written):
 
 def test_the_index_says_what_each_plan_is(written):
     index = written.index.set_index("plan_id")
-    assert index.loc["kfold_f3", "held_out"] == "3"
-    assert index.loc["logo_r02_north_west", "held_out"] == "North-West"
-    row = index.loc["mixed_r02_north_west_p30_s4"]
+    assert index.loc["kfold_10km_f3", "held_out"] == "3"
+    assert index.loc["logo_r04_south_west", "held_out"] == "South-West"
+    row = index.loc["mixed_r04_south_west_p30_s4"]
     assert (row["kind"], row["fraction"], row["repeat"]) == (MIXED, 0.3, 4)
     assert pd.isna(index.loc["random", "fraction"])
+
+
+def test_the_index_records_block_sizes_and_how_the_regions_were_chosen(written):
+    index = written.index.set_index("plan_id")
+    assert index.loc["kfold_10km_f0", "block_size_m"] == 10_000 and index.loc["kfold_25km_f4", "block_size_m"] == 25_000
+    for plan_id in ("logo_r01_north_east", "mixed_r01_north_east_p10_s0", "control_r01_north_east_p10_s0"):
+        assert index.loc[plan_id, "min_points"] == 100
+        assert index.loc[plan_id, "held_out_list"] == "North-East;South-West"
+    assert pd.isna(index.loc["random", "block_size_m"]) and pd.isna(index.loc["random", "min_points"])
+    assert pd.isna(index.loc["logo_r01_north_east", "block_size_m"])
+
+
+def test_without_a_list_every_large_enough_region_is_held_out_and_says_so(a1_settings, population, tmp_path):
+    settings = a1_settings(plans={"logo": {"min_points": 100}})
+    written = write_plans(settings, str(tmp_path / "plans"), kinds=[LOGO], population=plan_population(settings))
+    assert len(written.index) == 4
+    assert set(written.index["held_out_list"]) == {"all eligible"}
 
 
 def test_old_plans_are_cleared_before_writing(settings, population, tmp_path):
@@ -458,7 +531,10 @@ def test_the_command_line_writes_the_kinds_asked_for(a1_settings, tmp_path, caps
 
     assert set(result.index["kind"]) == {RANDOM, LOGO}
     assert (tmp_path / "cli" / INDEX_FILE).exists()
-    assert "logo: 4" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "logo: 2" in out
+    assert "regions held out: North-East, South-West" in out
+    assert "regions always in training: North-West, South-East" in out
 
 
 # --- settings -------------------------------------------------------------------------------------

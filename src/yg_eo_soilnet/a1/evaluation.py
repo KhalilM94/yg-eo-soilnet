@@ -113,7 +113,7 @@ def load_predictions(
                 f"{path} has no {missing}: it was written by an older run_a1.py. Redo the run with --restart."
             )
         # One type per column in every file, so files of different kinds stack cleanly.
-        frame = frame.astype({"fraction": float, "repeat": float, "held_out": object})
+        frame = frame.astype({"fraction": float, "repeat": float, "block_size_m": float, "held_out": object})
         for column, wanted in (("kind", kinds), ("model", models), ("covariate_group", covariate_groups)):
             if wanted is not None:
                 frame = frame[frame[column].isin(list(wanted))]

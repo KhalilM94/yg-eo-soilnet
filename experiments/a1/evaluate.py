@@ -4,7 +4,10 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
 :mod:`yg_eo_soilnet.a1.evaluation`) and writes, into ``<output_dir>/runs/<run name>/evaluation/``:
 
 ``scores.csv``
-    RMSE, MAE, R², bias, RPD and RPIQ per plan kind, model, covariate group and split.
+    RMSE, MAE, R², bias, RPD and RPIQ per plan kind, model, covariate group and split. Every table
+    keeps ``spatial_kfold`` scores of different block sizes apart (``block_size_m``): each point is
+    tested once per size, so pooling them would count it several times. Comparing the sizes is the
+    block-size sensitivity check.
 ``scores_by_class.csv``
     The same on the test points, per kind, model and measured carbonate class.
 ``intervals.csv``
@@ -85,11 +88,13 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     test = frame[frame["split"] == TEST]
     combined = test[test["covariate_group"] == COMBINED_GROUP]
     boot = evaluation.block_bootstrap(
-        combined, ["kind", "model"], block_km=block_km, n=args.n_boot, seed=seed, compare=COMPARISONS
+        combined, ["kind", "block_size_m", "model"], block_km=block_km, n=args.n_boot, seed=seed, compare=COMPARISONS
     )
     tables = {
-        "scores.csv": evaluation.grouped_metrics(frame, ["kind", "model", "covariate_group", "split"]),
-        "scores_by_class.csv": evaluation.grouped_metrics(combined, ["kind", "model", "carbonate_class_measured"]),
+        "scores.csv": evaluation.grouped_metrics(frame, ["kind", "block_size_m", "model", "covariate_group", "split"]),
+        "scores_by_class.csv": evaluation.grouped_metrics(
+            combined, ["kind", "block_size_m", "model", "carbonate_class_measured"]
+        ),
         "intervals.csv": boot.intervals,
         "differences.csv": boot.differences,
         "transfer.csv": evaluation.transfer_table(frame),
@@ -103,11 +108,19 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     print(
         f"Test RMSE, every covariate, with 95 % block-bootstrap intervals ({block_km:g} km blocks, {args.n_boot} draws):"
     )
-    print(rmse[["kind", "model", "estimate", "low", "high", "n", "n_blocks"]].round(3).to_string(index=False))
+    print(
+        rmse[["kind", "block_size_m", "model", "estimate", "low", "high", "n", "n_blocks"]]
+        .round(3)
+        .to_string(index=False)
+    )
     differences = boot.differences[boot.differences["metric"] == "rmse"]
     if not differences.empty:
         print("RMSE differences (a - b; negative means a is better):")
-        print(differences[["kind", "a", "b", "estimate", "low", "high", "p_holm"]].round(4).to_string(index=False))
+        print(
+            differences[["kind", "block_size_m", "a", "b", "estimate", "low", "high", "p_holm"]]
+            .round(4)
+            .to_string(index=False)
+        )
     print(f"Tables in {out}/: {', '.join(TABLES)}")
     return tables
 

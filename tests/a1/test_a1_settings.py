@@ -305,3 +305,48 @@ def test_the_default_plans_have_no_validation_and_say_nothing(main_config, caplo
     for section in (plans, *shipped):
         assert section.random.val_size == 0 and section.spatial_kfold.val_size == 0
         assert section.logo.validation_region is False
+
+
+def test_region_and_block_size_settings_are_read(main_config):
+    from yg_eo_soilnet.a1.settings import settings_from_mapping
+
+    plans = settings_from_mapping(
+        {
+            "main_config": str(main_config),
+            "plans": {
+                "logo": {"min_points": 50, "held_out": ["Sebou", "Tensift"]},
+                "spatial_kfold": {"method": "grid", "cell_size_m": 10000, "cell_sizes_m": [25000, 5000, 10000]},
+            },
+        }
+    ).plans
+    assert plans.logo.min_points == 50 and plans.logo.held_out == ("Sebou", "Tensift")
+    assert plans.spatial_kfold.cell_sizes_m == (25000.0, 5000.0, 10000.0)
+    # The primary size is always written, every size once, smallest first.
+    assert plans.spatial_kfold.block_sizes_m() == (5000.0, 10000.0, 25000.0)
+
+
+def test_the_defaults_hold_out_every_region_of_100_points(main_config):
+    from yg_eo_soilnet.a1.settings import settings_from_mapping
+
+    plans = settings_from_mapping({"main_config": str(main_config)}).plans
+    assert plans.logo.min_points == 100 and plans.logo.held_out is None
+    assert plans.spatial_kfold.cell_sizes_m is None
+
+
+@pytest.mark.parametrize(
+    "plans_section, message",
+    [
+        ({"spatial_kfold": {"method": "kmeans", "cell_sizes_m": [5000]}}, "needs method: grid"),
+        ({"spatial_kfold": {"method": "grid", "cell_sizes_m": [50]}}, "at least 100 m"),
+        ({"spatial_kfold": {"method": "grid", "cell_sizes_m": "10000"}}, "must be a list"),
+        ({"logo": {"held_out": []}}, "held_out is empty"),
+        ({"logo": {"held_out": ["Sebou", "Sebou"]}}, r"\['Sebou'\] more than once"),
+        ({"logo": {"held_out": "Sebou"}}, "must be a list"),
+        ({"logo": {"min_points": 0}}, "min_points must be at least 1"),
+    ],
+)
+def test_region_and_block_size_settings_that_make_no_sense_are_refused(main_config, plans_section, message):
+    from yg_eo_soilnet.a1.settings import settings_from_mapping
+
+    with pytest.raises(ValueError, match=message):
+        settings_from_mapping({"main_config": str(main_config), "plans": plans_section})

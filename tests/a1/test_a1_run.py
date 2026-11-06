@@ -88,19 +88,14 @@ def _plan(demo_run, plan_id):
 def test_every_plan_gets_every_model(demo_run):
     frame = _predictions(demo_run)
     combined = frame[frame["covariate_group"] == COMBINED_GROUP]
-    assert set(combined["plan_id"]) == {
-        "random",
-        *(
-            f"logo_r0{i}_{name}"
-            for i, name in [(1, "north_east"), (2, "north_west"), (3, "south_east"), (4, "south_west")]
-        ),
-    }
+    # The demo holds out two of its four regions (plans.logo.held_out).
+    assert set(combined["plan_id"]) == {"random", "logo_r01_north_east", "logo_r04_south_west"}
     for _, models in combined.groupby("plan_id")["model"]:
         assert set(models) >= set(MODELS)
 
 
 def test_the_rows_are_exactly_the_plans_validation_and_test_points(demo_run):
-    for plan_id in ("random", "logo_r02_north_west"):
+    for plan_id in ("random", "logo_r04_south_west"):
         plan = _plan(demo_run, plan_id)
         held = set(plan.point_ids_for(VAL)) | set(plan.point_ids_for(TEST))
         frame = _predictions(demo_run, plan_id)
@@ -149,7 +144,7 @@ def test_the_chosen_settings_are_recorded_with_every_row(demo_run):
 
 def test_the_stage_1_audit_is_saved_for_every_plan(demo_run):
     stage1 = sorted(path.stem for path in (demo_run["result"].run_dir / "stage1").glob("*.parquet"))
-    assert len(stage1) == 5
+    assert len(stage1) == 3
     audit = pd.read_parquet(demo_run["result"].run_dir / "stage1" / "random.parquet")
     assert {"split", "inner_fold", "a1_pred_caco3_pct_total", "predicted_by_caco3_pct_total"} <= set(audit.columns)
 
@@ -164,9 +159,9 @@ def test_with_groups_each_covariate_group_gets_its_own_global_aux_model(demo_run
 
 
 def test_logo_plans_get_local_scores_inside_the_held_out_region_only(demo_run):
-    frame = _predictions(demo_run, "logo_r03_south_east")
+    frame = _predictions(demo_run, "logo_r04_south_west")
     local = frame[frame["model"] == LOCAL]
-    plan = _plan(demo_run, "logo_r03_south_east")
+    plan = _plan(demo_run, "logo_r04_south_west")
     assert set(local["point_id"]) == set(plan.point_ids_for(TEST))
     assert set(local["covariate_group"]) == {COMBINED_GROUP, *demo_run["a1"].groups.names}
     assert LOCAL not in set(_predictions(demo_run, "random")["model"])
@@ -355,13 +350,11 @@ def test_the_run_is_recorded_in_mlflow_with_the_commit_and_every_plans_scores(de
 
     assert len(parents) == 1
     assert parents[0].data.params["a1_git_commit"] == demo_run["a1"].git_commit
-    assert {run.data.tags["plan_id"] for run in children} == {
-        "random",
-        "logo_r01_north_east",
-        "logo_r02_north_west",
-        "logo_r03_south_east",
-        "logo_r04_south_west",
-    }
+    assert {run.data.tags["plan_id"] for run in children} == {"random", "logo_r01_north_east", "logo_r04_south_west"}
+    # How the regions and spatial blocks were chosen is recorded with the run.
+    params = parents[0].data.params
+    assert params["a1_logo_min_points"] == "100" and params["a1_logo_held_out"] == "North-East;South-West"
+    assert params["a1_kfold_method"] == "grid" and params["a1_kfold_block_sizes_m"] == "10000,25000"
     for run in children:
         assert run.data.tags["kind"] in (RANDOM, LOGO)
         assert "rmse_test__global__combined" in run.data.metrics
@@ -424,8 +417,8 @@ def test_the_full_demo_run_from_the_command_line(a1_settings_in, tmp_path, mlflo
     print(f"full demo run: {elapsed:.0f} s; pooled test RMSE {rmse.round(2).to_dict()}")
     assert elapsed < 600
     assert rmse[PER_CLASS_MEASURED] < rmse[GLOBAL]
-    # Every model of the 5 plans, and a dissimilarity table for each of the 4 logo plans.
-    assert len(result.computed) == 5 * len(MODELS) + 4
+    # Every model of the 3 plans (random, two held-out regions), and a dissimilarity table per logo plan.
+    assert len(result.computed) == 3 * len(MODELS) + 2
 
 
 def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
@@ -613,3 +606,32 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
     )
     # The module's run has random and logo plans only: figure 6 needs mixed plans and says so.
     assert [name for name, figure in drawn.items() if is_message_figure(figure)] == ["fig6_mixed"]
+
+
+def test_spatial_plans_of_each_block_size_carry_it_on_every_row(demo_run, tmp_path):
+    from yg_eo_soilnet.a1.plans import SPATIAL_KFOLD
+
+    a1 = demo_run["a1"]
+    plans = tmp_path / "plans"
+    written = write_plans(a1.settings, str(plans), kinds=[SPATIAL_KFOLD])
+    # One fold of each size is enough to see the size travel from the plan to the predictions.
+    index = written.index[written.index["plan_id"].isin(["kfold_10km_f0", "kfold_25km_f0"])]
+    index.to_csv(plans / "index.csv", index=False)
+    result = run_plans(a1, plans_dir=str(plans), tracking=False, dev_mode=True, run_name="blocks")
+
+    frame = pd.concat(
+        [pd.read_parquet(path) for path in (result.run_dir / "predictions").glob("*/*.parquet")], ignore_index=True
+    )
+    sizes = frame.groupby("plan_id")["block_size_m"].unique().map(list).to_dict()
+    assert sizes == {"kfold_10km_f0": [10_000.0], "kfold_25km_f0": [25_000.0]}
+    assert set(result.metrics["plan_id"]) == {"kfold_10km_f0", "kfold_25km_f0"}
+
+
+def test_an_index_from_an_older_make_plans_is_refused_with_how_to_fix_it(demo_run, tmp_path):
+    a1 = demo_run["a1"]
+    plans = tmp_path / "plans"
+    write_plans(a1.settings, str(plans), kinds=[RANDOM])
+    old = pd.read_csv(plans / "index.csv").drop(columns=["block_size_m", "min_points", "held_out_list"])
+    old.to_csv(plans / "index.csv", index=False)
+    with pytest.raises(ValueError, match="older make_plans.py.*Write them again"):
+        run_plans(a1, plans_dir=str(plans), tracking=False, run_name="old_index")

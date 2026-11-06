@@ -21,8 +21,9 @@ same fixed split and lets anyone check which points a score came from. Five kind
     elsewhere - scored on the same test points. The difference between the two is what the other
     regions add.
 
-A region with fewer than ``min_cell_size`` points is never held out and never used for
-validation: its score would rest on too few points. It stays in training.
+A region with fewer than ``plans.logo.min_points`` points (100) is never held out and never used
+for validation: its score would rest on too few points. ``plans.logo.held_out`` narrows the regions
+held out to a list of names. Every region not held out stays in training.
 
 **No validation set, by default.** A1 chooses its settings by cross-validation inside the training
 points (grouped by block or region on the spatial plans) and fits both stages on the training points
@@ -63,7 +64,21 @@ KINDS = (RANDOM, SPATIAL_KFOLD, LOGO, MIXED)
 DIVIDED_KINDS = (MIXED, CONTROL)
 
 #: The columns of ``index.csv``, in order.
-INDEX_COLUMNS = ("plan_id", "kind", "held_out", "fraction", "repeat", "n_train", "n_val", "n_test")
+INDEX_COLUMNS = (
+    "plan_id",
+    "kind",
+    "held_out",
+    "fraction",
+    "repeat",
+    "block_size_m",
+    "min_points",
+    "held_out_list",
+    "n_train",
+    "n_val",
+    "n_test",
+)
+#: What ``held_out_list`` says when no list was given and every large enough region is held out.
+ALL_ELIGIBLE = "all eligible"
 INDEX_FILE = "index.csv"
 #: The model family recorded in every plan's ``eligible_*`` column: A1 trains scikit-learn models.
 FAMILY = "sklearn"
@@ -95,6 +110,13 @@ class BuiltPlan:
         The held-out region's id, for ``logo``, ``mixed`` and ``control``.
     moved : frozenset
         For ``mixed`` and ``control``, the held-out region's points moved into training.
+    block_size_m : float or None
+        For ``spatial_kfold`` grid plans, the side of a block in metres.
+    min_points : int or None
+        For the region plans, the fewest points a region needed to be held out.
+    held_out_list : str or None
+        For the region plans, the regions asked to be held out (``;``-separated), or
+        :data:`ALL_ELIGIBLE`.
     """
 
     plan_id: str
@@ -105,6 +127,9 @@ class BuiltPlan:
     repeat: Optional[int] = None
     held_out_cluster: Optional[int] = None
     moved: frozenset = field(default_factory=frozenset)
+    block_size_m: Optional[float] = None
+    min_points: Optional[int] = None
+    held_out_list: Optional[str] = None
 
     def index_row(self) -> dict:
         """The plan's row of ``index.csv``."""
@@ -115,6 +140,9 @@ class BuiltPlan:
             "held_out": self.held_out if self.held_out is not None else "",
             "fraction": self.fraction if self.fraction is not None else np.nan,
             "repeat": self.repeat if self.repeat is not None else np.nan,
+            "block_size_m": self.block_size_m if self.block_size_m is not None else np.nan,
+            "min_points": self.min_points if self.min_points is not None else np.nan,
+            "held_out_list": self.held_out_list if self.held_out_list is not None else "",
             "n_train": counts[TRAIN],
             "n_val": counts[VAL],
             "n_test": counts[TEST],
@@ -137,10 +165,13 @@ class PlanPopulation:
     region_names : dict of int to str
         Region number to name.
     eligible : tuple of int
-        The regions with at least ``min_cell_size`` points: the ones held out and used for
-        validation.
+        The regions with at least ``plans.logo.min_points`` points: the ones that may be held out
+        or used for validation.
+    held_out : tuple of int
+        The regions held out in turn by the ``logo`` and ``mixed`` plans: those named in
+        ``plans.logo.held_out``, or every eligible region.
     too_small : dict of str to int
-        The regions left out of that, with their point counts.
+        The regions with fewer than ``min_points`` points, with their counts. They stay in training.
     """
 
     ids: pd.Index
@@ -148,6 +179,7 @@ class PlanPopulation:
     region_ids: Optional[pd.Series] = None
     region_names: dict = field(default_factory=dict)
     eligible: tuple = ()
+    held_out: tuple = ()
     too_small: dict = field(default_factory=dict)
 
     def region_points(self, region: int) -> pd.Index:
@@ -195,24 +227,52 @@ def plan_population(
     clustered = strategy.cluster(labelled)
     region_ids = pd.Series(clustered["cluster"].to_numpy(), index=pd.Index(clustered["point_id"])).reindex(ids)
     counts = region_ids.value_counts()
-    eligible = tuple(sorted(int(region) for region, n in counts.items() if n >= settings.min_cell_size))
-    too_small = {
-        strategy.cluster_names_[int(region)]: int(n) for region, n in counts.items() if n < settings.min_cell_size
-    }
+    minimum = settings.plans.logo.min_points
+    names = dict(strategy.cluster_names_)
+    eligible = tuple(sorted(int(region) for region, n in counts.items() if n >= minimum))
+    too_small = {names[int(region)]: int(n) for region, n in counts.items() if n < minimum}
+    held_out = _held_out_regions(settings, names, counts, eligible)
     if too_small:
         listed = ", ".join(f"{name} ({n})" for name, n in sorted(too_small.items(), key=lambda item: item[1]))
         logger.warning(
-            f"{len(too_small)} region(s) hold fewer than min_cell_size={settings.min_cell_size} points and are "
+            f"{len(too_small)} region(s) hold fewer than plans.logo.min_points={minimum} points and are "
             f"never held out or used for validation (they stay in training): {listed}"
         )
     return PlanPopulation(
         ids=ids,
         coordinates=coordinates,
         region_ids=region_ids.astype("Int64"),
-        region_names=dict(strategy.cluster_names_),
+        region_names=names,
         eligible=eligible,
+        held_out=held_out,
         too_small=too_small,
     )
+
+
+def _held_out_regions(settings: A1Settings, names: dict, counts: pd.Series, eligible: tuple) -> tuple:
+    """The regions to hold out: the ones ``plans.logo.held_out`` names, or every eligible one.
+
+    A name that is not a region of the data, or a listed region with fewer than ``min_points``
+    points, stops the plans: a list written by hand should not be silently shortened.
+    """
+    asked = settings.plans.logo.held_out
+    if asked is None:
+        return eligible
+    by_name = {name: region for region, name in names.items()}
+    unknown = [name for name in asked if name not in by_name]
+    if unknown:
+        raise PlanError(
+            f"plans.logo.held_out names {unknown}, which are not regions of the data. The regions are: "
+            f"{sorted(by_name)}."
+        )
+    minimum = settings.plans.logo.min_points
+    small = {name: int(counts.get(by_name[name], 0)) for name in asked if by_name[name] not in eligible}
+    if small:
+        raise PlanError(
+            f"plans.logo.held_out names {small} (points per region), fewer than plans.logo.min_points={minimum}: "
+            "their scores would rest on too few points. Lower min_points or remove them from the list."
+        )
+    return tuple(sorted(by_name[name] for name in asked))
 
 
 # --- the builders ---------------------------------------------------------------------------
@@ -249,7 +309,9 @@ def spatial_kfold_plans(population: PlanPopulation, settings: A1Settings) -> lis
     Returns
     -------
     list of BuiltPlan
-        ``kfold_f0``, ``kfold_f1``, ... with the block of each point as its cluster.
+        For each block size (:meth:`~yg_eo_soilnet.a1.settings.KFoldPlanSettings.block_sizes_m`),
+        ``kfold_10km_f0``, ``kfold_10km_f1``, ... - ``kfold_k50_f0``, ... for k-means blocks - with
+        the block of each point as its cluster.
 
     Raises
     ------
@@ -268,35 +330,56 @@ def spatial_kfold_plans(population: PlanPopulation, settings: A1Settings) -> lis
             f"there are {len(placed)}."
         )
     frame = pd.DataFrame({"point_id": placed.index, "lat": placed["lat"].to_numpy(), "lon": placed["lon"].to_numpy()})
-    if options.method == "kmeans":
-        strategy = KMeansClusterStrategy(n_clusters=options.n_clusters, random_state=settings.seed)
-    else:
-        strategy = SpatialGridClusterStrategy(cell_size_m=int(options.cell_size_m), random_state=settings.seed)
-    clustered = strategy.cluster(frame)
-    blocks = pd.Series(clustered["cluster"].astype(int).to_numpy(), index=pd.Index(clustered["point_id"]))
-    if blocks.nunique() < options.n_folds:
-        raise PlanError(
-            f"spatial_kfold made {blocks.nunique()} block(s), fewer than n_folds={options.n_folds}; "
-            "use more clusters or a smaller grid cell."
-        )
-
-    unplaced = population.ids.difference(blocks.index)
+    unplaced = population.ids.difference(placed.index)
     plans = []
-    folds = GroupKFold(n_splits=options.n_folds).split(np.zeros((len(blocks), 1)), groups=blocks.to_numpy())
-    for fold, (rest_positions, test_positions) in enumerate(folds):
-        test_ids = blocks.index[test_positions]
-        rest = blocks.index[rest_positions]
-        val_ids = whole_blocks_for(
-            blocks.reindex(rest), round(options.val_size * len(population.ids)), seed=settings.seed + fold
-        )
-        assignments = _assignments(population.ids, test=test_ids, val=val_ids)
-        plan = _plan(assignments, SPATIAL_KFOLD, settings, clusters=blocks, population=population)
-        plans.append(BuiltPlan(plan_id=f"kfold_f{fold}", kind=SPATIAL_KFOLD, plan=plan, held_out=str(fold)))
+    for size in options.block_sizes_m():
+        if size is None:
+            strategy = KMeansClusterStrategy(n_clusters=options.n_clusters, random_state=settings.seed)
+            tag = f"k{options.n_clusters}"
+        else:
+            strategy = SpatialGridClusterStrategy(cell_size_m=int(size), random_state=settings.seed)
+            tag = block_size_tag(size)
+        clustered = strategy.cluster(frame)
+        blocks = pd.Series(clustered["cluster"].astype(int).to_numpy(), index=pd.Index(clustered["point_id"]))
+        if blocks.nunique() < options.n_folds:
+            raise PlanError(
+                f"spatial_kfold ({tag} blocks) made {blocks.nunique()} block(s), fewer than "
+                f"n_folds={options.n_folds}; use more clusters or a smaller grid cell."
+            )
+        folds = GroupKFold(n_splits=options.n_folds).split(np.zeros((len(blocks), 1)), groups=blocks.to_numpy())
+        for fold, (rest_positions, test_positions) in enumerate(folds):
+            test_ids = blocks.index[test_positions]
+            rest = blocks.index[rest_positions]
+            val_ids = whole_blocks_for(
+                blocks.reindex(rest), round(options.val_size * len(population.ids)), seed=settings.seed + fold
+            )
+            assignments = _assignments(population.ids, test=test_ids, val=val_ids)
+            plan = _plan(assignments, SPATIAL_KFOLD, settings, clusters=blocks, population=population)
+            plans.append(
+                BuiltPlan(
+                    plan_id=f"kfold_{tag}_f{fold}",
+                    kind=SPATIAL_KFOLD,
+                    plan=plan,
+                    held_out=str(fold),
+                    block_size_m=size,
+                )
+            )
     if len(unplaced):
         logging.getLogger(__name__).info(
             f"{len(unplaced)} point(s) have no coordinates and are in training in every fold."
         )
     return plans
+
+
+def block_size_tag(size_m: float) -> str:
+    """A block size as it appears in a plan id: kilometres, without trailing zeros.
+
+    Examples
+    --------
+    >>> block_size_tag(10_000), block_size_tag(2_500)
+    ('10km', '2.5km')
+    """
+    return f"{size_m / 1000:g}km"
 
 
 def whole_blocks_for(blocks: pd.Series, n_points: int, *, seed: int) -> pd.Index:
@@ -359,7 +442,7 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
     """
     _require_regions(population, LOGO)
     plans = []
-    for region in population.eligible:
+    for region in population.held_out:
         test_ids = population.region_points(region)
         val_ids = _validation_points(population, region, settings)
         assignments = _assignments(population.ids, test=test_ids, val=val_ids)
@@ -371,9 +454,17 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
                 plan=plan,
                 held_out=population.region_names[region],
                 held_out_cluster=region,
+                **_region_record(settings),
             )
         )
     return plans
+
+
+def _region_record(settings: A1Settings) -> dict:
+    """What every region plan records about how its regions were chosen."""
+    logo = settings.plans.logo
+    listed = ";".join(logo.held_out) if logo.held_out is not None else ALL_ELIGIBLE
+    return {"min_points": logo.min_points, "held_out_list": listed}
 
 
 def validation_region(population: PlanPopulation, held_out: int, seed: int) -> Optional[int]:
@@ -411,7 +502,7 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
     _require_regions(population, MIXED)
     options = settings.plans.mixed
     plans = []
-    for region in population.eligible:
+    for region in population.held_out:
         region_ids = population.region_points(region)
         val_ids = _validation_points(population, region, settings)
         tag = _region_tag(population, region)
@@ -428,6 +519,7 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
                     repeat=repeat,
                     held_out_cluster=region,
                     moved=frozenset(moved),
+                    **_region_record(settings),
                 )
 
                 assignments = _assignments(population.ids, test=test_ids, val=val_ids)
@@ -561,13 +653,19 @@ class PlanSet:
     skipped : dict of str to str
         Each kind that could not be made, and why.
     too_small : dict of str to int
-        The regions never held out, with their point counts.
+        The regions with fewer than ``plans.logo.min_points`` points, with their counts.
+    held_out : list of str
+        The regions the ``logo`` and ``mixed`` plans hold out.
+    in_training : list of str
+        The other regions: always in training.
     """
 
     out_dir: Path
     index: pd.DataFrame
     skipped: dict = field(default_factory=dict)
     too_small: dict = field(default_factory=dict)
+    held_out: list = field(default_factory=list)
+    in_training: list = field(default_factory=list)
 
 
 def build_plans(
@@ -602,8 +700,8 @@ def build_plans(
         if kind in (LOGO, MIXED) and population.region_ids is None:
             skipped[kind] = "regions.source is not set in the A1 settings."
             continue
-        if kind in (LOGO, MIXED) and not population.eligible:
-            skipped[kind] = f"no region holds min_cell_size={settings.min_cell_size} points."
+        if kind in (LOGO, MIXED) and not population.held_out:
+            skipped[kind] = f"no region holds plans.logo.min_points={settings.plans.logo.min_points} points."
             continue
         if kind == SPATIAL_KFOLD and population.coordinates.dropna().empty:
             skipped[kind] = "no point has coordinates."
@@ -671,7 +769,15 @@ def write_plans(
     for kind, reason in skipped.items():
         logger.warning(f"No {kind} plans: {reason}")
     logger.info(f"Wrote {len(plans)} plan(s) to {out}: {index['kind'].value_counts().to_dict()}")
-    return PlanSet(out_dir=out, index=index, skipped=skipped, too_small=dict(population.too_small))
+    names = population.region_names
+    return PlanSet(
+        out_dir=out,
+        index=index,
+        skipped=skipped,
+        too_small=dict(population.too_small),
+        held_out=[names[region] for region in population.held_out],
+        in_training=sorted(names[region] for region in names if region not in population.held_out),
+    )
 
 
 # --- helpers ------------------------------------------------------------------------------

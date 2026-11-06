@@ -228,7 +228,13 @@ class KFoldPlanSettings:
     n_clusters : int
         With ``kmeans``, how many blocks.
     cell_size_m : float
-        With ``grid``, the side of a square, in metres.
+        With ``grid``, the side of a square, in metres: the primary block size, the one the paper's
+        spatial scores use.
+    cell_sizes_m : tuple of float, optional
+        With ``grid``, more block sizes to write a whole set of folds for, as a check of how much
+        the spatial scores depend on the block size. Plans are written for ``cell_size_m`` and every
+        size listed (each once); each size's plans are named after it, ``kfold_10km_f0``. Refused
+        with ``kmeans``, whose blocks have no size.
     n_folds : int
         How many folds the blocks are packed into; one plan per fold.
     val_size : float, default 0
@@ -240,8 +246,23 @@ class KFoldPlanSettings:
     method: str = "kmeans"
     n_clusters: int = 50
     cell_size_m: float = 10_000.0
+    cell_sizes_m: Optional[tuple[float, ...]] = None
     n_folds: int = 5
     val_size: float = 0.0
+
+    def block_sizes_m(self) -> tuple:
+        """The block sizes to write folds for, smallest first: ``(None,)`` for k-means blocks.
+
+        Examples
+        --------
+        >>> KFoldPlanSettings(method="grid", cell_size_m=10_000, cell_sizes_m=(25_000, 10_000)).block_sizes_m()
+        (10000.0, 25000.0)
+        >>> KFoldPlanSettings(method="kmeans").block_sizes_m()
+        (None,)
+        """
+        if self.method != "grid":
+            return (None,)
+        return tuple(sorted({float(self.cell_size_m), *(float(size) for size in self.cell_sizes_m or ())}))
 
 
 @dataclass(frozen=True)
@@ -250,6 +271,14 @@ class LogoPlanSettings:
 
     Attributes
     ----------
+    min_points : int, default 100
+        The fewest points a region needs to be held out. Separate from ``min_cell_size``, which
+        decides the smallest carbonate class that gets a model of its own (and the smallest region
+        a local model is fitted in): a held-out region's score should rest on more points than that.
+    held_out : tuple of str, optional
+        The regions to hold out, by name. Without it, every region with at least ``min_points``
+        points is held out in turn. Each name must be a region of the data with at least
+        ``min_points`` points; regions not listed always stay in training.
     validation_region : bool, default False
         Set a second whole region aside as validation (the one
         :func:`~yg_eo_soilnet.a1.plans.validation_region` picks). Off, every region but the
@@ -258,6 +287,8 @@ class LogoPlanSettings:
         plans too, which hold out the same region.
     """
 
+    min_points: int = 100
+    held_out: Optional[tuple[str, ...]] = None
     validation_region: bool = False
 
 
@@ -674,7 +705,7 @@ def _plan_settings(values: Mapping) -> PlanSettings:
     _refuse_unknown(values, set(PlanSettings.__dataclass_fields__), "plans")
     return PlanSettings(
         random=_section(values, "random", RandomPlanSettings, _typed(RandomPlanSettings), prefix="plans."),
-        spatial_kfold=_section(values, "spatial_kfold", KFoldPlanSettings, _typed(KFoldPlanSettings), prefix="plans."),
+        spatial_kfold=_section(values, "spatial_kfold", KFoldPlanSettings, _kfold_kwargs, prefix="plans."),
         logo=_section(values, "logo", LogoPlanSettings, _logo_kwargs, prefix="plans."),
         mixed=_section(values, "mixed", MixedPlanSettings, _mixed_kwargs, prefix="plans."),
     )
@@ -691,9 +722,24 @@ def _typed(cls):
     return read
 
 
+def _kfold_kwargs(values: Mapping) -> dict:
+    """The spatial k-fold section's settings, converted to their types; ``cell_sizes_m`` is a list."""
+    plain = {key: value for key, value in values.items() if key != "cell_sizes_m"}
+    kwargs = _typed(KFoldPlanSettings)(plain) if plain else {}
+    if values.get("cell_sizes_m") is not None:
+        kwargs["cell_sizes_m"] = tuple(
+            float(size) for size in _strings(values["cell_sizes_m"], "plans.spatial_kfold.cell_sizes_m")
+        )
+    return kwargs
+
+
 def _logo_kwargs(values: Mapping) -> dict:
     """The region-plan section's settings: ``validation_region`` must be a real true or false."""
     kwargs = {}
+    if values.get("min_points") is not None:
+        kwargs["min_points"] = int(values["min_points"])
+    if values.get("held_out") is not None:
+        kwargs["held_out"] = _strings(values["held_out"], "plans.logo.held_out")
     if values.get("validation_region") is not None:
         value = values["validation_region"]
         if not isinstance(value, bool):
@@ -811,11 +857,30 @@ def _validate_plans(plans: PlanSettings) -> None:
         )
     if kfold.method == "grid" and not kfold.cell_size_m > 0:
         raise ValueError(f"plans.spatial_kfold.cell_size_m must be greater than 0; got {kfold.cell_size_m}")
+    if kfold.cell_sizes_m is not None:
+        if kfold.method != "grid":
+            raise ValueError(
+                "plans.spatial_kfold.cell_sizes_m needs method: grid - k-means blocks have no size to vary."
+            )
+        if not kfold.cell_sizes_m or any(not size >= 100 for size in kfold.cell_sizes_m):
+            raise ValueError(
+                f"plans.spatial_kfold.cell_sizes_m must list block sides of at least 100 m; got {list(kfold.cell_sizes_m)}"
+            )
     if not 0.0 <= kfold.val_size < 1.0 - 1.0 / kfold.n_folds:
         raise ValueError(
             f"plans.spatial_kfold.val_size must be at least 0 and leave a training set beside one test fold; "
             f"got {kfold.val_size}"
         )
+
+    logo = plans.logo
+    if logo.min_points < 1:
+        raise ValueError(f"plans.logo.min_points must be at least 1; got {logo.min_points}")
+    if logo.held_out is not None:
+        if not logo.held_out:
+            raise ValueError("plans.logo.held_out is empty; leave it out to hold out every large enough region.")
+        repeated = sorted({name for name in logo.held_out if logo.held_out.count(name) > 1})
+        if repeated:
+            raise ValueError(f"plans.logo.held_out names {repeated} more than once.")
 
     mixed = plans.mixed
     if not mixed.fractions or any(not 0.0 < p < 1.0 for p in mixed.fractions):

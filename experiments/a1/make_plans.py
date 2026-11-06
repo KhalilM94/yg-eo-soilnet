@@ -63,6 +63,9 @@ def main(argv: list[str] | None = None) -> PlanSet:
         print(f"  {kind}: {count}")
     for kind, reason in result.skipped.items():
         print(f"  skipped {kind}: {reason}")
+    if result.held_out:
+        print(f"  regions held out: {', '.join(result.held_out)}")
+        print(f"  regions always in training: {', '.join(result.in_training) or 'none'}")
     if result.too_small:
         listed = ", ".join(f"{name} ({n})" for name, n in sorted(result.too_small.items(), key=lambda item: item[1]))
         print(f"  never held out (too few points): {listed}")

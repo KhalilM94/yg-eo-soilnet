@@ -767,11 +767,19 @@ def draw_stage1(points: pd.DataFrame, names: dict, *, labels):
 # --- 4. scores per carbonate class --------------------------------------------------------------
 
 
-def class_scores(predictions: pd.DataFrame, *, n: int = 1000, seed: int = 42, block_km: float = 10.0) -> pd.DataFrame:
+def class_scores(
+    predictions: pd.DataFrame,
+    *,
+    n: int = 1000,
+    seed: int = 42,
+    block_km: float = 10.0,
+    block_size_m: Optional[float] = None,
+) -> pd.DataFrame:
     """RPIQ and bias per kind, model and measured carbonate class, with block-bootstrap intervals.
 
     The test points of the ``random`` and ``spatial_kfold`` plans, the four stage-2 models on every
-    covariate (``combined``).
+    covariate (``combined``). With ``block_size_m``, only the ``spatial_kfold`` plans of that block
+    size are kept: plans of several sizes each test every point once, and must not be pooled.
 
     Returns
     -------
@@ -785,6 +793,8 @@ def class_scores(predictions: pd.DataFrame, *, n: int = 1000, seed: int = 42, bl
         & (predictions["covariate_group"] == COMBINED_GROUP)
         & predictions["model"].isin(MODELS)
     ].dropna(subset=["carbonate_class_measured"])
+    if block_size_m is not None:
+        rows = rows[(rows["kind"] != SPATIAL_KFOLD) | (rows["block_size_m"] == float(block_size_m))]
     if rows.empty:
         return pd.DataFrame()
     result = evaluation.block_bootstrap(
@@ -795,8 +805,11 @@ def class_scores(predictions: pd.DataFrame, *, n: int = 1000, seed: int = 42, bl
 
 def figure_class_scores(inputs: FigureInputs, *, n: int = 1000):
     """Figure 4: RPIQ and bias per carbonate class for the four models, random and spatial CV."""
+    kfold = inputs.settings.plans.spatial_kfold
+    primary = kfold.cell_size_m if kfold.method == "grid" else None
     return draw_class_scores(
-        class_scores(inputs.predictions, n=n, seed=inputs.settings.seed), labels=inputs.class_labels
+        class_scores(inputs.predictions, n=n, seed=inputs.settings.seed, block_size_m=primary),
+        labels=inputs.class_labels,
     )
 
 
