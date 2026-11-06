@@ -21,6 +21,11 @@ Every row of a predictions file carries what the evaluation needs without the da
 (:mod:`yg_eo_soilnet.a1.evaluation`): the plan's held-out region, share and repeat, and the point's
 position, from which the spatial blocks of the bootstrap are drawn.
 
+Each ``logo`` plan also gets ``dissimilarity/<plan_id>.parquet``: how far each point lies from the
+plan's training points, in the inputs of ``global_aux`` weighted by its feature importances
+(:mod:`yg_eo_soilnet.a1.dissimilarity`), and the run ends with ``dissimilarity_summary.csv``, one
+row per held-out region.
+
 Each plan that computed something gets an MLflow sub-run with its scores; the run's parent records
 the git commit and the settings, and at the end a ``metrics.csv`` of every plan, model, group and
 split - recomputed from all the prediction files, resumed ones included.
@@ -43,6 +48,7 @@ import pandas as pd
 
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
+from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
 from yg_eo_soilnet.a1.features import build_table
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.stage2 import (
@@ -85,6 +91,8 @@ PREDICTION_COLUMNS = (
 PREDICTION_FORMAT = 2
 MANIFEST_FILE = "manifest.json"
 METRICS_FILE = "metrics.csv"
+DISSIMILARITY_DIR = "dissimilarity"
+DISSIMILARITY_SUMMARY_FILE = "dissimilarity_summary.csv"
 
 
 class RunMismatch(RuntimeError):
@@ -104,6 +112,9 @@ class RunResult:
         The output files that already existed.
     metrics : pandas.DataFrame
         Every plan x model x group x split, from every prediction file in the folder.
+    dissimilarity : pandas.DataFrame
+        One row per ``logo`` plan: how far its held-out region lies from its training points
+        (:func:`~yg_eo_soilnet.a1.dissimilarity.region_summary`); empty without ``logo`` plans.
     notes : list of str
         Things not done and why - a ``local`` score skipped for a small region, say.
     """
@@ -112,6 +123,7 @@ class RunResult:
     computed: list = field(default_factory=list)
     skipped: list = field(default_factory=list)
     metrics: pd.DataFrame = field(default_factory=pd.DataFrame)
+    dissimilarity: pd.DataFrame = field(default_factory=pd.DataFrame)
     notes: list = field(default_factory=list)
 
 
@@ -195,11 +207,16 @@ def run_plans(
         _write_json(run_dir / MANIFEST_FILE, manifest)
         result.metrics = collect_metrics(run_dir)
         _atomic_write_csv(result.metrics, run_dir / METRICS_FILE)
+        result.dissimilarity = collect_dissimilarity(run_dir, settings)
+        if not result.dissimilarity.empty:
+            _atomic_write_csv(result.dissimilarity, run_dir / DISSIMILARITY_SUMMARY_FILE)
         if tracking:
             import mlflow
 
             mlflow.log_artifact(str(run_dir / METRICS_FILE))
             mlflow.log_artifact(str(run_dir / MANIFEST_FILE))
+            if not result.dissimilarity.empty:
+                mlflow.log_artifact(str(run_dir / DISSIMILARITY_SUMMARY_FILE))
     finally:
         if parent is not None:
             import mlflow
@@ -227,7 +244,11 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
             jobs += [(LOCAL, name) for name in [*resolved.groups, COMBINED_GROUP]]
     todo = [(model, group) for model, group in jobs if not (out / _output_name(model, group)).exists()]
     result.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
-    if not todo:
+    dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
+    needs_dissimilarity = row.kind == LOGO and not dissimilarity_path.exists()
+    if row.kind == LOGO and not needs_dissimilarity:
+        result.skipped.append(str(dissimilarity_path))
+    if not todo and not needs_dissimilarity:
         return False
 
     auxiliary = _stage1(row, plan, table, settings, config, run_dir, logger)
@@ -257,7 +278,55 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
         path = out / _output_name(model, group)
         _atomic_write_parquet(frame, path)
         result.computed.append(str(path))
+
+    if needs_dissimilarity:
+        frame = _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger)
+        _atomic_write_parquet(frame, dissimilarity_path)
+        result.computed.append(str(dissimilarity_path))
     return True
+
+
+def _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger) -> pd.DataFrame:
+    """How far each point of a ``logo`` plan lies from its training points, in ``global_aux``'s inputs.
+
+    The inputs are weighted by ``global_aux``'s feature importances; that model is fitted here if
+    its predictions were already on disk.
+    """
+    settings = context.settings
+    outcome = run_model(
+        context, GLOBAL_AUX, global_columns=global_columns, auxiliary_columns=auxiliary_columns, logger=logger
+    )
+    columns = list(global_columns) + [column for column in auxiliary_columns if column not in global_columns]
+    weights = importance_weights(outcome.fitted, columns) if outcome.fitted is not None else None
+    if weights is None:
+        result.notes.append(
+            f"{row.plan_id}: {GLOBAL_AUX} has no feature importances; the DI weighs every input the same"
+        )
+
+    carbonate = settings.carbonate.column
+    lab = {"som": settings.target, "caco3": carbonate}
+    cec = [target for target in settings.auxiliary.targets if target != carbonate]
+    if cec:
+        lab["cec"] = cec[0]
+    labels = pd.DataFrame({name: table.frame[column] for name, column in lab.items() if column in table.frame})
+
+    frame = plan_dissimilarity(
+        context.X[columns],
+        context.split,
+        train_ids=context.train_ids,
+        weights=weights,
+        folds=context.folds,
+        categorical=context.categorical,
+        labels=labels,
+        carbonate_class=context.class_measured,
+    )
+    left_out = json.loads(frame["left_out"].iloc[0])["categorical"]
+    note = f"The dissimilarity index leaves out the categorical input(s) {left_out}"
+    if left_out and note not in result.notes:
+        result.notes.append(note)
+    frame.insert(0, "held_out", None if pd.isna(row.held_out) else str(row.held_out))
+    frame.insert(0, "plan_id", row.plan_id)
+    return frame
 
 
 def _stage1(row, plan, table, settings, config, run_dir, logger) -> AuxiliaryPredictions:
@@ -353,6 +422,15 @@ def collect_metrics(run_dir: Path) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
+
+
+def collect_dissimilarity(run_dir: Path, settings) -> pd.DataFrame:
+    """One row per ``logo`` plan of the run: :func:`~yg_eo_soilnet.a1.dissimilarity.region_summary`."""
+    paths = sorted((Path(run_dir) / DISSIMILARITY_DIR).glob("*.parquet"))
+    if not paths:
+        return pd.DataFrame()
+    frame = pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
+    return region_summary(frame, labels=list(settings.carbonate.labels))
 
 
 # --- the run folder ------------------------------------------------------------------------------
@@ -492,5 +570,11 @@ def _log_plan(row, run_dir: Path) -> None:
             for (split,), part in frame.groupby(["split"]):
                 scores = regression_metrics(part["observed"], part["predicted"], split=split)
                 metrics.update({f"{name}__{model}__{group}": value for name, value in scores.items()})
+        dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
+        if dissimilarity_path.exists():
+            summary = region_summary(pd.read_parquet(dissimilarity_path)).iloc[0]
+            for name in ("median_di", "share_outside", "carbonate_tvd"):
+                if name in summary and pd.notna(summary[name]):
+                    metrics[name] = float(summary[name])
         if metrics:
             mlflow.log_metrics(metrics)

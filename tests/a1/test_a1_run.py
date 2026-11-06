@@ -422,7 +422,8 @@ def test_the_full_demo_run_from_the_command_line(a1_settings_in, tmp_path, mlflo
     print(f"full demo run: {elapsed:.0f} s; pooled test RMSE {rmse.round(2).to_dict()}")
     assert elapsed < 600
     assert rmse[PER_CLASS_MEASURED] < rmse[GLOBAL]
-    assert len(result.computed) == 5 * len(MODELS)
+    # Every model of the 5 plans, and a dissimilarity table for each of the 4 logo plans.
+    assert len(result.computed) == 5 * len(MODELS) + 4
 
 
 def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
@@ -502,3 +503,49 @@ def test_the_evaluation_reads_a_real_run_end_to_end(demo_run):
     logo_plans = frame.loc[frame["kind"] == LOGO, "plan_id"].nunique()
     assert len(transfer) == logo_plans * (1 + len(demo_run["a1"].groups.names))
     assert transfer["has_local"].all() and transfer["rmse_drop"].notna().all()
+
+
+# --- how far each held-out region lies from its training data ------------------------------------
+
+
+def test_each_logo_plan_gets_a_dissimilarity_table_and_the_run_a_summary(demo_run):
+    from yg_eo_soilnet.a1.runner import DISSIMILARITY_DIR, DISSIMILARITY_SUMMARY_FILE
+
+    run_dir = demo_run["result"].run_dir
+    written = sorted(path.stem for path in (run_dir / DISSIMILARITY_DIR).glob("*.parquet"))
+    logo = sorted({path.parent.name for path in (run_dir / "predictions").glob("logo_*/*.parquet")})
+    assert written == logo and "random" not in written
+
+    frame = pd.read_parquet(run_dir / DISSIMILARITY_DIR / f"{logo[0]}.parquet")
+    plan = _plan(demo_run, logo[0])
+    assert set(frame.loc[frame["split"] == TEST, "point_id"]) == set(plan.point_ids_for(TEST))
+    assert {"di", "inside", "mess", "mess_variable", "carbonate_class", "som", "cec", "caco3"} <= set(frame.columns)
+
+    summary = pd.read_csv(run_dir / DISSIMILARITY_SUMMARY_FILE)
+    assert sorted(summary["plan_id"]) == logo
+    assert summary["median_di"].notna().all() and summary["share_outside"].between(0, 1).all()
+    assert summary["carbonate_tvd"].between(0, 1).all()
+    assert "spearman_som_cec_diff" in summary and "spearman_som_caco3_diff" in summary
+
+
+def test_the_categorical_inputs_left_out_of_the_dissimilarity_are_said(demo_run, context_parts):
+    from yg_eo_soilnet.a1.runner import DISSIMILARITY_DIR
+
+    table = context_parts[0]
+    run_dir = demo_run["result"].run_dir
+    path = sorted((run_dir / DISSIMILARITY_DIR).glob("*.parquet"))[0]
+    left_out = json.loads(pd.read_parquet(path)["left_out"].iloc[0])["categorical"]
+    assert set(left_out) == set(table.categorical_columns) & set(demo_run["a1"].resolve_groups(table).combined)
+    if left_out:
+        assert any("leaves out the categorical" in note for note in demo_run["result"].notes)
+
+
+def test_a_missing_dissimilarity_table_is_recomputed_alone(demo_run):
+    from yg_eo_soilnet.a1.runner import DISSIMILARITY_DIR
+
+    run_dir = demo_run["result"].run_dir
+    target = sorted((run_dir / DISSIMILARITY_DIR).glob("*.parquet"))[0]
+    target.unlink()
+    again = run_plans(demo_run["a1"], groups=True, tracking=False)
+    assert again.computed == [str(target)]
+    assert not again.dissimilarity.empty

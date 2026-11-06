@@ -120,12 +120,17 @@ class ModelResult:
         The settings chosen; per class for the per-class models.
     role : str
         ``model``, or ``diagnostic_upper_bound`` for a model reading what a new point lacks.
+    fitted : sklearn.pipeline.Pipeline or None
+        The fitted pipeline, for a model fitted once on every training point (``global``,
+        ``global_aux``, a covariate group); None for the per-class and local models. The
+        dissimilarity index reads its feature importances.
     """
 
     predicted: pd.Series
     fallback: pd.Series
     tuned_params: dict
     role: str = ROLE_MODEL
+    fitted: object = field(default=None, compare=False, repr=False)
 
     @property
     def tuned_params_json(self) -> str:
@@ -315,7 +320,7 @@ def _single_model(context: Stage2Context, columns: list[str]) -> ModelResult:
     train, held = context.train_ids, context.held_out_ids
     fitted, params = fit_tuned(pipeline, grid, context.X.loc[train, columns], context.y.loc[train], context.folds)
     predicted = pd.Series(np.asarray(fitted.predict(context.X.loc[held, columns]), dtype=float), index=held)
-    return ModelResult(predicted=predicted, fallback=pd.Series(False, index=held), tuned_params=params)
+    return ModelResult(predicted=predicted, fallback=pd.Series(False, index=held), tuned_params=params, fitted=fitted)
 
 
 def _per_class(

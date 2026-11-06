@@ -14,8 +14,10 @@ the training points and scored on the validation and test points:
 
 ``--groups`` also fits ``global_aux`` on each covariate group alone, and for leave-one-region-out
 plans a ``local`` model inside the held-out region. Per-point predictions go to
-``<output_dir>/runs/<run name>/predictions/``, scores to ``metrics.csv`` there and to MLflow. A run
-resumes: what is already written is skipped. See :mod:`yg_eo_soilnet.a1.runner`.
+``<output_dir>/runs/<run name>/predictions/``, scores to ``metrics.csv`` there and to MLflow. For
+leave-one-region-out plans, how far each held-out region lies from its training data (dissimilarity
+index, area of applicability, MESS, carbonate mix, SOM correlations) goes to ``dissimilarity/`` and
+``dissimilarity_summary.csv``. A run resumes: what is already written is skipped. See :mod:`yg_eo_soilnet.a1.runner`.
 
 Run from the repository root::
 
@@ -87,6 +89,10 @@ def main(argv: list[str] | None = None) -> RunResult:
         summary = test.groupby(["model", "covariate_group"])["rmse"].mean().round(3)
         print("Mean test RMSE over plans:")
         print(summary.to_string())
+    if not result.dissimilarity.empty:
+        columns = [c for c in ("held_out", "median_di", "share_outside", "carbonate_tvd") if c in result.dissimilarity]
+        print(f"Held-out regions against their training data (dissimilarity_summary.csv in {result.run_dir}/):")
+        print(result.dissimilarity[columns].round(3).to_string(index=False))
     return result
 
 
