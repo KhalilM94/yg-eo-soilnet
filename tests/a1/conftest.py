@@ -89,3 +89,9 @@ def a1_settings(a1_demo_dir, tmp_path):
 def a1_demo_settings(a1_demo_dir, tmp_path_factory):
     """The shipped demo settings over the demo dataset, built once, for module-scoped fixtures."""
     return _settings_builder(a1_demo_dir, tmp_path_factory.mktemp("a1_demo_settings"))()
+
+
+@pytest.fixture(scope="session")
+def a1_settings_in(a1_demo_dir):
+    """:func:`a1_settings` for module-scoped fixtures: ``a1_settings_in(folder)`` gives the builder."""
+    return lambda folder: _settings_builder(a1_demo_dir, Path(folder))

@@ -29,7 +29,8 @@ from sklearn.model_selection import GroupKFold, KFold, cross_val_predict
 
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.features import A1Table
-from yg_eo_soilnet.a1.settings import A1Settings, StageSettings
+from yg_eo_soilnet.a1.pipelines import build_stage_pipeline
+from yg_eo_soilnet.a1.settings import A1Settings
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, VAL, SplitPlan
 
 #: Plan kinds whose folds keep the plan's clusters (blocks, regions) whole.
@@ -92,17 +93,12 @@ def build_stage1_pipeline(
     categorical_columns=(),
     *,
     target: Optional[str] = None,
-    stage: Optional[StageSettings] = None,
 ):
     """The stage-1 estimator, wrapped in the repository's input preparation.
 
-    The estimator is the model-list entry ``stage1.estimator`` names, with ``stage1.import_path``
-    and ``stage1.init_args`` laid over it when set, built by
-    :class:`~yg_eo_soilnet.models.config_fatories.model_config_factory.ModelConfigFactory` - the same
-    way ``main.py`` builds it. It is wrapped by
-    :class:`~yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils.PipelineBuilder`: gaps filled with
-    the median and flagged, numbers scaled for non-tree models, categories encoded, and the target
-    log-transformed when it is listed in ``COLUMNS_TO_TRANSFORM``.
+    Built by :func:`~yg_eo_soilnet.a1.pipelines.build_stage_pipeline` from ``stage1``: the
+    model-list entry it names, with ``import_path``, ``init_args`` and ``params`` laid over it.
+    Stage 1 is not tuned, so every setting must have a single value, which is applied.
 
     Parameters
     ----------
@@ -115,8 +111,6 @@ def build_stage1_pipeline(
         The inputs that are classes.
     target : str, optional
         The property predicted, for the log transform.
-    stage : StageSettings, optional
-        Which stage to build; stage 1 unless given.
 
     Returns
     -------
@@ -125,54 +119,17 @@ def build_stage1_pipeline(
     Raises
     ------
     ValueError
-        If the entry is not in the model list, or its ``params`` grid holds more than one value for
-        a setting - choosing among them would need a search of its own.
+        If the entry is not in the model list, or its grid holds more than one value for a setting.
     """
-    from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import PipelineBuilder
-    from yg_eo_soilnet.models import ModelConfigFactory
-
-    stage = stage or settings.stage1
-    registry = getattr(config, "MODEL_REGISTRY", {}) or {}
-    if stage.estimator not in registry:
-        raise ValueError(
-            f"{stage.estimator!r} is not an entry of the scikit-learn model list; it has {sorted(registry)}"
-        )
-    spec = dict(registry[stage.estimator])
-    spec["enabled"] = True
-    if stage.import_path:
-        spec["import_path"] = stage.import_path
-    spec["init_args"] = {**(spec.get("init_args") or {}), **dict(stage.init_args)}
-
-    params = dict(spec.get("params") or {})
-    several = {name: values for name, values in params.items() if isinstance(values, list) and len(values) > 1}
+    pipeline, grid = build_stage_pipeline(
+        settings, config, feature_columns, categorical_columns, stage=settings.stage1, target=target
+    )
+    several = sorted(name for name, values in grid.items() if len(values) > 1)
     if several:
         raise ValueError(
-            f"The {stage.estimator} entry lists several values for {sorted(several)}. Stage 1 fits one model "
+            f"The {settings.stage1.estimator} entry lists several values for {several}. Stage 1 fits one model "
             "per fold and does not search among settings; keep one value for each."
         )
-
-    built = ModelConfigFactory(registry={stage.estimator: spec}).build_model_configs(
-        num_features=len(feature_columns), default_seed=settings.seed
-    )
-    if stage.estimator not in built:
-        raise ValueError(f"Could not build {stage.estimator} from {spec.get('import_path')!r}; see the warning above.")
-    model = built[stage.estimator]["model"]
-
-    categorical = [column for column in categorical_columns if column in feature_columns]
-    numeric = [column for column in feature_columns if column not in categorical]
-    is_log_target = target is not None and target in (getattr(config, "COLUMNS_TO_TRANSFORM", []) or [])
-    builder = PipelineBuilder(
-        seed=settings.seed,
-        tree_categorical_encoding=getattr(config, "TREE_CATEGORICAL_ENCODING", "ordinal"),
-        tree_onehot_max_categories=getattr(config, "TREE_ONEHOT_MAX_CATEGORIES", None),
-    )
-    pipeline = builder.build(model, is_log_target, categorical_cols=categorical, numeric_cols=numeric)
-
-    chosen = {name: (values[0] if isinstance(values, list) else values) for name, values in params.items()}
-    if chosen:
-        if is_log_target:
-            chosen = {name.replace("model__", "model__regressor__"): value for name, value in chosen.items()}
-        pipeline.set_params(**chosen)
     return pipeline
 
 

@@ -29,6 +29,12 @@ stage1:
   estimator: TabICL
 stage2:
   estimator: XGBoost
+  # Tuned by inner cross-validation on the training points of each plan (grouped by the plan's
+  # blocks or regions when it has them): 4 combinations.
+  params:
+    model__max_depth: [3, 6]
+    model__n_estimators: [100, 300]
+    model__learning_rate: [0.05]
 inner_cv_folds: 5
 seeds: [42]
 

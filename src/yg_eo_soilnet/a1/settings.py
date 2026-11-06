@@ -106,11 +106,16 @@ class StageSettings:
         Replaces the entry's ``import_path`` (the estimator class), when set.
     init_args : dict
         Laid over the entry's ``init_args``: a key here replaces the entry's, the others are kept.
+    params : dict or None
+        Replaces the entry's ``params`` grid when set: each setting (``model__max_depth``) with the
+        list of values to try. Stage 2 is tuned over it by inner cross-validation; stage 1 is not
+        tuned and takes one value per setting.
     """
 
     estimator: str
     import_path: Optional[str] = None
     init_args: Mapping[str, Any] = field(default_factory=dict)
+    params: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -515,6 +520,14 @@ def _stage_kwargs(name: str):
         if not isinstance(init_args, Mapping):
             raise ValueError(f"{name}.init_args must be a mapping of argument to value; got {init_args!r}")
         kwargs["init_args"] = dict(init_args)
+        if values.get("params") is not None:
+            params = values["params"]
+            if not isinstance(params, Mapping):
+                raise ValueError(f"{name}.params must map each setting to a list of values; got {params!r}")
+            kwargs["params"] = {
+                str(key): (list(value) if isinstance(value, (list, tuple)) else [value])
+                for key, value in params.items()
+            }
         return kwargs
 
     return read
@@ -620,6 +633,13 @@ def _validate(settings: A1Settings) -> None:
     if settings.stage1.estimator not in STAGE1_ESTIMATORS:
         raise ValueError(
             f"stage1.estimator must be one of {list(STAGE1_ESTIMATORS)}; got {settings.stage1.estimator!r}"
+        )
+    stage1_grid = settings.stage1.params or {}
+    several = sorted(key for key, values in stage1_grid.items() if len(values) > 1)
+    if several:
+        raise ValueError(
+            f"stage1.params lists several values for {several}; stage 1 fits one model per fold and is "
+            "not tuned. Keep one value for each, or tune stage 2 instead."
         )
     if settings.inner_cv_folds < 2:
         raise ValueError(f"inner_cv_folds must be at least 2; got {settings.inner_cv_folds}")
