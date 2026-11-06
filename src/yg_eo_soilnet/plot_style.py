@@ -48,6 +48,24 @@ MODEL_COLORS = [
     "#482a12",
 ]
 
+# --- Paper A1 ---------------------------------------------------------------
+# The four FAO carbonate classes, light (< 2 % CaCO3) to dark (>= 25 %): the carbonate ramp, one
+# step per class, so "more carbonate" always reads as "darker" wherever a class is drawn.
+A1_CARBONATE_CLASSES = ("<2", "2-10", "10-25", ">=25")
+A1_CARBONATE_COLORS = dict(zip(A1_CARBONATE_CLASSES, CARBONATE_RAMP))
+
+# One fixed colour per A1 model, the same in every figure. The plain global model is the grey
+# baseline; the two that read the predicted carbonate share the project pair; the diagnostic upper
+# bound (per class by MEASURED carbonate) takes the darkest carbonate step; the within-region model
+# the SOM brown.
+A1_MODEL_COLORS = {
+    "global": MUTED,
+    "global_aux": PROJECT_COLORS["Al Moutmir"],
+    "per_class_measured": CARBONATE_RAMP[-1],
+    "per_class_predicted": PROJECT_COLORS["Fertimap"],
+    "local": SOM_RAMP[2],
+}
+
 # --- geometry ---------------------------------------------------------------
 # The notebook uses exactly two widths and no others: 6.5in spans a two-column page, 3.4in is one
 # column. Heights vary; widths do not.
