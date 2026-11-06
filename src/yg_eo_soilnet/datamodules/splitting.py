@@ -381,7 +381,9 @@ class UnifiedSplitter:
             The points to split. Ids must be unique.
         coordinates : pandas.DataFrame, optional
             Indexed by point id, holding the configured latitude and longitude columns. Needed for
-            ``spatial_group``; ignored otherwise.
+            ``spatial_group``; ignored otherwise. Any further column - the group column a
+            :class:`~yg_eo_soilnet.clustering_utils.ColumnGroupStrategy` reads - is handed to the
+            clustering strategy, but not kept in the plan.
         eligibility : mapping of str to iterable, optional
             Per model family, the ids that family can use. Recorded in the plan.
 
@@ -443,8 +445,10 @@ class UnifiedSplitter:
             strata=strata,
             strategy_applies_to=self.strategy_applies_to,
             # Reindexed onto the population: `coordinates` covers every point in the file, while
-            # the plan covers only the ones being split.
-            coordinates=None if coordinates is None else coordinates.reindex(ids),
+            # the plan covers only the ones being split. Only the position is kept: a group column
+            # handed in for the clustering is not a coordinate, and readers of the plan take its
+            # coordinate columns by position when they are not named lat/lon.
+            coordinates=None if coordinates is None else self._positions(coordinates).reindex(ids),
         )
         counts = plan.counts()
         self.logger.info(
@@ -561,8 +565,8 @@ class UnifiedSplitter:
         unclustered = len(ids.difference(cluster_series.index))
         if unclustered:
             self.logger.warning(
-                f"{unclustered} point(s) could not be spatially clustered (missing coordinates) "
-                f"and are assigned to the train split rather than held out."
+                f"{unclustered} point(s) could not be spatially clustered (missing coordinates, or no "
+                f"group) and are assigned to the train split rather than held out."
             )
         return cluster_series
 
@@ -604,7 +608,21 @@ class UnifiedSplitter:
         )
         frame["lat"] = frame[lat_col].to_numpy()
         frame["lon"] = frame[lon_col].to_numpy()
+        # Anything else that came with the coordinates is for the strategy - the group column of a
+        # ColumnGroupStrategy. Without it, a strategy reading an existing column could not see it.
+        for column in aligned.columns:
+            if column not in frame.columns:
+                frame[column] = aligned[column].to_numpy()
         return frame
+
+    def _positions(self, coordinates: pd.DataFrame) -> pd.DataFrame:
+        """Only the coordinate columns of ``coordinates``, leaving out any group column."""
+        lat_col = getattr(self.config, "LAT_COLUMN", "lat")
+        lon_col = getattr(self.config, "LON_COLUMN", "lon")
+        if {lat_col, lon_col}.issubset(coordinates.columns):
+            return coordinates[[lat_col, lon_col]]
+        # Not under the configured names: the first two columns, which is latitude then longitude.
+        return coordinates.iloc[:, :2]
 
     def _load_cluster_strategy(self):
         """Build the clustering strategy named by ``split.group.class_path``."""

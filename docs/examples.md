@@ -63,7 +63,9 @@ in the training set and every score comes out flattering. In `configs/main_confi
 
 Run it both ways and compare the leaderboards. The drop is the part of your score that was
 proximity rather than skill. `SpatialGridClusterStrategy` with `cell_size_m` lays a grid over the
-points instead of clustering them.
+points instead of clustering them, and `ColumnGroupStrategy` with `column` holds out whole groups
+your static file already names - regions or watersheds, say - so a test region is one the models
+never saw.
 
 ## 4. Add a scikit-learn model
 

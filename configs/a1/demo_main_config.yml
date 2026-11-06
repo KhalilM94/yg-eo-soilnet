@@ -32,6 +32,10 @@ common:
       class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
       params:
         n_clusters: 8
+      # To hold out whole demo regions instead, with strategy: spatial_group above:
+      #   class_path: yg_eo_soilnet.clustering_utils.ColumnGroupStrategy
+      #   params:
+      #     column: region
 
   data_quality:
     max_missing_column_ratio: 0.2

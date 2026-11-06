@@ -41,11 +41,13 @@ covariate_groups: covariate_groups.yml
 #                 polygons_path: <the file>
 #                 name_field: <the field holding each region's name>
 #   null      - no regions yet: the steps that need them say so and are skipped.
+# The regions of this paper are the hydraulic sub-basins (34 outlines, in the Merchich datum; each
+# point is matched after reprojecting them to latitude/longitude).
 regions:
-  source: null
+  source: polygons
   column: null
-  polygons_path: null
-  name_field: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/SousBassinsHydrauliques.shp
+  name_field: SousBassin
 
 # --- models -------------------------------------------------------------------------------------
 # Entries of the scikit-learn model list (configs/sklearn/model_registry.yml); they need not be

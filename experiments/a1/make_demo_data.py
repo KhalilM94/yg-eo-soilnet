@@ -20,6 +20,9 @@ monthly time series it reuses, with what A1 needs and the ordinary demo lacks:
 - **the split** those predictions leak through, saved as ``split_assignments.parquet`` in the same
   form as a run's ``data_splits/split_assignments.parquet``.
 
+The region is written to both ``static.csv`` and ``targets.csv``: A1 reads it from either, and a
+``split.group`` strategy that groups by it (``ColumnGroupStrategy``) needs it in the static file.
+
 Nothing in it is a real measurement. Five files are written to ``experiments/a1/demo_data/``:
 ``static.csv``, ``targets.csv``, ``timeseries.csv``, ``regions.geojson`` and
 ``split_assignments.parquet``. Run it from the repository root::
@@ -259,7 +262,9 @@ def main(argv: list[str] | None = None) -> Path:
 
     static, targets, timeseries, split = make_a1_data(args.n_points, args.seed)
     args.out.mkdir(parents=True, exist_ok=True)
-    static.to_csv(args.out / "static.csv", index=False)
+    # The region goes in the static file too: the split reads its groups from there (a column kept
+    # only in the targets file never reaches it), so a ColumnGroupStrategy split can see it.
+    static.assign(region=targets["region"].to_numpy()).to_csv(args.out / "static.csv", index=False)
     targets.to_csv(args.out / "targets.csv", index=False)
     timeseries.to_csv(args.out / "timeseries.csv", index=False)
     with open(args.out / "regions.geojson", "w") as handle:

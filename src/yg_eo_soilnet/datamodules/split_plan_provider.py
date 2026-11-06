@@ -19,6 +19,7 @@ import pandas as pd
 from yg_eo_soilnet.datamodules.splitting import (
     ASSIGN_ALL,
     INTERSECT,
+    SPATIAL_GROUP,
     SplitPlan,
     UnifiedSplitter,
 )
@@ -114,7 +115,9 @@ class SplitPlanProvider:
                 # being reused against. A new plan rather than a mutation: SplitPlan is frozen, so
                 # that a split cannot be quietly changed after the families have read it. The
                 # assignments are carried over untouched, so this is the same split.
-                plan = replace(plan, coordinates=coordinates.reindex(plan.assignments.index))
+                # Only the position: a group column the strategy reads is not a coordinate.
+                positions = coordinates.iloc[:, :2]
+                plan = replace(plan, coordinates=positions.reindex(plan.assignments.index))
             return plan
 
         return splitter.build_plan(population, coordinates=coordinates, strata=strata, eligibility=eligibility)
@@ -220,18 +223,49 @@ class SplitPlanProvider:
         )
 
     def _coordinates(self, tabular: pd.DataFrame, all_ids: pd.Index) -> Optional[pd.DataFrame]:
-        """The coordinates indexed by point id, or None when the data has none."""
+        """The coordinates indexed by point id, or None when the data has none.
+
+        With ``spatial_group``, also any column the clustering strategy reads besides the
+        coordinates (see
+        :meth:`BaseSpatialClusterStrategy.extra_columns
+        <yg_eo_soilnet.clustering_utils.BaseSpatialClusterStrategy.extra_columns>`) - the group
+        column of a :class:`~yg_eo_soilnet.clustering_utils.ColumnGroupStrategy`.
+
+        Raises
+        ------
+        ValueError
+            If the strategy reads a column the data does not have.
+        """
         lat_col = getattr(self.config, "LAT_COLUMN", "lat")
         lon_col = getattr(self.config, "LON_COLUMN", "lon")
         if lat_col not in tabular.columns or lon_col not in tabular.columns:
             return None
-        return pd.DataFrame(
-            {
-                lat_col: tabular[lat_col].to_numpy(),
-                lon_col: tabular[lon_col].to_numpy(),
-            },
-            index=all_ids,
-        )
+        columns = {
+            lat_col: tabular[lat_col].to_numpy(),
+            lon_col: tabular[lon_col].to_numpy(),
+        }
+        for column in self._strategy_columns():
+            if column not in tabular.columns:
+                raise ValueError(
+                    f"The split's clustering strategy groups points by {column!r}, which is not in the data. "
+                    "Set split.group.params.column to a column of the static file (one kept in the targets "
+                    "file is not read for the split)."
+                )
+            columns[column] = tabular[column].to_numpy()
+        return pd.DataFrame(columns, index=all_ids)
+
+    def _strategy_columns(self) -> tuple[str, ...]:
+        """The columns a spatial split's clustering strategy reads besides the coordinates."""
+        if str(getattr(self.config, "SPLIT_HOLDOUT_STRATEGY", "")).lower() != SPATIAL_GROUP:
+            return ()
+        spec = dict(getattr(self.config, "SPLIT_GROUP_STRATEGY", {}) or {})
+        if not spec.get("class_path"):
+            return ()
+        from yg_eo_soilnet.models import ModelConfigFactory  # local: avoids a circular import
+
+        strategy_class = ModelConfigFactory._dynamic_import(spec["class_path"])
+        extra = getattr(strategy_class, "extra_columns", None)
+        return tuple(extra(spec.get("params") or {})) if extra is not None else ()
 
     def _strata(self, tabular: pd.DataFrame, all_ids: pd.Index) -> Optional[pd.DataFrame]:
         """The band each point belongs to, or None when no column was named to stratify on.

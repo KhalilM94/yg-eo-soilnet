@@ -2,11 +2,14 @@
 
 Used by the :term:`spatial split`: points near each other are much alike, so holding out single
 points would leave near-copies of them in the training set and flatter every score. ``split.group``
-chooses the strategy.
+chooses the strategy: groups computed from the coordinates (:class:`KMeansClusterStrategy`,
+:class:`SpatialGridClusterStrategy`), or groups the data already names (:class:`ColumnGroupStrategy`).
 """
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Any, Mapping
+import logging
 import pandas as pd
 from sklearn.cluster import KMeans
 from yg_eo_soilnet.artifacts import ArtifactLayout
@@ -34,6 +37,26 @@ class BaseSpatialClusterStrategy(ABC):
 
     Name a subclass in ``split.group.class_path`` to use it.
     """
+
+    @classmethod
+    def extra_columns(cls, params: Mapping[str, Any]) -> tuple[str, ...]:
+        """The columns besides the coordinates that :meth:`cluster` needs to find in its table.
+
+        The split hands a strategy only each point's id and coordinates unless the strategy asks for
+        more here, before it is built - which is why this reads the ``split.group.params`` it will be
+        built with rather than the instance.
+
+        Parameters
+        ----------
+        params : mapping
+            ``split.group.params``.
+
+        Returns
+        -------
+        tuple of str
+            Empty by default: the coordinates are enough.
+        """
+        return ()
 
     @abstractmethod
     def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -200,3 +223,78 @@ class SpatialGridClusterStrategy(BaseSpatialClusterStrategy):
         df["cluster"] = grid_ids.astype(int)
         self.grid_gdf_ = grid_gdf  # save polygons for later plotting
         return df
+
+
+@dataclass
+class ColumnGroupStrategy(BaseSpatialClusterStrategy):
+    """Take the groups from a column the data already has - named regions, say - instead of computing them.
+
+    Each distinct value becomes one group, so a spatial split holds out whole regions. The names are
+    sorted and numbered from 1, so the same names always get the same numbers; the numbers are what
+    the split records, and :attr:`cluster_names_` turns them back into names. A point with no value
+    is in no group, and the split keeps it in training, as it does a point without coordinates.
+
+    Parameters
+    ----------
+    column : str, default "region"
+        The column holding each point's group (``split.group.params.column``). It may be in the static
+        file; the split reads it from there.
+    lat_col, lon_col : str
+        The coordinate columns, used only to draw the split map.
+    random_state : int, default 42
+        Accepted because every strategy is handed one; grouping by a column involves no chance.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> strategy = ColumnGroupStrategy()
+    >>> frame = pd.DataFrame({"point_id": ["a", "b", "c", "d"], "region": ["Souss", "Tensift", None, "Souss"]})
+    >>> strategy.cluster(frame)[["point_id", "cluster"]].to_dict(orient="list")
+    {'point_id': ['a', 'b', 'd'], 'cluster': [1, 2, 1]}
+    >>> strategy.cluster_names_
+    {1: 'Souss', 2: 'Tensift'}
+    """
+
+    column: str = "region"
+    lat_col: str = "lat"
+    lon_col: str = "lon"
+    random_state: int = 42
+    cluster_names_: dict = field(default_factory=dict, init=False, repr=False)
+    cluster_ids_: dict = field(default_factory=dict, init=False, repr=False)
+
+    @classmethod
+    def extra_columns(cls, params: Mapping[str, Any]) -> tuple[str, ...]:
+        """The group column, ``split.group.params.column`` (``region`` unless set)."""
+        return (str((params or {}).get("column", cls.column)),)
+
+    def cluster(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Number each point's group, leaving out the points that have none.
+
+        Raises
+        ------
+        KeyError
+            If the table has no such column.
+        ValueError
+            If no point has a value in it.
+        """
+        if self.column not in df.columns:
+            raise KeyError(
+                f"ColumnGroupStrategy groups by {self.column!r}, which is not in the table it was given "
+                f"(columns: {list(df.columns)}). Set split.group.params.column to the column holding each "
+                "point's group, and make sure the data has it."
+            )
+        grouped = df[df[self.column].notna()].copy()
+        if grouped.empty:
+            raise ValueError(f"No point has a value in {self.column!r}, so there are no groups to hold out.")
+
+        names = sorted(grouped[self.column].unique().tolist(), key=lambda name: (str(type(name)), name))
+        self.cluster_ids_ = {name: number for number, name in enumerate(names, start=1)}
+        self.cluster_names_ = {number: name for name, number in self.cluster_ids_.items()}
+        grouped["cluster"] = grouped[self.column].map(self.cluster_ids_).astype(int)
+
+        left_out = len(df) - len(grouped)
+        if left_out:
+            logging.getLogger(__name__).info(
+                f"{left_out} point(s) have no {self.column!r}; they are in no group and stay in training."
+            )
+        return grouped
