@@ -603,7 +603,7 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
         ["--config", str(demo_run["path"]), "--out", str(tmp_path), "--n-boot", "20", "--no-relief", "--no-mlflow"]
     )
     plt.close("all")
-    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(
+    assert sorted(path.name for path in tmp_path.iterdir() if path.suffix != ".log") == sorted(
         f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")
     )
     # The module's run has random and logo plans only: figure 6 needs mixed plans and says so.

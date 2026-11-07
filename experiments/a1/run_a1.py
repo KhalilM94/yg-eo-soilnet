@@ -29,7 +29,6 @@ Run from the repository root::
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
@@ -40,7 +39,8 @@ if str(REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
 from yg_eo_soilnet.a1.config import load_a1_config  # noqa: E402
-from yg_eo_soilnet.a1.runner import RunResult, run_plans  # noqa: E402
+from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
+from yg_eo_soilnet.a1.runner import LOG_FILE, RunResult, run_plans  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> RunResult:
@@ -74,12 +74,17 @@ def main(argv: list[str] | None = None) -> RunResult:
         action="store_true",
         help="The quickest run through every step (XGBoost in both stages, untuned): its scores mean nothing.",
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Show only warnings and the end summary (the log file keeps everything)."
+    )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    a1 = load_a1_config(args.config)
+    run_dir = Path(a1.settings.output_dir) / "runs" / args.run_name
+    log_file = setup_logging(run_dir / LOG_FILE, quiet=args.quiet)
     kinds = [kind.strip() for kind in args.kinds.split(",") if kind.strip()] if args.kinds else None
     result = run_plans(
-        load_a1_config(args.config),
+        a1,
         plans_dir=args.plans,
         run_name=args.run_name,
         kinds=kinds,
@@ -87,19 +92,20 @@ def main(argv: list[str] | None = None) -> RunResult:
         restart=args.restart,
         tracking=not args.no_mlflow,
         dev_mode=args.dev_mode,
+        log_file=log_file,
     )
-    print(f"{len(result.computed)} file(s) written, {len(result.skipped)} already done, in {result.run_dir}/")
-    for note in result.notes:
-        print(f"  {note}")
+    lines = [f"{len(result.computed)} file(s) written, {len(result.skipped)} already done, in {result.run_dir}/"]
+    lines += [f"  {note}" for note in result.notes]
     test = result.metrics[result.metrics["split"] == "test"] if not result.metrics.empty else result.metrics
     if not test.empty:
-        summary = test.groupby(["model", "covariate_group"])["rmse"].mean().round(3)
-        print("Mean test RMSE over plans:")
-        print(summary.to_string())
+        rmse = test.groupby(["model", "covariate_group"])["rmse"].mean().round(3)
+        lines += ["Mean test RMSE over plans:", rmse.to_string()]
     if not result.dissimilarity.empty:
         columns = [c for c in ("held_out", "median_di", "share_outside", "carbonate_tvd") if c in result.dissimilarity]
-        print(f"Held-out regions against their training data (dissimilarity_summary.csv in {result.run_dir}/):")
-        print(result.dissimilarity[columns].round(3).to_string(index=False))
+        lines.append(f"Held-out regions against their training data (dissimilarity_summary.csv in {result.run_dir}/):")
+        lines.append(result.dissimilarity[columns].round(3).to_string(index=False))
+    lines.append(f"Log: {log_file}")
+    summary("\n".join(lines))
     return result
 
 

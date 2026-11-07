@@ -39,6 +39,7 @@ import json
 import logging
 import os
 import shutil
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Optional
@@ -49,6 +50,7 @@ import pandas as pd
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
+from yg_eo_soilnet.a1.logs import format_duration
 from yg_eo_soilnet.a1.features import build_table
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.settings import dev_mode_settings
@@ -98,6 +100,8 @@ PREDICTION_COLUMNS = (
 #: refused like one made from other settings: its old files would sit beside new ones.
 PREDICTION_FORMAT = 4
 MANIFEST_FILE = "manifest.json"
+#: The run's log, appended to by every run_a1.py invocation on the folder; kept by ``restart``.
+LOG_FILE = "run_a1.log"
 METRICS_FILE = "metrics.csv"
 DISSIMILARITY_DIR = "dissimilarity"
 DISSIMILARITY_SUMMARY_FILE = "dissimilarity_summary.csv"
@@ -145,6 +149,7 @@ def run_plans(
     restart: bool = False,
     tracking: bool = True,
     dev_mode: bool = False,
+    log_file: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> RunResult:
     """Run every plan of the index (or of the kinds asked for), skipping what is already done.
@@ -171,7 +176,12 @@ def run_plans(
         (:func:`~yg_eo_soilnet.a1.settings.dev_mode_settings`): it shows the pipeline works, and its
         scores mean nothing. Recorded in the run folder's settings hash, so a dev-mode run never
         resumes into a full one.
+    log_file : pathlib.Path, optional
+        The run's log (``run_a1.py`` writes ``run_a1.log`` in the run folder); added to the MLflow
+        parent run at the end, failed or not.
     logger : logging.Logger, optional
+        Where the progress lines go: one when each plan starts and ends (with an estimate of the
+        time left), one for stage 1 and one for each model and covariate group.
 
     Returns
     -------
@@ -229,11 +239,28 @@ def run_plans(
         if tracking
         else None
     )
+    total = len(index)
+    logger.info(
+        f"A1 run {run_name}: {total} plan(s) ({', '.join(f'{n} {k}' for k, n in index['kind'].value_counts().items())}) "
+        f"in {run_dir}"
+    )
+    started_run = time.monotonic()
+    durations: list[float] = []
+    failed = False
     try:
-        for row in index.itertuples(index=False):
+        for position, row in enumerate(index.itertuples(index=False), 1):
+            tag = f"[{position}/{total}] {row.plan_id}"
+            logger.info(f"{tag} ({row.kind}): {_counts(row)}")
+            started = time.monotonic()
             computed_here = _run_one_plan(
                 row, plans_path, run_dir, table, resolved, a1, config, groups=groups, result=result, logger=logger
             )
+            elapsed = time.monotonic() - started
+            if computed_here:
+                durations.append(elapsed)
+                logger.info(f"{tag} done in {format_duration(elapsed)}; {_time_left(durations, total - position)}")
+            else:
+                logger.info(f"{tag} already done")
             if tracking and computed_here:
                 _log_plan(row, run_dir)
         manifest["plans"].update(
@@ -252,13 +279,23 @@ def run_plans(
             mlflow.log_artifact(str(run_dir / MANIFEST_FILE))
             if not result.dissimilarity.empty:
                 mlflow.log_artifact(str(run_dir / DISSIMILARITY_SUMMARY_FILE))
+    except BaseException:
+        failed = True
+        logger.exception(f"A1 run {run_name} failed after {format_duration(time.monotonic() - started_run)}.")
+        raise
     finally:
         if parent is not None:
             import mlflow
 
-            mlflow.end_run()
+            if log_file is not None and Path(log_file).exists():
+                try:
+                    mlflow.log_artifact(str(log_file))
+                except Exception as error:  # the run's own error, if any, must not be hidden by this one
+                    logger.warning(f"Could not add {log_file} to the MLflow run: {error}")
+            mlflow.end_run(status="FAILED" if failed else "FINISHED")
     logger.info(
-        f"A1 run {run_name}: {len(result.computed)} file(s) written, {len(result.skipped)} already there, in {run_dir}"
+        f"A1 run {run_name}: {len(result.computed)} file(s) written, {len(result.skipped)} already there, "
+        f"in {format_duration(time.monotonic() - started_run)}; {run_dir}"
     )
     return result
 
@@ -279,6 +316,9 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
             jobs += [(LOCAL, name) for name in [*resolved.groups, COMBINED_GROUP]]
     todo = [(model, group) for model, group in jobs if not (out / _output_name(model, group)).exists()]
     result.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
+    for model, group in jobs:
+        if (model, group) not in todo:
+            logger.info(f"  {model} / {group}: already done, {_rmse_note(out / _output_name(model, group))}")
     dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
     needs_dissimilarity = row.kind == LOGO and not dissimilarity_path.exists()
     if row.kind == LOGO and not needs_dissimilarity:
@@ -293,6 +333,7 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
     region = table.frame[table.region_column] if table.region_column else None
 
     for model, group in todo:
+        started = time.monotonic()
         if model == LOCAL:
             columns = list(resolved.combined) if group == COMBINED_GROUP else list(resolved.groups[group])
             local = local_folds(context, plan.point_ids_for(TEST), table, logger=logger)
@@ -301,6 +342,7 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
                 note = f"{row.plan_id}: no local score - {local.reason}"
                 if note not in result.notes:
                     result.notes.append(note)
+                logger.info(f"  {model} / {group}: skipped - {local.reason}")
                 continue
         elif group == COMBINED_GROUP:
             outcome = run_model(
@@ -312,6 +354,7 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
         path = out / _output_name(model, group)
         _atomic_write_parquet(frame, path)
         result.computed.append(str(path))
+        logger.info(f"  {model} / {group}: {format_duration(time.monotonic() - started)}, {_rmse_note(frame)}")
 
     if needs_dissimilarity:
         frame = _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger)
@@ -367,11 +410,54 @@ def _stage1(row, plan, table, settings, config, run_dir, logger) -> AuxiliaryPre
     """The plan's stage-1 predictions: read back when saved, otherwise computed and saved."""
     path = run_dir / "stage1" / f"{row.plan_id}.parquet"
     if path.exists():
-        return _auxiliary_from_frame(pd.read_parquet(path), settings)
+        auxiliary = _auxiliary_from_frame(pd.read_parquet(path), settings)
+        logger.info(f"  stage 1: read from stage1/{path.name}; {_out_of_fold_r2(auxiliary, table, settings)}")
+        return auxiliary
+    started = time.monotonic()
     auxiliary = predict_auxiliary(table, plan, settings, config, kind=row.kind, logger=logger)
     # The point ids are the frame's index; written as a column, so they survive the file.
     _atomic_write_parquet(auxiliary.to_frame().reset_index(), path)
+    logger.info(
+        f"  stage 1: {format_duration(time.monotonic() - started)}; {_out_of_fold_r2(auxiliary, table, settings)}"
+    )
     return auxiliary
+
+
+def _counts(row) -> str:
+    """``4,644 train / 1,162 test`` (and validation, when the plan has any) from an index row."""
+    text = f"{int(row.n_train):,} train / {int(row.n_test):,} test"
+    return text + (f" / {int(row.n_val):,} val" if int(row.n_val) else "")
+
+
+def _time_left(durations: list[float], plans_left: int) -> str:
+    """An estimate of the time left: the mean time of the plans computed so far, times those left."""
+    mean = sum(durations) / len(durations)
+    if not plans_left:
+        return "that was the last plan"
+    return f"about {format_duration(mean * plans_left)} left ({format_duration(mean)} per plan over {len(durations)} computed)"
+
+
+def _rmse_note(predictions) -> str:
+    """``test RMSE 8.10`` of a predictions table or file; what is missing when it has no test score."""
+    frame = pd.read_parquet(predictions) if isinstance(predictions, (str, Path)) else predictions
+    test = frame[frame["split"] == TEST]
+    scores = regression_metrics(test["observed"], test["predicted"], split="test")
+    return f"test RMSE {scores['rmse_test']:.2f}" if "rmse_test" in scores else "no test score"
+
+
+def _out_of_fold_r2(auxiliary: AuxiliaryPredictions, table, settings) -> str:
+    """``out-of-fold R2 caco3_pct_total 0.58, c_e_c_meq_100g 0.62`` on the plan's training points."""
+    from yg_eo_soilnet.a1.config import stage1_prediction_column
+
+    training = auxiliary.folds.index[(auxiliary.folds >= 0).to_numpy()]
+    parts = []
+    for target in settings.auxiliary.targets:
+        scores = regression_metrics(
+            table.frame[target].reindex(training),
+            auxiliary.predictions[stage1_prediction_column(target)].reindex(training),
+        )
+        parts.append(f"{target} {scores['r2_test']:.2f}" if "r2_test" in scores else f"{target} -")
+    return "out-of-fold R2 " + ", ".join(parts)
 
 
 def _auxiliary_from_frame(frame: pd.DataFrame, settings) -> AuxiliaryPredictions:
@@ -514,7 +600,7 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, 
                 )
             return manifest
         logger.warning(f"Clearing {run_dir}: {'; '.join(problems)}.")
-        shutil.rmtree(run_dir)
+        _clear_run_folder(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "format": PREDICTION_FORMAT,
@@ -528,6 +614,17 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, 
     }
     _write_json(manifest_path, manifest)
     return manifest
+
+
+def _clear_run_folder(run_dir: Path) -> None:
+    """Delete everything in the run folder but its log, which the running process is writing to."""
+    for entry in run_dir.iterdir():
+        if entry.name == LOG_FILE:
+            continue
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
 
 
 def _config_hash(a1: A1Config, config, overrides: Optional[dict] = None) -> str:

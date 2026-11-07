@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import logging
 import sys
 from pathlib import Path
 
@@ -53,6 +52,7 @@ from yg_eo_soilnet.a1 import evaluation  # noqa: E402
 from yg_eo_soilnet.a1.config import COMBINED_GROUP  # noqa: E402
 from yg_eo_soilnet.a1.settings import load_settings  # noqa: E402
 from yg_eo_soilnet.a1.plans import LOGO  # noqa: E402
+from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, PER_CLASS_MEASURED, PER_CLASS_PREDICTED  # noqa: E402
 from yg_eo_soilnet.a1.tracking import reopen_parent  # noqa: E402
 from yg_eo_soilnet.datamodules.splitting import TEST  # noqa: E402
@@ -98,11 +98,14 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     parser.add_argument(
         "--no-mlflow", action="store_true", help="Write the tables only; do not add them to the run's MLflow run."
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Show only warnings and the end summary (the log file keeps everything)."
+    )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     settings = load_settings(args.config)
     run_dir = Path(settings.output_dir) / "runs" / args.run_name
+    setup_logging(run_dir / "evaluation" / "evaluate.log", quiet=args.quiet)
     block_km = args.block_km if args.block_km is not None else settings.bootstrap.block_size_km
     seed = args.seed if args.seed is not None else settings.seed
 
@@ -159,23 +162,25 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
         mlflow.set_tags({f"region__{key}": name for key, name in regions.items()})
 
     rmse = boot.intervals[boot.intervals["metric"] == "rmse"]
-    print(f"Test RMSE, every covariate, with 95 % block-bootstrap intervals ({block_km:g} km blocks, {n_boot} draws):")
-    print(
+    summary(
+        f"Test RMSE, every covariate, with 95 % block-bootstrap intervals ({block_km:g} km blocks, {n_boot} draws):"
+    )
+    summary(
         rmse[["kind", "block_size_m", "model", "estimate", "low", "high", "n", "n_blocks"]]
         .round(3)
         .to_string(index=False)
     )
     differences = boot.differences[boot.differences["metric"] == "rmse"]
     if not differences.empty:
-        print("RMSE differences (a - b; negative means a is better):")
-        print(
+        summary("RMSE differences (a - b; negative means a is better):")
+        summary(
             differences[["kind", "block_size_m", "a", "b", "estimate", "low", "high", "p_holm"]]
             .round(4)
             .to_string(index=False)
         )
-    print(f"Tables in {out}/: {', '.join(TABLES)}")
+    summary(f"Tables in {out}/: {', '.join(TABLES)}")
     if tracking is not None:
-        print(
+        summary(
             f"Added to MLflow run {tracking.info.run_id}: the tables (evaluation/) and {len(headline)} headline metrics."
         )
     return tables

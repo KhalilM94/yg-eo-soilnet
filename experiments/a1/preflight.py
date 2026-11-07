@@ -18,7 +18,6 @@ See :mod:`yg_eo_soilnet.a1.preflight` for what each table means. Run from the re
 from __future__ import annotations
 
 import argparse
-import logging
 import sys
 from pathlib import Path
 
@@ -28,6 +27,7 @@ if str(REPOSITORY_ROOT) not in sys.path:
     # is run as a script.
     sys.path.insert(0, str(REPOSITORY_ROOT))
 
+from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.preflight import PreflightResult, run_preflight  # noqa: E402
 from yg_eo_soilnet.a1.settings import load_settings  # noqa: E402
 
@@ -60,25 +60,30 @@ def main(argv: list[str] | None = None) -> PreflightResult:
     parser.add_argument(
         "--overfit-r2-gap", type=float, default=None, help="Flag a training R2 this far above the test R2."
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Show only warnings and the end summary (the log file keeps everything)."
+    )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    settings = load_settings(args.config)
+    out = Path(args.out or Path(settings.output_dir) / "preflight")
+    setup_logging(out / "preflight.log", quiet=args.quiet)
     result = run_preflight(
-        load_settings(args.config),
+        settings,
         split_plan_path=args.split_plan,
-        out_dir=args.out,
+        out_dir=str(out),
         min_cell_points=args.min_cell_points,
         overfit_r2_gap=args.overfit_r2_gap,
     )
-    print(f"Wrote {len(result.files)} file(s) to {result.out_dir}/ - read {result.files[-1].name} first.")
+    summary(f"Wrote {len(result.files)} file(s) to {result.out_dir}/ - read {result.files[-1].name} first.")
     for section, reason in result.skipped.items():
-        print(f"  skipped {section}: {reason}")
+        summary(f"  skipped {section}: {reason}")
     if not result.small_cells.empty:
-        print(f"  {len(result.small_cells)} region x carbonate cell(s) are under the threshold.")
+        summary(f"  {len(result.small_cells)} region x carbonate cell(s) are under the threshold.")
     if result.unassigned:
-        print(f"  {len(result.unassigned)} input(s) in no covariate group (see {result.out_dir}/inputs.csv).")
+        summary(f"  {len(result.unassigned)} input(s) in no covariate group (see {result.out_dir}/inputs.csv).")
     if result.overfit:
-        print(f"  earlier predictions flagged as leaky: {', '.join(result.overfit)}")
+        summary(f"  earlier predictions flagged as leaky: {', '.join(result.overfit)}")
     return result
 
 

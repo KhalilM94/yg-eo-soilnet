@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import logging
 import sys
 from pathlib import Path
 
@@ -37,6 +36,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 from yg_eo_soilnet.a1 import figures  # noqa: E402
 from yg_eo_soilnet.a1.config import load_a1_config  # noqa: E402
 from yg_eo_soilnet.a1.plans import RANDOM  # noqa: E402
+from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.tracking import log_figures, reopen_parent  # noqa: E402
 
 
@@ -71,14 +71,17 @@ def main(argv: list[str] | None = None) -> dict:
     parser.add_argument(
         "--no-mlflow", action="store_true", help="Save the files only; do not add them to the run's MLflow run."
     )
+    parser.add_argument(
+        "--quiet", action="store_true", help="Show only warnings and the end summary (the log file keeps everything)."
+    )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     a1 = load_a1_config(args.config)
     inputs = figures.FigureInputs.from_run(
         a1, args.run_name, regions_path=args.regions, regions_name_field=args.regions_name_field
     )
     folder = Path(args.out) if args.out else inputs.run_dir / "figures"
+    setup_logging(folder / "make_figures.log", quiet=args.quiet)
     with contextlib.ExitStack() as stack:
         # Opened first, so a run folder whose MLflow run is gone fails before anything is drawn.
         tracking = None if args.no_mlflow else stack.enter_context(reopen_parent(inputs.run_dir, inputs.config))
@@ -89,12 +92,12 @@ def main(argv: list[str] | None = None) -> dict:
             log_figures(drawn, folder)
     for figure in drawn.values():
         plt.close(figure)
-    print(f"Figures in {folder}/ (PNG and PDF):")
+    summary(f"Figures in {folder}/ (PNG and PDF):")
     for name, figure in drawn.items():
         note = f"  - not drawn: {figure._a1_message}" if figures.is_message_figure(figure) else ""
-        print(f"  {name}{note}")
+        summary(f"  {name}{note}")
     if tracking is not None:
-        print(f"Added to MLflow run {tracking.info.run_id} under figures/.")
+        summary(f"Added to MLflow run {tracking.info.run_id} under figures/.")
     return drawn
 
 

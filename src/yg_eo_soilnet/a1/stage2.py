@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Mapping, Optional, Sequence
 
@@ -40,6 +41,7 @@ from sklearn.model_selection import GridSearchCV
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.features import A1Table
+from yg_eo_soilnet.a1.logs import format_duration
 from yg_eo_soilnet.a1.pipelines import build_stage_pipeline
 from yg_eo_soilnet.a1.settings import A1Settings
 from yg_eo_soilnet.a1.strata import carbonate_class
@@ -388,7 +390,13 @@ def local_folds(
             for fold, (_, test_positions) in enumerate(splits):
                 outer.iloc[test_positions] = fold
             folds = []
+            region_name = (
+                str(table.frame[table.region_column].reindex(measured).dropna().iloc[0])
+                if table.region_column and table.frame[table.region_column].reindex(measured).notna().any()
+                else "region"
+            )
             for fold in range(n_folds):
+                started = time.monotonic()
                 assignments = pd.Series(
                     np.where(outer.to_numpy() == fold, TEST, TRAIN), index=pd.Index(measured, name="point_id")
                 )
@@ -412,6 +420,12 @@ def local_folds(
                     logger=logger,
                 )
                 folds.append((fold, build_context(table, subplan, auxiliary, settings, context.config)))
+                n_test = int((outer == fold).sum())
+                logger.info(
+                    f"  local {region_name} fold {fold + 1}/{n_folds}: {len(measured) - n_test:,} train / {n_test:,} "
+                    f"test ({block[outer == fold].nunique()} of {n_blocks} blocks), stage 1 "
+                    f"{format_duration(time.monotonic() - started)}"
+                )
             local = LocalFolds(folds=folds, block=block, outer_fold=outer)
     context.cache[LOCAL_CACHE_KEY] = local
     return local
