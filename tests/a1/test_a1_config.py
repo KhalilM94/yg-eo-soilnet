@@ -60,7 +60,10 @@ def test_the_shipped_configurations_load_and_record_the_commit(name):
 
     assert a1.git_commit == _head_commit()
     assert isinstance(a1.git_dirty, bool)
-    assert a1.groups.names == ("satellite", "terrain", "climate", "legacy_soil", "auxiliary")
+    expected = ("satellite", "terrain", "climate", "legacy_soil", "auxiliary")
+    if name == "a1.yml":  # the real data adds the land-management indicators
+        expected = ("satellite", "terrain", "climate", "legacy_soil", "management", "auxiliary")
+    assert a1.groups.names == expected
     assert a1.settings.stage1.estimator == "TabICL"
     assert a1.settings.stage2.estimator == "XGBoost"
     assert a1.settings.inner_cv_folds == 5
@@ -82,7 +85,18 @@ def test_the_real_configuration_reads_its_data_through_the_a1_main_config():
 def test_the_real_legacy_soil_group_holds_the_soil_map_layers():
     groups = load_covariate_groups(str(A1_CONFIGS / "covariate_groups.yml"))
     legacy = next(group for group in groups.groups if group.name == "legacy_soil")
-    assert legacy.columns == LEGACY_SOIL
+    # som_median_0_30cm is not in the real static file (the same SOC map, x 17.24, where it is).
+    assert legacy.columns == tuple(column for column in LEGACY_SOIL if column != "som_median_0_30cm")
+
+
+def test_the_real_groups_name_s1_by_polarisation_and_have_a_management_group():
+    groups = {group.name: group for group in load_covariate_groups(str(A1_CONFIGS / "covariate_groups.yml")).groups}
+    satellite = groups["satellite"]
+    assert {"S1_VH_", "S1_VV_", "S1_VH/VV_"} <= set(satellite.prefixes)
+    assert not {"S1_asc_", "S1_desc_"} & set(satellite.prefixes)
+    assert "ts_n_obs" not in satellite.columns
+    assert "som_median_0_30cm" not in groups["legacy_soil"].columns
+    assert groups["management"].columns[:2] == ("CUE_mean", "CUE_cv") and len(groups["management"].columns) == 17
 
 
 def test_loading_on_the_demo_data_puts_every_input_in_exactly_one_group(a1_settings):

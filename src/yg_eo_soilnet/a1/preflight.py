@@ -30,8 +30,8 @@ from typing import Callable, Mapping, Optional
 import numpy as np
 import pandas as pd
 
-from yg_eo_soilnet.a1.features import A1Table, load_points
-from yg_eo_soilnet.a1.settings import A1Settings
+from yg_eo_soilnet.a1.features import A1Table, check_inputs, load_points
+from yg_eo_soilnet.a1.settings import PERCENTILES_STATIC, A1Settings
 from yg_eo_soilnet.a1.strata import carbonate_class
 from yg_eo_soilnet.datamodules.splitting import SPLIT_NAMES, TEST, TRAIN, SplitPlan
 from yg_eo_soilnet.metrics import regression_metrics
@@ -53,6 +53,9 @@ REGION_BY_CARBONATE_FILE = "region_by_carbonate.csv"
 SMALL_CELLS_FILE = "region_by_carbonate_small_cells.csv"
 REGION_BY_YEAR_FILE = "region_by_year.csv"
 PREDICTIONS_FILE = "auxiliary_predictions.csv"
+INPUTS_FILE = "inputs.csv"
+#: What the inputs table says of an input no covariate group claims.
+NO_GROUP = "(none)"
 REPORT_FILE = "preflight.md"
 
 
@@ -64,6 +67,8 @@ class PreflightResult:
     ----------
     out_dir : pathlib.Path
         The folder everything was written to.
+    unassigned : list of str
+        The inputs no covariate group claims: no model reads them.
     files : list of pathlib.Path
         The files written, the report last.
     small_cells : pandas.DataFrame
@@ -78,6 +83,7 @@ class PreflightResult:
     """
 
     out_dir: Path
+    unassigned: list[str] = field(default_factory=list)
     files: list[Path] = field(default_factory=list)
     small_cells: pd.DataFrame = field(default_factory=pd.DataFrame)
     overfit: list[str] = field(default_factory=list)
@@ -275,9 +281,15 @@ def run_preflight(
     min_cell_points: Optional[int] = None,
     overfit_r2_gap: Optional[float] = None,
     config=None,
+    groups=None,
     logger: Optional[logging.Logger] = None,
 ) -> PreflightResult:
-    """Run the four diagnostics and write their tables and the report.
+    """Run the diagnostics and write their tables and the report.
+
+    First, the inputs are checked: no lab value, and no column ``exclude_inputs`` names, may be one
+    (:func:`~yg_eo_soilnet.a1.features.check_inputs`); the run stops if one is. Every input is then
+    matched to its covariate group, and the ones no group claims - which no model would read - are
+    listed.
 
     Parameters
     ----------
@@ -294,12 +306,19 @@ def run_preflight(
         Overrides ``preflight.overfit_r2_gap``.
     config : Config, optional
         The main configuration; read from the settings unless given.
+    groups : CovariateGroups, optional
+        The covariate groups; read from ``covariate_groups`` in the settings unless given.
     logger : logging.Logger, optional
         Where progress is reported.
 
     Returns
     -------
     PreflightResult
+
+    Raises
+    ------
+    ValueError
+        If a lab value or an excluded column is an input.
     """
     logger = logger or logging.getLogger(__name__)
     config = config if config is not None else settings.load_config()
@@ -309,9 +328,14 @@ def run_preflight(
     out.mkdir(parents=True, exist_ok=True)
 
     points = load_points(settings, config, logger)
+    check_inputs(points, settings, config)
     frame = points.frame
     result = PreflightResult(out_dir=out)
     sections: list[str] = []
+
+    # 0. The inputs, and the covariate group of each.
+    result.tables[INPUTS_FILE], result.unassigned = _inputs_table(points, settings, groups, logger)
+    sections.append(_inputs_section(result, settings))
 
     # 1. Completeness and missingness.
     properties = list(dict.fromkeys([settings.target, *settings.auxiliary.targets]))
@@ -375,7 +399,7 @@ def run_preflight(
 
     for name, table in result.tables.items():
         path = out / name
-        table.to_csv(path, index=name not in (MISSINGNESS_FILE, SMALL_CELLS_FILE, PREDICTIONS_FILE))
+        table.to_csv(path, index=name not in (MISSINGNESS_FILE, SMALL_CELLS_FILE, PREDICTIONS_FILE, INPUTS_FILE))
         result.files.append(path)
 
     header = _header(settings, config, frame, threshold, gap, split_plan_path)
@@ -386,9 +410,63 @@ def run_preflight(
     return result
 
 
+def _inputs_table(points: A1Table, settings: A1Settings, groups, logger) -> tuple[pd.DataFrame, list[str]]:
+    """One row per input - its kind and covariate group - and the inputs no group claims."""
+    from yg_eo_soilnet.a1.config import load_covariate_groups
+
+    if groups is None:
+        groups = load_covariate_groups(settings.covariate_groups_path) if settings.covariate_groups_path else None
+    inputs = list(points.feature_columns)
+    group_of: dict[str, str] = {}
+    if groups is not None:
+        resolved = groups.resolve(inputs, settings.auxiliary.targets, strict=False, logger=logger)
+        group_of = {column: name for name, columns in resolved.groups.items() for column in columns}
+    percentiles = set(points.percentile_columns)
+    table = pd.DataFrame(
+        {
+            "input": inputs,
+            "kind": ["time-series percentile" if column in percentiles else "static covariate" for column in inputs],
+            "group": [group_of.get(column, NO_GROUP) for column in inputs],
+        }
+    )
+    return table, [column for column in inputs if column not in group_of]
+
+
+def _inputs_section(result: PreflightResult, settings: A1Settings) -> str:
+    """The report's section on the inputs and their covariate groups."""
+    table = result.tables[INPUTS_FILE]
+    counts = table["group"].value_counts()
+    lines = [
+        "## 0. Inputs and covariate groups",
+        "",
+        f"{len(table)} input(s); no lab value and no `exclude_inputs` column "
+        f"({', '.join(f'`{prefix}`' for prefix in settings.exclude_inputs) or 'none'}) is among them.",
+        "",
+        "| Group | Inputs |",
+        "|---|---|",
+        *(f"| {name} | {count} |" for name, count in counts.items()),
+        "",
+    ]
+    if result.unassigned:
+        lines.append(
+            f"**{len(result.unassigned)} input(s) are in no covariate group**, so no model reads them: "
+            + ", ".join(f"`{column}`" for column in result.unassigned)
+            + ". Add them to a group in the covariate-groups file, or leave them out on purpose."
+        )
+    else:
+        lines.append("Every input is in a covariate group.")
+    if settings.percentiles.source != PERCENTILES_STATIC:
+        lines.append(
+            "\nThe time-series percentiles are computed later, by `run_a1.py`, so they are not listed here; "
+            "the covariate groups are checked against them then."
+        )
+    return "\n".join(lines)
+
+
 def _column_kinds(points: A1Table) -> dict[str, str]:
     """Every column the experiments read, and what kind of column it is."""
     kinds = {column: "static covariate" for column in points.static_columns}
+    kinds.update({column: "time-series percentile" for column in points.percentile_columns})
     kinds.update({column: "lab value" for column in points.label_columns})
     kinds.update({column: "earlier prediction" for column in points.prediction_columns.values()})
     if points.sample_year_column:

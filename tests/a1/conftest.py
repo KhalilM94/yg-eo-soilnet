@@ -35,8 +35,12 @@ def a1_demo_dir(tmp_path_factory) -> Path:
 def _settings_builder(demo_dir: Path, folder: Path):
     """The builder behind :func:`a1_settings`, writing its files into ``folder``."""
 
-    def build(main_overrides=None, *, as_file=False, groups=None, **overrides):
-        main = yaml.safe_load((A1_CONFIGS / "demo_main_config.yml").read_text())
+    def build(main_overrides=None, *, as_file=False, groups=None, static=False, **overrides):
+        # static: the demo laid out like the real data - percentiles already in the static file.
+        main_name, settings_name = (
+            ("demo_static_main_config.yml", "a1_demo_static.yml") if static else ("demo_main_config.yml", "a1_demo.yml")
+        )
+        main = yaml.safe_load((A1_CONFIGS / main_name).read_text())
         common = main["common"]
         common["data"]["root"] = str(demo_dir)
         for key in (
@@ -52,7 +56,7 @@ def _settings_builder(demo_dir: Path, folder: Path):
         main_path = folder / "main_config.yml"
         main_path.write_text(yaml.safe_dump(main))
 
-        raw = yaml.safe_load((A1_CONFIGS / "a1_demo.yml").read_text())
+        raw = yaml.safe_load((A1_CONFIGS / settings_name).read_text())
         raw["main_config"] = str(main_path)
         raw["data"] = {**raw["data"], "root": str(demo_dir)}
         if (main_overrides or {}).get("data"):
@@ -80,7 +84,8 @@ def a1_settings(a1_demo_dir, tmp_path):
     pointed at the generated dataset and every other path made absolute, so the test does not depend
     on the directory pytest runs from. ``main_overrides`` edits its ``common`` block; ``groups``
     replaces the covariate groups; ``as_file=True`` writes the settings to a file and returns its
-    path, for :func:`~yg_eo_soilnet.a1.config.load_a1_config`.
+    path, for :func:`~yg_eo_soilnet.a1.config.load_a1_config`; ``static=True`` starts from the static
+    demo instead (``a1_demo_static.yml``: the percentiles already in the static file, no time series).
     """
     return _settings_builder(a1_demo_dir, tmp_path)
 

@@ -1,0 +1,76 @@
+# The A1 static demo's main configuration: demo_main_config.yml, reading everything from one static
+# file whose time-series percentiles are already columns (static_with_percentiles.csv, written by
+# experiments/a1/make_demo_data.py), with no time series - the layout of the real data.
+# The main configuration the A1 demo reads its data from (configs/a1/a1_demo.yml points here).
+# A trimmed copy of configs/main_config.yml, which explains every setting in detail.
+#
+#   python experiments/a1/make_demo_data.py    # writes experiments/a1/demo_data/
+#
+# Run from the repository root: the data folder below is relative to where you run.
+
+common:
+  data:
+    root: "experiments/a1/demo_data"
+    static: "static_with_percentiles.csv"
+    targets: "targets.csv"
+    timeseries: null
+    manifest: null
+
+  POINT_ID_COLUMN: "uuid"
+  LAT_COLUMN: "lat"
+  LON_COLUMN: "lon"
+  RANDOM_SEED: 42
+
+  # The one split every A1 model is scored on. plan_path can name a saved
+  # data_splits/split_assignments.parquet to reuse an earlier run's test set.
+  split:
+    strategy: random
+    test_size: 0.15
+    val_size: 0.15
+    seed: 42
+    population_policy: intersect
+    min_population_ratio: 0.5
+    plan_path: null
+    group:
+      class_path: yg_eo_soilnet.clustering_utils.KMeansClusterStrategy
+      params:
+        n_clusters: 8
+      # To hold out whole demo regions instead, with strategy: spatial_group above:
+      #   class_path: yg_eo_soilnet.clustering_utils.ColumnGroupStrategy
+      #   params:
+      #     column: region
+
+  data_quality:
+    max_missing_column_ratio: 0.2
+    allow_sparse_columns: []
+    fail_on_sparse_columns: true
+
+  FAIL_IF_ALL_MODELS_FAIL_FOR_TARGET: true
+  FAIL_ON_MODEL_ERROR: true
+
+  # Relative to this file's folder. The model list is the project's own, so A1 trains the same
+  # XGBoost and TabICL entries main.py does.
+  DATA_SPEC_PATH: "demo_data_spec.yml"
+  SKLEARN_CONFIG_PATH: "../sklearn/config.yml"
+  LIGHTNING_CONFIG_PATH: "../lightning/config.yml"
+  SKLEARN_REGISTRY_PATH: "../sklearn/model_registry.yml"
+  LIGHTNING_REGISTRY_PATH: "../lightning/models/defaults.yml"
+
+  temporal:
+    enabled: false
+    time_column: "observation_date"
+    modality_prefix_map:
+      s2: "S2_"
+      clim: "CLIM_"
+
+  MLFLOW_TRACKING_URI: ""
+  MLFLOW_EXPERIMENT_NAME: "Paper_A1_Demo"
+  MLFLOW_REGISTER_MODELS: false
+  MLFLOW_EXPERIMENT_EXPORT_ENABLED: false
+  MAIN_FILE_LOGGING_ENABLED: false
+
+  EXPLAIN_ENABLED: false
+  uncertainty:
+    enabled: false
+  export_point_predictions:
+    enabled: false

@@ -15,17 +15,19 @@ common:
     # The file with your static (non-time-series) features - soil covariates, etc. The measured
     # lab values (the targets) can either live in this same file, or in their own file - see
     # `targets` below.
-    static: 'Morocco_Static_Covariates_Processed_V_310826.csv'
+    static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
     # static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
     # The file with your measured lab values - what the models learn to predict. Leave this blank
     # (null) if `static` above already contains those columns. When targets live in their own
     # file like here, lat/lon coordinates are copied over from it when the two files are joined.
-    targets: 'Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826_base.csv'
+    targets: 'Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv'
     # targets: 'Morocco_soil_targets_uuid_roadsafe_6ksample_Prior_Predictions_V_110826.csv'
 
     # Time-series data (satellite/weather observations over time) always lives in its own file(s) -
     # either a single file, or a folder with one file per data source.
-    timeseries: 'Morocco_Soil_Predictors_2017_2025_TS_with_indices_V_310826.csv'
+    # A1 reads its time-series percentiles from the static file (timeseries_percentiles.source:
+    # static in configs/a1/a1.yml), so there is no time-series file.
+    timeseries: null
     # Optional: a JSON file listing the exact path to each of the three sources above, if you'd
     # rather manage paths that way. Leave as null to just use the paths given above.
     manifest: null
@@ -148,7 +150,7 @@ common:
   LIGHTNING_REGISTRY_PATH: "../lightning/models/defaults.yml"
   # --- time-series (satellite/weather) inputs -----------------------------------------------
   temporal:
-    enabled: true   # turn off to ignore the time-series file entirely and use static data only
+    enabled: false  # A1 uses static data only: the time-series percentiles are columns of the static file
     # Column in the time-series file that holds each observation's date.
     time_column: "observation_date"
     # How to tell which columns in the time-series file belong to which data source, by the

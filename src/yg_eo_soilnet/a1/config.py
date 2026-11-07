@@ -138,6 +138,7 @@ class CovariateGroups:
         auxiliary_targets: Iterable[str],
         *,
         not_inputs: Iterable[str] = (),
+        strict: bool = True,
         logger: Optional[logging.Logger] = None,
     ) -> ResolvedGroups:
         """Match every group to the inputs, refusing anything that does not fit.
@@ -151,6 +152,10 @@ class CovariateGroups:
         not_inputs : iterable of str
             Columns of the data that are not inputs - the lab columns, ids, coordinates - so that
             naming one says so rather than just "unknown".
+        strict : bool, default True
+            Refuse a column or prefix that matches no input, and an empty group. Off for the
+            preflight checks, which see only part of the inputs when the time-series percentiles
+            are computed later; a column claimed by two groups is refused either way.
         logger : logging.Logger, optional
             Where an input no group claims is reported.
 
@@ -185,7 +190,7 @@ class CovariateGroups:
                 resolved[group.name] = self._resolve_auxiliary(group, auxiliary_targets)
                 continue
 
-            for column in group.columns:
+            for column in group.columns if strict else ():
                 if column not in known_features:
                     reason = (
                         "is a lab column, id or coordinate, not an input"
@@ -193,13 +198,13 @@ class CovariateGroups:
                         else "is not one of the inputs"
                     )
                     raise ValueError(f"Covariate group {group.name!r}: column {column!r} {reason}.")
-            for prefix in group.prefixes:
+            for prefix in group.prefixes if strict else ():
                 if not any(_prefix_matches(prefix, column) for column in features):
                     raise ValueError(f"Covariate group {group.name!r}: prefix {prefix!r} matches no input.")
 
             exact = set(group.columns)
             members = tuple(column for column in features if column in exact or group.matches(column))
-            if not members:
+            if not members and strict:
                 raise ValueError(f"Covariate group {group.name!r} is empty: it matches no input.")
             for column in members:
                 if column in claimed_by:

@@ -15,10 +15,9 @@
 
 satellite:
   # Bare-soil Sentinel-2 reflectance (s2_<band>_barest and its spread, _sd), and the percentiles of
-  # the Sentinel-1, Sentinel-2, vegetation and soil-moisture time series.
-  prefixes: [s2_, S2_, S1_asc_, S1_desc_, AG_, SOIL_]
-  # How many dated readings each point's time series holds.
-  columns: [ts_n_obs]
+  # the Sentinel-1, Sentinel-2, vegetation and soil-moisture time series. Sentinel-1 columns name the
+  # polarisation first (S1_VH_asc_q50, S1_VV_desc_iqr, S1_VH/VV_asc_q50).
+  prefixes: [s2_, S2_, S1_VH_, S1_VV_, "S1_VH/VV_", AG_, SOIL_]
 
 # landform_class is a class (declared categorical in configs/a1/data_spec.yml).
 terrain:
@@ -31,8 +30,8 @@ climate:
 # The existing soil-map layers, inputs only in A1 (see configs/a1/data_spec.yml). The map also had
 # silt_median_0_30cm and SU_WRB1_PH, which are not in the current static file; list them again here
 # once they are.
-# soc_median_0_30cm is an external estimate of soil organic carbon - a prior on the target itself -
-# and som_median_0_30cm is the same map in organic-matter units (soc x 17.24, i.e. x 1.724 x 10).
+# soc_median_0_30cm is an external estimate of soil organic carbon - a prior on the target itself.
+# (som_median_0_30cm, the same map in organic-matter units, is not in the current static file.)
 legacy_soil:
   columns:
     - bd_median_0_30cm
@@ -40,11 +39,32 @@ legacy_soil:
     - ph_median_0_30cm
     - sand_median_0_30cm
     - soc_median_0_30cm
-    - som_median_0_30cm
     - swc_median_0_30cm
     - texture_20cm
     # - silt_median_0_30cm
     # - SU_WRB1_PH
+
+# Land-management and soil-function indicators derived from the time series: carbon-use efficiency,
+# trends, tillage signs in the Sentinel-1 backscatter, and the variability of vegetation and radar.
+management:
+  columns:
+    - CUE_mean
+    - CUE_cv
+    - NPP_trend_slope
+    - CUE_trend_slope
+    - ClimDef_trend_slope
+    - LST_trend_slope
+    - SM_trend_slope
+    - ETa_trend_slope
+    - Max_VV_Spike_asc
+    - Max_VV_Spike_desc
+    - Tillage_Freq_asc
+    - Tillage_Freq_desc
+    - VH_VV_ratio_asc_mean
+    - VH_VV_ratio_desc_mean
+    - VV_variability_total_asc
+    - VV_variability_total_desc
+    - NDVI_CV
 
 auxiliary:
   columns: [caco3_pct_total, c_e_c_meq_100g]

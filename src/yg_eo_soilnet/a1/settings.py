@@ -62,6 +62,11 @@ KFOLD_METHODS = ("kmeans", "grid")
 
 #: The keys of the ``data:`` block, which must agree with the main configuration's.
 DATA_KEYS = ("root", "static", "targets", "timeseries")
+#: ``timeseries_percentiles.source: compute`` - the percentiles are computed from the time series.
+PERCENTILES_COMPUTED = "compute"
+#: ``timeseries_percentiles.source: static`` - they are already columns of the static file.
+PERCENTILES_STATIC = "static"
+PERCENTILE_SOURCES = (PERCENTILES_COMPUTED, PERCENTILES_STATIC)
 
 
 @dataclass(frozen=True)
@@ -77,11 +82,18 @@ class PercentileSettings:
     exclude : tuple of str
         Columns never summarised - acquisition geometry such as sun or incidence angles, which
         describe the satellite rather than the soil.
+    source : {"compute", "static"}, default "compute"
+        Where the percentiles come from. ``compute`` summarises the time-series file named by the
+        main configuration into ``ts_<variable>_p<percentile>`` columns and ``ts_n_obs``.
+        ``static`` takes them as they already are in the static file - columns
+        ``<variable>_q10`` ... ``_q90`` and ``<variable>_iqr`` - and needs no time series at all
+        (``data.timeseries`` may be null and the main configuration's ``temporal.enabled`` false).
     """
 
     quantiles: tuple[float, ...] = (10.0, 25.0, 50.0, 75.0, 90.0)
     variables: Optional[tuple[str, ...]] = None
     exclude: tuple[str, ...] = ()
+    source: str = "compute"
 
 
 @dataclass(frozen=True)
@@ -371,6 +383,11 @@ class A1Settings:
         The covariate-groups file, already resolved to a full path.
     data : dict of str to str
         The ``data:`` block, as written; checked against the main configuration's.
+    exclude_inputs : tuple of str
+        Column-name prefixes never used as inputs, in either percentile source: acquisition
+        geometry (``S2_SZA``, the sun angle; ``S1_angle``, the radar incidence angle), which
+        describes the satellite rather than the soil. A prefix also catches the computed
+        ``ts_<variable>_p<percentile>`` names.
     percentiles, auxiliary, bootstrap, carbonate, regions, sample_year, preflight, plans
         The settings of each part; see their own classes.
     source_path : str or None
@@ -387,6 +404,7 @@ class A1Settings:
     mlflow_experiment: str = "Paper_A1"
     min_cell_size: int = 30
     covariate_groups_path: Optional[str] = None
+    exclude_inputs: tuple[str, ...] = ("S2_SZA", "S1_angle")
     data: Mapping[str, str] = field(default_factory=dict)
     percentiles: PercentileSettings = field(default_factory=PercentileSettings)
     auxiliary: AuxiliarySettings = field(default_factory=AuxiliarySettings)
@@ -541,6 +559,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "sample_year",
         "preflight",
         "plans",
+        "exclude_inputs",
     }
     _refuse_unknown(raw, known, "the A1 settings")
     main_config = raw.get("main_config")
@@ -581,6 +600,8 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
             kwargs[name] = int(raw[name])
     if "seeds" in raw:
         kwargs["seeds"] = tuple(int(seed) for seed in _strings(raw["seeds"], "seeds"))
+    if "exclude_inputs" in raw:
+        kwargs["exclude_inputs"] = _strings(raw["exclude_inputs"] or (), "exclude_inputs")
     settings = A1Settings(**kwargs)
     _warn_about_validation(settings)
     return settings
@@ -663,6 +684,8 @@ def _percentile_kwargs(values: Mapping) -> dict:
         kwargs["variables"] = _strings(values["variables"], "timeseries_percentiles.variables")
     if "exclude" in values:
         kwargs["exclude"] = _strings(values["exclude"] or (), "timeseries_percentiles.exclude")
+    if values.get("source") is not None:
+        kwargs["source"] = str(values["source"])
     return kwargs
 
 
@@ -778,6 +801,10 @@ def _preflight_kwargs(values: Mapping) -> dict:
 
 def _validate(settings: A1Settings) -> None:
     """Refuse settings that would fail later, or worse, run and mean something else."""
+    if settings.percentiles.source not in PERCENTILE_SOURCES:
+        raise ValueError(
+            f"timeseries_percentiles.source must be one of {list(PERCENTILE_SOURCES)}; got {settings.percentiles.source!r}"
+        )
     if settings.stage1.estimator not in STAGE1_ESTIMATORS:
         raise ValueError(
             f"stage1.estimator must be one of {list(STAGE1_ESTIMATORS)}; got {settings.stage1.estimator!r}"

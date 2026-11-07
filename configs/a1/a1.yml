@@ -14,9 +14,11 @@ main_config: main_config.yml
 # the two disagree; when the data moves, change both.
 data:
   root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
-  static: "Morocco_Static_Covariates_Processed_V_310826.csv"
-  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826_base.csv"
-  timeseries: "Morocco_Soil_Predictors_2017_2025_TS_with_indices_V_310826.csv"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  # No time-series file: the percentiles are already columns of the static file (see
+  # timeseries_percentiles.source below).
+  timeseries: null
 
 # The lab column being predicted.
 target: organic_matter_g_kg
@@ -66,8 +68,8 @@ stage2:
   # Tuned by inner cross-validation on the training points of each plan (grouped by the plan's
   # blocks or regions when it has them): 4 combinations.
   params:
-    model__max_depth: [3, 6]
-    model__n_estimators: [100, 300]
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
     model__learning_rate: [0.05]
 # Folds inside the training points, in each stage: to choose settings, and in stage 1 so that each
 # training point's prediction comes from a model fitted without it.
@@ -87,13 +89,24 @@ bootstrap:
   block_size_km: 10
 
 # Each time-series variable is summarised by percentiles over a point's whole record, whenever and
-# however often it was observed. Columns are named ts_<variable>_p<percentile>, plus ts_n_obs.
+# however often it was observed. Where they come from (source):
+#   static  - they are already columns of the static file: <variable>_q10 ... _q90 and
+#             <variable>_iqr (e.g. S2_B12_q50, S1_VH_asc_q50, CLIM_ETa_iqr). No time series is
+#             read; data.timeseries is null and temporal.enabled is false in the main config.
+#   compute - they are computed here from data.timeseries, as ts_<variable>_p<percentile> columns
+#             plus ts_n_obs; quantiles, variables and exclude below apply only then.
 timeseries_percentiles:
+  source: static
   quantiles: [10, 25, 50, 75, 90]
   # null summarises every numeric column of the time-series file.
   variables: null
   # Acquisition geometry describes the satellite rather than the soil.
   exclude: [S2_SZA, S1_asc_angle, S1_desc_angle]
+
+# Column-name prefixes never used as inputs, whatever the source above: acquisition geometry - the
+# Sentinel-2 sun zenith angle and the Sentinel-1 incidence angle - describes the satellite, not the
+# soil. A prefix catches every column starting with it (S2_SZA_q50, S1_angle_asc_iqr, ...).
+exclude_inputs: [S2_SZA, S1_angle]
 
 # The FAO calcareousness classes: slightly (< 2 %), moderately (2-10 %), strongly (10-25 %) and
 # extremely (>= 25 %) calcareous. A value on an edge belongs to the class above it, as in the paper
@@ -105,11 +118,12 @@ carbonate:
   labels: ["<2", "2-10", "10-25", ">=25"]
 
 # When each point was sampled, for the pre-flight region x year table. `column` holds a date (its
-# year is taken) or a year. Neither data file has one, so it is read from the soil analysis table
-# and joined by point id; a point listed there more than once (one row per depth) keeps its first.
+# year is taken) or a year. Neither data file has one, so the table is skipped. To have it, name a
+# column here, and in `file` a table holding it, joined by point id (e.g. column: date,
+# file: Morocco_soil_analysis_filtered_uuid_roadsafe.csv).
 sample_year:
-  column: date
-  file: Morocco_soil_analysis_filtered_uuid_roadsafe.csv
+  column: null
+  file: null
 
 # The pre-flight diagnostics: python experiments/a1/preflight.py --config configs/a1/a1.yml
 preflight:

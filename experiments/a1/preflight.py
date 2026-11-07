@@ -75,6 +75,8 @@ def main(argv: list[str] | None = None) -> PreflightResult:
         print(f"  skipped {section}: {reason}")
     if not result.small_cells.empty:
         print(f"  {len(result.small_cells)} region x carbonate cell(s) are under the threshold.")
+    if result.unassigned:
+        print(f"  {len(result.unassigned)} input(s) in no covariate group (see {result.out_dir}/inputs.csv).")
     if result.overfit:
         print(f"  earlier predictions flagged as leaky: {', '.join(result.overfit)}")
     return result

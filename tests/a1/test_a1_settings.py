@@ -190,10 +190,8 @@ def test_the_real_settings_read_the_baseline_columns_as_the_earlier_predictions(
         "caco3_pct_total": "caco3_pct_total_baseline",
         "c_e_c_meq_100g": "c_e_c_meq_100g_baseline",
     }
-    assert (settings.sample_year.column, settings.sample_year.file) == (
-        "date",
-        "Morocco_soil_analysis_filtered_uuid_roadsafe.csv",
-    )
+    # The current data has no sampling date, so the region x year table is off.
+    assert (settings.sample_year.column, settings.sample_year.file) == (None, None)
 
 
 def test_fewer_than_two_inner_folds_is_refused(main_config):

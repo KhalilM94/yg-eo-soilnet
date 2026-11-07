@@ -17,15 +17,21 @@ monthly time series it reuses, with what A1 needs and the ordinary demo lacks:
   that are deliberately **leaky**: much closer to the truth on the training points of the saved
   split than on the others, as if the model had been fitted on them. They are there so the
   pre-flight check that looks for exactly that has something to find.
+- **a second static file, ``static_with_percentiles.csv``**, laid out like the real data: the
+  time-series percentiles already computed, as ``<variable>_q10`` ... ``_q90`` and
+  ``<variable>_iqr`` columns (plus Sentinel-1 ones named polarisation first, ``S1_VH_asc_q50``, and
+  the acquisition-geometry columns ``S2_SZA_*`` and ``S1_angle_asc_*`` A1 must leave out), a few
+  land-management indicators, the lab values and the coordinates - everything in one file, read by
+  ``configs/a1/a1_demo_static.yml`` with no time series.
 - **the split** those predictions leak through, saved as ``split_assignments.parquet`` in the same
   form as a run's ``data_splits/split_assignments.parquet``.
 
 The region is written to both ``static.csv`` and ``targets.csv``: A1 reads it from either, and a
 ``split.group`` strategy that groups by it (``ColumnGroupStrategy``) needs it in the static file.
 
-Nothing in it is a real measurement. Five files are written to ``experiments/a1/demo_data/``:
-``static.csv``, ``targets.csv``, ``timeseries.csv``, ``regions.geojson`` and
-``split_assignments.parquet``. Run it from the repository root::
+Nothing in it is a real measurement. Six files are written to ``experiments/a1/demo_data/``:
+``static.csv``, ``targets.csv``, ``timeseries.csv``, ``regions.geojson``,
+``split_assignments.parquet`` and ``static_with_percentiles.csv``. Run it from the repository root::
 
     pixi run -e core python experiments/a1/make_demo_data.py
     # or: python experiments/a1/make_demo_data.py --n-points 1200 --seed 0
@@ -241,6 +247,57 @@ def add_leaky_predictions(targets: pd.DataFrame, split: pd.DataFrame, rng: np.ra
     return targets
 
 
+#: The quantiles of the precomputed percentile columns, and their name suffixes.
+STATIC_QUANTILES = (10, 25, 50, 75, 90)
+#: Synthetic time-series variables the demo's own time series lacks, laid out as the real data names
+#: them: Sentinel-1 polarisation first, and two acquisition-geometry variables A1 must leave out.
+SYNTHETIC_VARIABLES = ("S1_VH_asc", "S1_VV_desc", "S1_VH/VV_asc", "S1_angle_asc", "S2_SZA")
+#: Land-management indicators, as in the real static file.
+MANAGEMENT_COLUMNS = ("CUE_mean", "NDVI_CV", "Tillage_Freq_asc")
+
+
+def static_with_percentiles(
+    static: pd.DataFrame, targets: pd.DataFrame, timeseries: pd.DataFrame, rng: np.random.Generator
+) -> pd.DataFrame:
+    """One static file holding everything, with the time-series percentiles already computed.
+
+    The layout of the real data: ``<variable>_q10`` ... ``_q90`` and ``<variable>_iqr`` (the 75th
+    minus the 25th percentile) for each variable of the demo time series, the synthetic
+    :data:`SYNTHETIC_VARIABLES`, the :data:`MANAGEMENT_COLUMNS`, the lab values and the coordinates.
+    """
+    from yg_eo_soilnet.a1.features import timeseries_percentiles
+
+    summary = timeseries_percentiles(
+        timeseries, point_id_column="uuid", quantiles=STATIC_QUANTILES, time_column="observation_date"
+    )
+    summary = summary.drop(columns=["ts_n_obs"]).reindex(static["uuid"])
+    columns = {}
+    variables = sorted({name[len("ts_") :].rsplit("_p", 1)[0] for name in summary.columns})
+    for variable in variables:
+        for quantile in STATIC_QUANTILES:
+            columns[f"{variable}_q{quantile}"] = summary[f"ts_{variable}_p{quantile}"].to_numpy()
+        columns[f"{variable}_iqr"] = columns[f"{variable}_q75"] - columns[f"{variable}_q25"]
+    n = len(static)
+    for variable in SYNTHETIC_VARIABLES:
+        centre = rng.normal(0.0, 1.0, n)
+        spread = rng.uniform(0.2, 1.0, n)
+        for quantile in STATIC_QUANTILES:
+            columns[f"{variable}_q{quantile}"] = centre + spread * (quantile - 50) / 40
+        columns[f"{variable}_iqr"] = spread * 50 / 40
+    for name in MANAGEMENT_COLUMNS:
+        columns[name] = rng.normal(0.0, 1.0, n)
+    labs = targets.set_index("uuid").reindex(static["uuid"])
+    lab_columns = ["lat", "lon", "organic_matter_g_kg", "clay_pct", "ph_water", "caco3_pct_total", "c_e_c_meq_100g"]
+    return pd.concat(
+        [
+            static.reset_index(drop=True).assign(region=labs["region"].to_numpy()),
+            pd.DataFrame(columns),
+            labs[lab_columns].reset_index(drop=True),
+        ],
+        axis=1,
+    )
+
+
 def main(argv: list[str] | None = None) -> Path:
     """Generate the A1 demo dataset and write its four files.
 
@@ -270,9 +327,13 @@ def main(argv: list[str] | None = None) -> Path:
     with open(args.out / "regions.geojson", "w") as handle:
         json.dump(region_polygons(), handle)
     split.to_parquet(args.out / "split_assignments.parquet", index=False)
+    static_with_percentiles(static, targets, timeseries, np.random.default_rng(args.seed + 1)).to_csv(
+        args.out / "static_with_percentiles.csv", index=False
+    )
     print(
         f"Wrote {len(static)} points and {len(timeseries)} monthly observations to {args.out}/ "
-        "(static.csv, targets.csv, timeseries.csv, regions.geojson, split_assignments.parquet)."
+        "(static.csv, targets.csv, timeseries.csv, regions.geojson, split_assignments.parquet, "
+        "static_with_percentiles.csv)."
     )
     return args.out
 

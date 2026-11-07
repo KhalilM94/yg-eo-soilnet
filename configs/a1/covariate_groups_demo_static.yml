@@ -1,0 +1,21 @@
+# The covariate groups of the A1 static demo (configs/a1/a1_demo_static.yml), named as the real data
+# names its columns: Sentinel-1 polarisation first, the percentiles as <variable>_qNN / _iqr.
+
+satellite:
+  prefixes: [s2_, S2_, S1_VH_, S1_VV_, "S1_VH/VV_"]
+
+terrain:
+  columns: [elevation, slope, aspect, twi, landform_class]
+
+climate:
+  columns: [aridity_index]
+  prefixes: [CLIM_]
+
+legacy_soil:
+  columns: [clay_median_0_30cm]
+
+management:
+  columns: [CUE_mean, NDVI_CV, Tillage_Freq_asc]
+
+auxiliary:
+  columns: [caco3_pct_total, c_e_c_meq_100g]

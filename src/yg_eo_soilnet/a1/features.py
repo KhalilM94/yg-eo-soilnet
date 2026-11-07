@@ -9,6 +9,13 @@ A percentile does not care when or how often a point was observed, which is the 
 of most points are scattered over the years with gaps, and any summary that assumed one reading
 per month would misread them. A point with no time series at all keeps its row, with empty
 percentiles and ``ts_n_obs`` of 0; the models fill the gaps the way they fill any other.
+
+The percentiles either are computed here from the time-series file
+(``timeseries_percentiles.source: compute``) or are already columns of the static file, named
+``<variable>_q10`` ... ``_q90`` and ``<variable>_iqr`` (``source: static``), in which case no time
+series is read at all. Either way, the columns ``exclude_inputs`` names - acquisition geometry - are
+removed, and :func:`check_inputs` refuses a table where a lab value or an excluded column is an
+input.
 """
 
 from __future__ import annotations
@@ -21,7 +28,7 @@ from typing import Iterable, Mapping, Optional, Sequence
 
 import pandas as pd
 
-from yg_eo_soilnet.a1.settings import REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS, A1Settings
+from yg_eo_soilnet.a1.settings import PERCENTILES_STATIC, REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS, A1Settings
 
 #: The prefix of every time-series summary column, so they can never collide with a static one.
 PERCENTILE_PREFIX = "ts_"
@@ -32,6 +39,85 @@ N_OBS_COLUMN = "ts_n_obs"
 REGION_COLUMN = "a1_region"
 #: The table's sampling-year column, an integer year.
 SAMPLE_YEAR_COLUMN = "a1_sample_year"
+#: A percentile already in the static file (``timeseries_percentiles.source: static``):
+#: ``<variable>_q10`` ... ``_q90``, and the interquartile range ``<variable>_iqr``.
+PRECOMPUTED_PERCENTILE = re.compile(r"_(q\d{2}|iqr)$")
+#: The quantile columns, of which ``source: static`` needs at least one.
+PRECOMPUTED_QUANTILE = re.compile(r"_q\d{2}$")
+
+
+def excluded_inputs(columns: Iterable[str], prefixes: Iterable[str]) -> list[str]:
+    """The columns that start with one of ``prefixes``: the inputs ``exclude_inputs`` removes.
+
+    A computed percentile, ``ts_<variable>_p<percentile>``, is matched on its variable, so one prefix
+    catches a variable whichever way its percentiles were made.
+
+    Examples
+    --------
+    >>> excluded_inputs(["S2_SZA_q50", "S1_angle_asc_iqr", "ts_S2_SZA_p50", "S2_B12_q50"], ["S2_SZA", "S1_angle"])
+    ['S2_SZA_q50', 'S1_angle_asc_iqr', 'ts_S2_SZA_p50']
+    """
+    prefixes = tuple(prefixes)
+    if not prefixes:
+        return []
+    chosen = []
+    for column in columns:
+        name = str(column)
+        bare = name[len(PERCENTILE_PREFIX) :] if name.startswith(PERCENTILE_PREFIX) else name
+        if name.startswith(prefixes) or bare.startswith(prefixes):
+            chosen.append(column)
+    return chosen
+
+
+def lab_columns(settings: A1Settings, config) -> set:
+    """Every column that holds a lab value: never an input.
+
+    The main configuration's ``LABEL_COLUMNS`` and ``TARGET_COLUMNS``, the A1 target and stage-1
+    properties, and every column of the targets file but the point id and the coordinates (read from
+    the file's header only).
+    """
+    from yg_eo_soilnet.data_manager import DataManager
+
+    labs = {
+        *(getattr(config, "LABEL_COLUMNS", []) or []),
+        *(getattr(config, "TARGET_COLUMNS", []) or []),
+        settings.target,
+        *settings.auxiliary.targets,
+    }
+    manager = DataManager(config, logging.getLogger(__name__))
+    path = manager._resolve_data_path(manager._targets_source())
+    if path and os.path.isfile(path):
+        header = pd.read_csv(path, nrows=0).columns if path.endswith(".csv") else manager._load_targets().columns
+        keep_out = {manager.point_id_column(), *manager.coordinate_columns()}
+        labs |= {column for column in header if column not in keep_out}
+    return labs
+
+
+def check_inputs(table: "A1Table", settings: A1Settings, config) -> None:
+    """Refuse a table where a lab value, or a column ``exclude_inputs`` names, is a model input.
+
+    Run by :func:`build_table` and by the preflight checks: a lab value as an input would leak the
+    answer into the models, and an excluded column is one A1 decided describes the satellite rather
+    than the soil.
+
+    Raises
+    ------
+    ValueError
+        Naming the offending columns and what to change.
+    """
+    inputs = list(table.feature_columns)
+    excluded = excluded_inputs(inputs, settings.exclude_inputs)
+    if excluded:
+        raise ValueError(
+            f"{len(excluded)} input(s) start with an exclude_inputs prefix {list(settings.exclude_inputs)}, "
+            f"e.g. {excluded[:5]}; they should have been removed."
+        )
+    labs = sorted(set(inputs) & lab_columns(settings, config))
+    if labs:
+        raise ValueError(
+            f"{len(labs)} lab column(s) are model inputs: {labs[:10]}. List them in LABEL_COLUMNS of the "
+            "main configuration's data spec, so they are kept out of the inputs."
+        )
 
 
 def percentile_column(variable: str, quantile: float) -> str:
@@ -296,7 +382,23 @@ def _load_points(settings: A1Settings, config, logger: logging.Logger):
 
     static = manager.filter_schema(tabular, target_columns=[settings.target])
     static = static.drop(columns=sorted(not_inputs & set(static.columns)))
+    removed = excluded_inputs(static.columns, settings.exclude_inputs)
+    if removed:
+        static = static.drop(columns=removed)
+        logger.info(
+            f"exclude_inputs removed {len(removed)} column(s) starting with {list(settings.exclude_inputs)}, "
+            f"e.g. {removed[:3]}."
+        )
     categorical = [column for column in getattr(config, "CATEGORICAL_FEATURES", []) or [] if column in static]
+    precomputed: list[str] = []
+    if settings.percentiles.source == PERCENTILES_STATIC:
+        precomputed = [column for column in static.columns if PRECOMPUTED_PERCENTILE.search(str(column))]
+        if not any(PRECOMPUTED_QUANTILE.search(str(column)) for column in precomputed):
+            raise ValueError(
+                "timeseries_percentiles.source is static, but the static file has no <variable>_qNN column "
+                "(e.g. S2_B12_q50). Use source: compute with a time-series file, or the static file that holds them."
+            )
+        logger.info(f"{len(precomputed)} time-series percentile column(s) read from the static file.")
 
     lat_column, lon_column = dataset.lat_column, dataset.lon_column
     coordinates = [column for column in (lat_column, lon_column) if column in tabular.columns]
@@ -309,8 +411,8 @@ def _load_points(settings: A1Settings, config, logger: logging.Logger):
     )
     table = A1Table(
         frame=frame,
-        static_columns=tuple(static.columns),
-        percentile_columns=(),
+        static_columns=tuple(column for column in static.columns if column not in set(precomputed)),
+        percentile_columns=tuple(precomputed),
         categorical_columns=tuple(categorical),
         label_columns=tuple(needed_labels),
         lat_column=lat_column,
@@ -348,6 +450,10 @@ def build_table(settings: A1Settings, config=None, logger: Optional[logging.Logg
     logger = logger or logging.getLogger(__name__)
     config = config if config is not None else settings.load_config()
     points, dataset = _load_points(settings, config, logger)
+    if settings.percentiles.source == PERCENTILES_STATIC:
+        # The percentiles came with the static file: there is nothing to compute, no time series.
+        check_inputs(points, settings, config)
+        return points
 
     timeseries = dataset.timeseries
     if timeseries is None:
@@ -364,6 +470,10 @@ def build_table(settings: A1Settings, config=None, logger: Optional[logging.Logg
         exclude=settings.percentiles.exclude,
     )
     percentiles = percentiles.reindex(points.frame.index)
+    removed = excluded_inputs(percentiles.columns, settings.exclude_inputs)
+    if removed:
+        percentiles = percentiles.drop(columns=removed)
+        logger.info(f"exclude_inputs removed {len(removed)} time-series summary column(s), e.g. {removed[:3]}.")
     without = int(percentiles[N_OBS_COLUMN].isna().sum())
     percentiles[N_OBS_COLUMN] = percentiles[N_OBS_COLUMN].fillna(0).astype(int)
     if without:
@@ -376,7 +486,9 @@ def build_table(settings: A1Settings, config=None, logger: Optional[logging.Logg
     rest = points.frame.drop(columns=list(points.static_columns))
     frame = pd.concat([static, percentiles, rest], axis=1)
     logger.info(f"A1 table: {percentiles.shape[1]} time-series summary column(s) added.")
-    return replace(points, frame=frame, percentile_columns=tuple(percentiles.columns))
+    table = replace(points, frame=frame, percentile_columns=tuple(percentiles.columns))
+    check_inputs(table, settings, config)
+    return table
 
 
 def sample_years(values: pd.Series, logger: Optional[logging.Logger] = None) -> pd.Series:

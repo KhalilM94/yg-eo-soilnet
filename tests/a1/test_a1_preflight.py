@@ -18,6 +18,7 @@ from yg_eo_soilnet.a1.preflight import (
     PREDICTIONS_FILE,
     REGION_BY_CARBONATE_FILE,
     REGION_BY_YEAR_FILE,
+    INPUTS_FILE,
     REPORT_FILE,
     SMALL_CELLS_FILE,
     TOTAL,
@@ -54,6 +55,7 @@ def test_every_table_and_the_report_are_written(report):
         SMALL_CELLS_FILE,
         REGION_BY_YEAR_FILE,
         PREDICTIONS_FILE,
+        INPUTS_FILE,
         REPORT_FILE,
     }
     assert all(path.exists() for path in report.files)
