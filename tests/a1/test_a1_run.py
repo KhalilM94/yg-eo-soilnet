@@ -603,11 +603,36 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
         ["--config", str(demo_run["path"]), "--out", str(tmp_path), "--n-boot", "20", "--no-relief", "--no-mlflow"]
     )
     plt.close("all")
-    assert sorted(path.name for path in tmp_path.iterdir() if path.suffix != ".log") == sorted(
+    assert sorted(path.name for path in tmp_path.iterdir() if path.suffix in (".png", ".pdf")) == sorted(
         f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")
     )
-    # The module's run has random and logo plans only: figure 6 needs mixed plans and says so.
-    assert [name for name, figure in drawn.items() if is_message_figure(figure)] == ["fig6_mixed"]
+    assert (tmp_path / "captions.md").exists() and any((tmp_path / "data").glob("*.csv"))
+    # The module's run has random and logo plans only: figure 9 needs mixed plans and says so.
+    assert [name for name, figure in drawn.items() if is_message_figure(figure)] == ["fig09_mixed"]
+
+
+def test_the_figure_script_draws_only_the_figures_asked_for(demo_run, tmp_path):
+    import matplotlib.pyplot as plt
+
+    from experiments.a1.make_figures import main as figures_main
+
+    base = ["--config", str(demo_run["path"]), "--n-boot", "10", "--no-relief", "--no-mlflow"]
+    only = figures_main([*base, "--out", str(tmp_path / "only"), "--only", "fig06_obs_pred,fig05_spatial"])
+    skipped = figures_main(
+        [
+            *base,
+            "--out",
+            str(tmp_path / "skip"),
+            "--only",
+            "fig05_spatial,fig06_obs_pred,fig10_basins",
+            "--skip",
+            "fig06_obs_pred",
+        ]
+    )
+    plt.close("all")
+    assert list(only) == ["fig05_spatial", "fig06_obs_pred"]
+    assert sorted(path.stem for path in (tmp_path / "only").glob("*.png")) == ["fig05_spatial", "fig06_obs_pred"]
+    assert list(skipped) == ["fig05_spatial", "fig10_basins"]
 
 
 def test_spatial_plans_of_each_block_size_carry_it_on_every_row(demo_run, tmp_path):

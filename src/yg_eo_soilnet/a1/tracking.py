@@ -111,26 +111,35 @@ def metric_name(*parts) -> str:
 
 
 def log_figures(figures: dict, folder) -> None:
-    """Log each figure under ``figures/`` of the active run: the PDF as a file, the PNG as a figure.
+    """Log each figure under ``figures/`` of the active run, with the tables and captions behind them.
 
-    ``mlflow.log_figure`` is what makes the PNG preview in the MLflow browser; it is saved with the
-    same resolution and trimming as the PNG on disk, so the two are the same image.
+    The PDF goes as a file and the PNG as a figure: ``mlflow.log_figure`` is what makes the PNG
+    preview in the MLflow browser, and it is saved with the same resolution and trimming as the PNG
+    on disk, so the two are the same image. The figures' tables (``figures/data/*.csv`` and the
+    ``.tex`` tables) and ``captions.md`` are logged beside them.
 
     Parameters
     ----------
     figures : dict
-        File name (``fig1_points_map``) to matplotlib figure, as :func:`~yg_eo_soilnet.a1.figures.render_all`
+        File name (``fig05_spatial``) to matplotlib figure, as :func:`~yg_eo_soilnet.a1.figures.render_all`
         returns them.
     folder : str or pathlib.Path
         Where :func:`~yg_eo_soilnet.a1.figures.render_all` saved them.
     """
     from yg_eo_soilnet.plot_style import SAVE_DPI
 
+    folder = Path(folder)
     for name, figure in figures.items():
-        pdf = Path(folder) / f"{name}.pdf"
+        pdf = folder / f"{name}.pdf"
         if pdf.exists():
             mlflow.log_artifact(str(pdf), "figures")
         mlflow.log_figure(figure, f"figures/{name}.png", save_kwargs={"dpi": SAVE_DPI, "bbox_inches": "tight"})
+    data = folder / "data"
+    for path in sorted(data.glob("*.csv")) + sorted(data.glob("*.tex")) if data.is_dir() else []:
+        mlflow.log_artifact(str(path), "figures/data")
+    captions = folder / "captions.md"
+    if captions.exists():
+        mlflow.log_artifact(str(captions), "figures")
 
 
 def record_parent(run_dir, manifest: dict, run: mlflow.ActiveRun) -> None:

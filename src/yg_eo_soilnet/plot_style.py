@@ -49,21 +49,35 @@ MODEL_COLORS = [
 ]
 
 # --- Paper A1 ---------------------------------------------------------------
-# The four FAO carbonate classes, light (< 2 % CaCO3) to dark (>= 25 %): the carbonate ramp, one
-# step per class, so "more carbonate" always reads as "darker" wherever a class is drawn.
+# The four FAO carbonate classes, light sand (< 2 % CaCO3) to dark brown (>= 25 %): the brown arm
+# of ColorBrewer's BrBG, an A1-only ramp - CARBONATE_RAMP, which other figures use, is untouched.
+# One hue, lightness falling step by step, so "more carbonate" reads as "darker" also to a reader
+# with a colour-vision deficiency (adjacent steps checked: dE >= 13 under protan, deutan, tritan).
+# The lightest step is pale on white, so markers drawn in it get a thin dark edge.
 A1_CARBONATE_CLASSES = ("<2", "2-10", "10-25", ">=25")
-A1_CARBONATE_COLORS = dict(zip(A1_CARBONATE_CLASSES, CARBONATE_RAMP))
+A1_CARBONATE_COLORS = dict(zip(A1_CARBONATE_CLASSES, ("#dfc27d", "#bf812d", "#8c510a", "#543005")))
 
-# One fixed colour per A1 model, the same in every figure. The plain global model is the grey
-# baseline; the two that read the predicted carbonate share the project pair; the diagnostic upper
-# bound (per class by MEASURED carbonate) takes the darkest carbonate step; the within-region model
-# the SOM brown.
+# One fixed colour per A1 model, the same in every figure, paired with a fixed marker
+# (yg_eo_soilnet.a1.figures.style), so no model is told apart by colour alone. The three main-text
+# models are the first three slots of the validated categorical palette (blue, orange, aqua); the
+# supplementary global model with predicted CaCO3/CEC is a neutral dark grey, the within-basin
+# model yellow. Checked together (blue, orange, aqua, grey): every pair dE >= 9 under colour-vision
+# deficiency, >= 21 with full colour vision.
 A1_MODEL_COLORS = {
-    "global": MUTED,
-    "global_aux": PROJECT_COLORS["Al Moutmir"],
-    "per_class_measured": CARBONATE_RAMP[-1],
-    "per_class_predicted": PROJECT_COLORS["Fertimap"],
-    "local": SOM_RAMP[2],
+    "global": "#2a78d6",
+    "per_class_measured": "#eb6834",
+    "per_class_predicted": "#1baf7a",
+    "global_aux": "#52514e",
+    "local": "#eda100",
+}
+# The covariate groups, in this fixed order, from the same categorical palette.
+A1_GROUP_COLORS = {
+    "satellite": "#2a78d6",
+    "climate": "#eb6834",
+    "management": "#1baf7a",
+    "terrain": "#eda100",
+    "legacy_soil": "#e87ba4",
+    "auxiliary": "#008300",
 }
 
 # --- geometry ---------------------------------------------------------------

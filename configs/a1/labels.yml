@@ -1,0 +1,158 @@
+# The names the A1 figures show instead of code names. Edit freely: a figure reads this file each
+# time it is drawn (yg_eo_soilnet.a1.figures.labels.pretty_name).
+#
+# How a column name is turned into a label, first match wins:
+#   1. an exact name below (models, groups, columns);
+#   2. a stage-1 prediction, a1_pred_<property> -> "Predicted " + the property's label;
+#   3. a bare-soil band, s2_<band>_barest[_sd] -> "Bare-soil " + the band's label (+ ", spread");
+#   4. a time-series percentile, <variable>_<suffix> or ts_<variable>_p<NN> -> the variable's
+#      label + ", " + the suffix's label ("S2 B12 (SWIR2), 75th pct").
+# A name none of these matches is shown as it is, and logged once.
+
+models:
+  global: Global
+  global_aux: Global + predicted CaCO₃/CEC
+  per_class_measured: Per class, measured CaCO₃ (upper bound)
+  per_class_predicted: Per class, predicted CaCO₃
+  local: Local (basin's own points)
+
+# Split kinds. {km} is replaced by the block size in kilometres.
+kinds:
+  random: Random
+  spatial_kfold: "{km} km blocks"
+  spatial_kfold_kmeans: Spatial clusters
+  logo: Leave one basin out
+  mixed: Other basins + local samples
+  control: Local samples only
+
+groups:
+  satellite: Satellite
+  climate: Climate
+  management: Management
+  terrain: Terrain
+  legacy_soil: Legacy soil maps
+  auxiliary: Predicted CaCO₃/CEC
+  combined: All inputs
+  other: Other inputs
+
+classes:
+  "<2": "< 2 %"
+  "2-10": "2–10 %"
+  "10-25": "10–25 %"
+  ">=25": "≥ 25 %"
+
+# Whole column names.
+columns:
+  organic_matter_g_kg: SOM
+  caco3_pct_total: CaCO₃
+  c_e_c_meq_100g: CEC
+  elevation: Elevation
+  slope: Slope
+  aspect: Aspect
+  twi: Wetness index (TWI)
+  landform_class: Landform
+  aridity_index: Aridity index
+  texture_20cm: Soil-map texture
+  bd_median_0_30cm: Soil-map bulk density
+  clay_median_0_30cm: Soil-map clay
+  ph_median_0_30cm: Soil-map pH
+  sand_median_0_30cm: Soil-map sand
+  soc_median_0_30cm: Soil-map SOC
+  som_median_0_30cm: Soil-map SOM
+  swc_median_0_30cm: Soil-map water content
+  ts_n_obs: Number of satellite readings
+  CUE_mean: Carbon-use efficiency (mean)
+  CUE_cv: Carbon-use efficiency (variability)
+  NPP_trend_slope: NPP trend
+  CUE_trend_slope: Carbon-use efficiency trend
+  ClimDef_trend_slope: Climatic deficit trend
+  LST_trend_slope: Land surface temperature trend
+  SM_trend_slope: Soil moisture trend
+  ETa_trend_slope: Actual ET trend
+  Max_VV_Spike_asc: Largest VV spike (ascending)
+  Max_VV_Spike_desc: Largest VV spike (descending)
+  Tillage_Freq_asc: Tillage frequency (ascending)
+  Tillage_Freq_desc: Tillage frequency (descending)
+  VH_VV_ratio_asc_mean: VH/VV ratio, mean (ascending)
+  VH_VV_ratio_desc_mean: VH/VV ratio, mean (descending)
+  VV_variability_total_asc: VV variability (ascending)
+  VV_variability_total_desc: VV variability (descending)
+  NDVI_CV: NDVI variability
+
+# Time-series variables: the part of a percentile column before its suffix.
+variables:
+  S2_B2: S2 B2 (blue)
+  S2_B3: S2 B3 (green)
+  S2_B4: S2 B4 (red)
+  S2_B5: S2 B5 (red edge 1)
+  S2_B6: S2 B6 (red edge 2)
+  S2_B7: S2 B7 (red edge 3)
+  S2_B8: S2 B8 (NIR)
+  S2_B8A: S2 B8A (narrow NIR)
+  S2_B11: S2 B11 (SWIR1)
+  S2_B12: S2 B12 (SWIR2)
+  S2_NDVI: S2 NDVI
+  S2_SZA: Sun zenith angle
+  S1_VV_asc: S1 VV (ascending)
+  S1_VV_desc: S1 VV (descending)
+  S1_VH_asc: S1 VH (ascending)
+  S1_VH_desc: S1 VH (descending)
+  S1_VH/VV_asc: S1 VH/VV (ascending)
+  S1_VH/VV_desc: S1 VH/VV (descending)
+  S1_angle_asc: S1 incidence angle (ascending)
+  S1_angle_desc: S1 incidence angle (descending)
+  AG_NPP_yearly: NPP (yearly)
+  AG_GPP_monthly: GPP (monthly)
+  AG_NDVI: NDVI
+  SOIL_SM: Soil moisture
+  SOIL_NBR2: NBR2
+  SOIL_SOCI: Soil organic carbon index
+  CLIM_Clim_water_deficit: Climatic water deficit
+  CLIM_ETa: Actual ET
+  CLIM_LST_Celsius: Land surface temperature
+  CLIM_LST_celsius: Land surface temperature
+  CLIM_precip_mm: Precipitation
+
+# Percentile suffixes.
+suffixes:
+  q10: 10th pct
+  q25: 25th pct
+  q50: median
+  q75: 75th pct
+  q90: 90th pct
+  iqr: IQR
+
+# Sentinel-2 bands, for the bare-soil reflectance and the spectra.
+bands:
+  b1: B1 (coastal)
+  b2: B2 (blue)
+  b3: B3 (green)
+  b4: B4 (red)
+  b5: B5 (red edge 1)
+  b6: B6 (red edge 2)
+  b7: B7 (red edge 3)
+  b8: B8 (NIR)
+  b8a: B8A (narrow NIR)
+  b9: B9 (water vapour)
+  b11: B11 (SWIR1)
+  b12: B12 (SWIR2)
+
+# Figure 3 groups its rows by source. A variable (for a percentile column, the part before its
+# suffix, e.g. S2_B12) belongs to the first source listing it: an entry ending in "_" matches every
+# variable starting with it, any other entry that variable exactly. Variables of no source are left
+# out of figure 3.
+sources:
+  - name: Bare-soil SWIR
+    prefixes: [s2_b11_barest, s2_b12_barest]
+  - name: Sentinel-2 SWIR
+    prefixes: [S2_B11, S2_B12]
+  - name: Productivity
+    prefixes: [AG_NPP_yearly, AG_GPP_monthly]
+  - name: Soil moisture
+    prefixes: [SOIL_SM]
+  - name: Climate
+    prefixes: [CLIM_, aridity_index]
+  - name: Terrain
+    prefixes: [elevation, slope, aspect, twi]
+  - name: Radar
+    prefixes: [S1_]

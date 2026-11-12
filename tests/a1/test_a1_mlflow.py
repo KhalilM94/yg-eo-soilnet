@@ -123,10 +123,14 @@ def test_the_parent_holds_every_evaluation_table(pipeline):
     assert _artifacts(pipeline, run_id, "evaluation") == sorted([*TABLES, REGION_NAMES_FILE])
 
 
-def test_the_parent_holds_the_eight_figures_as_png_and_pdf(pipeline):
+def test_the_parent_holds_every_figure_as_png_and_pdf_with_its_data_and_captions(pipeline):
     run_id = _manifest(pipeline)["mlflow"]["run_id"]
-    expected = sorted(f"{name}{suffix}" for name in FIGURE_NAMES for suffix in (".png", ".pdf"))
+    expected = sorted(
+        [*(f"{name}{suffix}" for name in FIGURE_NAMES for suffix in (".png", ".pdf")), "captions.md", "data"]
+    )
     assert _artifacts(pipeline, run_id, "figures") == expected
+    data = _artifacts(pipeline, run_id, "figures/data")
+    assert "data/fig05_spatial_scores.csv" in data and "data/table_basins.tex" in data
 
 
 def test_the_headline_metrics_are_named_as_documented(pipeline):
