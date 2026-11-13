@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> RunResult:
         "--workers",
         type=int,
         default=1,
-        help="Plans (and seeds) fitted side by side in this many processes; each estimator gets cpu_count // workers threads.",
+        help="Plans (and seeds) fitted side by side in this many processes; each estimator gets physical cores // workers threads.",
     )
     parser.add_argument(
         "--device",

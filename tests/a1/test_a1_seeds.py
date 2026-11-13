@@ -454,3 +454,27 @@ def test_the_xgboost_configuration_loads():
     assert settings.som_models == SOM_MODELS
     assert settings.output_dir == "results/a1_xgb"
     assert load_settings(str(A1_CONFIGS / "a1_xgb.yml")).seed == 42
+
+
+def test_each_worker_gets_its_share_of_the_physical_cores(monkeypatch):
+    import psutil
+
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: 12 if logical else 6)
+    assert runner.physical_cores() == 6
+    assert [runner.threads_per_worker(n) for n in (1, 2, 4, 8)] == [6, 3, 1, 1]
+    monkeypatch.setattr(psutil, "cpu_count", lambda logical=True: None)  # cannot tell: the logical count
+    monkeypatch.setattr(runner.os, "cpu_count", lambda: 4)
+    assert runner.threads_per_worker(1) == 4
+
+
+def test_the_faster_mixed_configuration_bins_inputs_into_64_values_in_both_stages():
+    from yg_eo_soilnet.a1.pipelines import build_stage_pipeline, final_estimator
+
+    settings = load_settings(str(A1_CONFIGS / "a1_mixed_fast.yml"))
+    assert settings.output_dir == "results/a1_mixed_fast"
+    assert settings.stage1.estimator == settings.stage2.estimator == "XGBoost"
+    config = settings.load_config()
+    for stage in (settings.stage1, settings.stage2):
+        pipeline, _ = build_stage_pipeline(settings, config, ["x"], stage=stage)
+        assert final_estimator(pipeline).get_params()["max_bin"] == 64
+    assert settings.stage2.params["model__max_depth"] == [3, 4, 5, 6, 7]  # the grid is unchanged

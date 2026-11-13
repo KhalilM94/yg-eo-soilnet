@@ -16,7 +16,7 @@ model fits on the same plans):
    ``local`` are also fitted on each covariate group alone. Both need ``global_aux`` among the models.
 
 Plans (and seeds) can run side by side in separate processes (``workers``); each process then
-lets XGBoost use ``cpu_count // workers`` threads. Every file is still written whole or not at all,
+lets XGBoost use ``physical cores // workers`` threads (:func:`threads_per_worker`). Every file is still written whole or not at all,
 and the predictions are the same as one process at a time gives.
 
 Everything lands in one run folder, ``<output_dir>/runs/<run name>/``. A file that already exists is
@@ -211,7 +211,7 @@ def run_plans(
         on top of ``kinds``.
     workers : int, default 1
         Plans (and seeds) fitted side by side, each in its own process, with
-        ``max(1, cpu_count // workers)`` threads for each estimator.
+        :func:`threads_per_worker` threads for each estimator.
     device : str, optional
         ``cpu`` or ``cuda``: the processor of both stages, replacing the settings'. Recorded in the
         settings hash.
@@ -254,7 +254,7 @@ def run_plans(
     if device is not None:
         overrides["device"] = device
     workers = max(1, int(workers))
-    a1 = replace(a1, settings=replace(a1.settings, device=device, n_jobs=max(1, (os.cpu_count() or 1) // workers)))
+    a1 = replace(a1, settings=replace(a1.settings, device=device, n_jobs=threads_per_worker(workers)))
     settings = a1.settings
     config = settings.load_config()
     run_seeds = _seeds_to_run(settings, seeds)
@@ -386,6 +386,27 @@ def run_plans(
         f"in {format_duration(time.monotonic() - started_run)}; {run_dir}"
     )
     return result
+
+
+def physical_cores() -> int:
+    """The processor's physical cores; the logical ones (``os.cpu_count``) when they cannot be told apart."""
+    try:
+        import psutil
+
+        cores = psutil.cpu_count(logical=False)
+    except ImportError:
+        cores = None
+    return int(cores or os.cpu_count() or 1)
+
+
+def threads_per_worker(workers: int) -> int:
+    """The threads each estimator gets with ``workers`` processes: ``max(1, physical cores // workers)``.
+
+    Physical cores, not logical ones: XGBoost's tree building gains nothing from a core's second
+    hardware thread, and slows down when it runs on them (one fit on 4,644 points of the real data:
+    7.8 s with 12 threads on a 6-core processor, 4.0 s with 6). The thread count changes no prediction.
+    """
+    return max(1, physical_cores() // max(1, int(workers)))
 
 
 def _seeds_to_run(settings, seeds: Optional[Iterable[int]]) -> list[int]:
