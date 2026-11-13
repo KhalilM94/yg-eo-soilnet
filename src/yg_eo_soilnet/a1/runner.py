@@ -1,33 +1,43 @@
 """Run the A1 experiments over the plan index, resumably, writing one table per plan and model.
 
-For each plan of ``index.csv`` (written by ``experiments/a1/make_plans.py``):
+For each plan of ``index.csv`` (written by ``experiments/a1/make_plans.py``), and for each seed of
+the settings (``seeds``; the plans themselves come from the first alone, so every seed repeats the
+model fits on the same plans):
 
 1. stage 1 predicts CaCO3 and CEC for every point (:func:`~yg_eo_soilnet.a1.auxiliary.predict_auxiliary`);
-   its audit table is saved as ``stage1/<plan_id>.parquet``;
+   its audit table is saved as ``stage1/<plan_id>/seed_<seed>.parquet``. A run whose SOM models
+   (``stage2.models``) never read those predictions - ``global`` alone - skips it, and only cuts
+   the folds stage 2 tunes through;
 2. each stage-2 model (:mod:`yg_eo_soilnet.a1.stage2`) is fitted and its test predictions (and
-   validation predictions, when the plans have a validation set; by default they do not) saved as ``predictions/<plan_id>/<model>__<covariate group>.parquet``;
+   validation predictions, when the plans have a validation set; by default they do not) saved as
+   ``predictions/<plan_id>/seed_<seed>/<model>__<covariate group>.parquet`` (:mod:`yg_eo_soilnet.a1.layout`);
 3. for ``logo`` plans, a within-region ``local`` model on every covariate is scored inside the
    held-out region - the reference of the transfer loss; with ``groups``, ``global_aux`` and
-   ``local`` are also fitted on each covariate group alone.
+   ``local`` are also fitted on each covariate group alone. Both need ``global_aux`` among the models.
+
+Plans (and seeds) can run side by side in separate processes (``workers``); each process then
+lets XGBoost use ``cpu_count // workers`` threads. Every file is still written whole or not at all,
+and the predictions are the same as one process at a time gives.
 
 Everything lands in one run folder, ``<output_dir>/runs/<run name>/``. A file that already exists is
 not computed again, so an interrupted run carries on where it stopped. Files are written under a
 temporary name and renamed when complete, so a run killed mid-write never leaves a half-file that
 looks finished. The folder's ``manifest.json`` records what the outputs were made from - a hash of
-the settings and of every plan - and a run whose settings or plans differ refuses to add to it,
-since its files would silently mix two experiments; ``restart`` clears it instead. The same goes
-for a folder written in an older file format (:data:`PREDICTION_FORMAT`).
+the settings (but for the list of seeds, so a seed can be added to a run) and of every plan, the
+seeds done per plan and the processor of each stage - and a run whose settings or plans differ
+refuses to add to it, since its files would silently mix two experiments; ``restart`` clears it
+instead. The same goes for a folder written in an older file format (:data:`PREDICTION_FORMAT`).
 
 Every row of a predictions file carries what the evaluation needs without the data or the settings
 (:mod:`yg_eo_soilnet.a1.evaluation`): the plan's held-out region, share and repeat, and the point's
 position, from which the spatial blocks of the bootstrap are drawn.
 
-Each ``logo`` plan also gets ``dissimilarity/<plan_id>.parquet``: how far each point lies from the
+Each ``logo`` plan also gets, from its first seed, ``dissimilarity/<plan_id>.parquet``: how far each point lies from the
 plan's training points, in the inputs of ``global_aux`` weighted by its feature importances
 (:mod:`yg_eo_soilnet.a1.dissimilarity`), and the run ends with ``dissimilarity_summary.csv``, one
 row per held-out region.
 
-Each plan that computed something gets an MLflow sub-run with its scores; the run's parent records
+Each plan and seed that computed something gets an MLflow sub-run with its scores and devices; the run's parent records
 the git commit and the settings, and at the end a ``metrics.csv`` of every plan, model, group and
 split - recomputed from all the prediction files, resumed ones included.
 """
@@ -35,6 +45,7 @@ split - recomputed from all the prediction files, resumed ones included.
 from __future__ import annotations
 
 import datetime
+import fnmatch
 import hashlib
 import json
 import logging
@@ -45,14 +56,17 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
+import yaml
+
 import numpy as np
 import pandas as pd
 
-from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, predict_auxiliary
+from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, folds_only, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
 from yg_eo_soilnet.a1.logs import format_duration
 from yg_eo_soilnet.a1.features import build_table
+from yg_eo_soilnet.a1.layout import prediction_dir, prediction_paths, stage1_path
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED
 from yg_eo_soilnet.a1.settings import dev_mode_settings
 from yg_eo_soilnet.a1.stage2 import (
@@ -61,9 +75,11 @@ from yg_eo_soilnet.a1.stage2 import (
     ROLE_MODEL,
     GLOBAL_AUX,
     LOCAL,
+    GLOBAL,
     MODELS,
     ModelResult,
     build_context,
+    needs_stage1,
     run_group,
     local_folds,
     run_local,
@@ -80,6 +96,7 @@ PREDICTION_COLUMNS = (
     "fraction",
     "repeat",
     "block_size_m",
+    "seed",
     "point_id",
     "split",
     "region",
@@ -96,10 +113,14 @@ PREDICTION_COLUMNS = (
     "local_block",
     "model_role",
     "tuned_params",
+    "device_stage1",
+    "device_stage2",
 )
+#: The columns format 5 added; a format-4 file (one seed, devices not recorded) is read without them.
+SEED_DEVICE_COLUMNS = ("seed", "device_stage1", "device_stage2")
 #: The version of that layout, recorded in the manifest. A run folder written in another version is
 #: refused like one made from other settings: its old files would sit beside new ones.
-PREDICTION_FORMAT = 4
+PREDICTION_FORMAT = 5
 MANIFEST_FILE = "manifest.json"
 #: The run's log, appended to by every run_a1.py invocation on the folder; kept by ``restart``.
 LOG_FILE = "run_a1.log"
@@ -150,10 +171,14 @@ def run_plans(
     restart: bool = False,
     tracking: bool = True,
     dev_mode: bool = False,
+    seeds: Optional[Iterable[int]] = None,
+    only: Optional[Iterable[str]] = None,
+    workers: int = 1,
+    device: Optional[str] = None,
     log_file: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
 ) -> RunResult:
-    """Run every plan of the index (or of the kinds asked for), skipping what is already done.
+    """Run every plan of the index (or of the kinds asked for) for every seed, skipping what is already done.
 
     Parameters
     ----------
@@ -168,7 +193,8 @@ def run_plans(
         with it, as in ``make_plans.py``: a mixed score means little without them.
     groups : bool, default False
         Also fit ``global_aux`` and (for ``logo`` plans) ``local`` on each covariate group alone.
-        The ``local`` model on every covariate is fitted for ``logo`` plans either way.
+        The ``local`` model on every covariate is fitted for ``logo`` plans either way (when
+        ``global_aux`` is among ``stage2.models``).
     restart : bool, default False
         Clear a run folder made from other settings or plans, instead of refusing to add to it.
     tracking : bool, default True
@@ -178,12 +204,24 @@ def run_plans(
         (:func:`~yg_eo_soilnet.a1.settings.dev_mode_settings`): it shows the pipeline works, and its
         scores mean nothing. Recorded in the run folder's settings hash, so a dev-mode run never
         resumes into a full one.
+    seeds : iterable of int, optional
+        Only these of the settings' seeds; every one unless given.
+    only : iterable of str, optional
+        Only the plans whose ``plan_id`` matches one of these shell patterns (``kfold_10km_*``),
+        on top of ``kinds``.
+    workers : int, default 1
+        Plans (and seeds) fitted side by side, each in its own process, with
+        ``max(1, cpu_count // workers)`` threads for each estimator.
+    device : str, optional
+        ``cpu`` or ``cuda``: the processor of both stages, replacing the settings'. Recorded in the
+        settings hash.
     log_file : pathlib.Path, optional
         The run's log (``run_a1.py`` writes ``run_a1.log`` in the run folder); added to the MLflow
         parent run at the end, failed or not.
     logger : logging.Logger, optional
         Where the progress lines go: one when each plan starts and ends (with an estimate of the
-        time left), one for stage 1 and one for each model and covariate group.
+        time left), one for stage 1 and one for each model and covariate group. With several
+        workers, one line per finished plan and seed.
 
     Returns
     -------
@@ -193,20 +231,42 @@ def run_plans(
     ------
     FileNotFoundError
         If there is no plan index.
+    ValueError
+        If ``seeds`` names a seed the settings do not list, or ``only`` matches no plan.
     RunMismatch
         If the run folder was made from other settings or plans and ``restart`` is not set.
+    DeviceUnavailable
+        If a stage asks for the graphics card and XGBoost cannot use it
+        (:func:`~yg_eo_soilnet.a1.devices.check_cuda`).
     """
+    from yg_eo_soilnet.a1.devices import check_cuda, is_cuda
+    from yg_eo_soilnet.a1.pipelines import stage_device
+
     logger = logger or logging.getLogger(__name__)
-    overrides = None
+    overrides: dict = {}
     if dev_mode:
         a1 = replace(a1, settings=dev_mode_settings(a1.settings))
-        overrides = {"dev_mode": True}
+        overrides["dev_mode"] = True
         logger.warning(
             "Dev mode: XGBoost in both stages, 50 trees, no tuning, 2 inner folds. This run shows the pipeline "
             "works; its scores mean nothing."
         )
+    if device is not None:
+        overrides["device"] = device
+    workers = max(1, int(workers))
+    a1 = replace(a1, settings=replace(a1.settings, device=device, n_jobs=max(1, (os.cpu_count() or 1) // workers)))
     settings = a1.settings
     config = settings.load_config()
+    run_seeds = _seeds_to_run(settings, seeds)
+    devices = {
+        "stage1": stage_device(settings, config, settings.stage1) if needs_stage1(settings.som_models) else "none",
+        "stage2": stage_device(settings, config, settings.stage2),
+    }
+    for stage, name in devices.items():
+        if is_cuda(name):
+            check_cuda(name)
+            logger.info(f"{stage} fits on {name}: XGBoost fitted a test model there.")
+
     plans_path = Path(plans_dir or Path(settings.output_dir) / "plans")
     index_path = plans_path / INDEX_FILE
     if not index_path.exists():
@@ -227,48 +287,74 @@ def run_plans(
         if MIXED in kinds and CONTROL not in kinds:
             kinds.append(CONTROL)
         index = index[index["kind"].isin(kinds)]
+    if only is not None:
+        index = select_plans(index, only)
     run_dir = Path(settings.output_dir) / "runs" / run_name
     manifest = _check_manifest(
-        a1, config, plans_path, index, run_dir, restart=restart, overrides=overrides, logger=logger
+        a1, config, plans_path, index, run_dir, restart=restart, overrides=overrides or None, logger=logger
     )
+    manifest["seeds"] = list(settings.seeds)
+    manifest["devices"] = devices
+    manifest["models"] = list(settings.som_models)
+    manifest.setdefault("seeds_done", {})
+    _write_json(run_dir / MANIFEST_FILE, manifest)
 
     table = build_table(settings, config, logger)
     resolved = a1.resolve_groups(table, logger=logger)
     result = RunResult(run_dir=run_dir)
+    if groups and GLOBAL_AUX not in settings.som_models:
+        result.notes.append(f"--groups fits {GLOBAL_AUX} and local per group; {GLOBAL_AUX} is not in stage2.models.")
 
     parent = (
-        _start_parent(a1, config, run_name, kinds, groups, dev_mode, manifest=manifest, run_dir=run_dir)
+        _start_parent(
+            a1, config, run_name, kinds, groups, dev_mode, manifest=manifest, run_dir=run_dir, devices=devices
+        )
         if tracking
         else None
     )
-    total = len(index)
+    jobs = [(row, seed) for row in index.itertuples(index=False) for seed in run_seeds]
+    total = len(jobs)
     logger.info(
-        f"A1 run {run_name}: {total} plan(s) ({', '.join(f'{n} {k}' for k, n in index['kind'].value_counts().items())}) "
+        f"A1 run {run_name}: {len(index)} plan(s) ({', '.join(f'{n} {k}' for k, n in index['kind'].value_counts().items())}) "
+        f"x {len(run_seeds)} seed(s) {run_seeds}, models {', '.join(settings.som_models)}, stage 1 on "
+        f"{devices['stage1']}, stage 2 on {devices['stage2']}, {workers} worker(s) of {settings.n_jobs} thread(s), "
         f"in {run_dir}"
+    )
+    shared = _Shared(
+        a1=a1, plans_path=plans_path, run_dir=run_dir, groups=groups, devices=devices, table=table, resolved=resolved
     )
     started_run = time.monotonic()
     durations: list[float] = []
     failed = False
-    try:
-        for position, row in enumerate(index.itertuples(index=False), 1):
-            tag = f"[{position}/{total}] {row.plan_id}"
-            logger.info(f"{tag} ({row.kind}): {_counts(row)}")
-            started = time.monotonic()
-            computed_here = _run_one_plan(
-                row, plans_path, run_dir, table, resolved, a1, config, groups=groups, result=result, logger=logger
+
+    def finished(position: int, outcome: JobOutcome, row) -> None:
+        """Book one finished plan and seed: the result, the manifest, the log line, MLflow."""
+        result.computed += outcome.computed
+        result.skipped += outcome.skipped
+        result.notes += [note for note in outcome.notes if note not in result.notes]
+        tag = f"[{position}/{total}] {outcome.plan_id} seed {outcome.seed}"
+        if outcome.did_work:
+            durations.append(outcome.elapsed)
+            logger.info(
+                f"{tag} done in {format_duration(outcome.elapsed)}; {outcome.summary}; "
+                f"{_time_left(durations, total - position, workers)}"
             )
-            elapsed = time.monotonic() - started
-            if computed_here:
-                durations.append(elapsed)
-                logger.info(f"{tag} done in {format_duration(elapsed)}; {_time_left(durations, total - position)}")
-            else:
-                logger.info(f"{tag} already done")
-            if tracking and computed_here:
-                _log_plan(row, run_dir)
-        manifest["plans"].update(
-            {row.plan_id: _file_hash(plans_path / f"{row.plan_id}.parquet") for row in index.itertuples()}
-        )
+        else:
+            logger.info(f"{tag} already done")
+        done = set(manifest["seeds_done"].get(outcome.plan_id, []))
+        manifest["seeds_done"][outcome.plan_id] = sorted(done | {outcome.seed})
+        manifest["plans"][outcome.plan_id] = _file_hash(plans_path / f"{outcome.plan_id}.parquet")
         _write_json(run_dir / MANIFEST_FILE, manifest)
+        if tracking and outcome.did_work:
+            _log_plan(row, outcome.seed, run_dir, devices, first=outcome.seed == settings.seed)
+
+    try:
+        if workers == 1:
+            for position, (row, seed) in enumerate(jobs, 1):
+                logger.info(f"[{position}/{total}] {row.plan_id} seed {seed} ({row.kind}): {_counts(row)}")
+                finished(position, _run_one_plan(row, seed, shared, logger=logger), row)
+        else:
+            _run_in_workers(jobs, shared, workers, log_file, finished)
         result.metrics = collect_metrics(run_dir)
         _atomic_write_csv(result.metrics, run_dir / METRICS_FILE)
         result.dissimilarity = collect_dissimilarity(run_dir, settings)
@@ -302,87 +388,266 @@ def run_plans(
     return result
 
 
+def _seeds_to_run(settings, seeds: Optional[Iterable[int]]) -> list[int]:
+    """The seeds asked for, in the settings' order; every seed of the settings by default."""
+    if seeds is None:
+        return list(settings.seeds)
+    asked = [int(seed) for seed in seeds]
+    unknown = [seed for seed in asked if seed not in settings.seeds]
+    if unknown:
+        raise ValueError(f"--seeds {unknown} are not among the settings' seeds {list(settings.seeds)}.")
+    return [seed for seed in settings.seeds if seed in asked]
+
+
+def select_plans(index: pd.DataFrame, patterns: Iterable[str]) -> pd.DataFrame:
+    """The rows of a plan index whose ``plan_id`` matches one of these shell patterns.
+
+    Examples
+    --------
+    >>> index = pd.DataFrame({"plan_id": ["random", "kfold_10km_f0", "kfold_25km_f0", "logo_r01_sebou"]})
+    >>> select_plans(index, ["random", "kfold_10km_*", "logo_*"])["plan_id"].tolist()
+    ['random', 'kfold_10km_f0', 'logo_r01_sebou']
+
+    Raises
+    ------
+    ValueError
+        If no plan matches.
+    """
+    patterns = [pattern.strip() for pattern in patterns if pattern and pattern.strip()]
+    keep = index["plan_id"].map(lambda plan: any(fnmatch.fnmatchcase(str(plan), pattern) for pattern in patterns))
+    if not keep.any():
+        raise ValueError(
+            f"--only {','.join(patterns)} matches none of the {len(index)} plan(s), e.g. {index['plan_id'].head(3).tolist()}."
+        )
+    return index[keep.to_numpy()]
+
+
 # --- one plan --------------------------------------------------------------------------------
 
 
-def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, groups, result, logger) -> bool:
-    """Stage 1 and every stage-2 output of one plan; True when anything was computed."""
-    settings = a1.settings
-    plan = SplitPlan.from_frame(pd.read_parquet(plans_path / f"{row.plan_id}.parquet"), strategy=row.kind)
-    out = run_dir / "predictions" / row.plan_id
+@dataclass
+class _Shared:
+    """What every plan of a run reads; built once, and once per worker process."""
 
-    jobs = [(model, COMBINED_GROUP) for model in MODELS]
-    if row.kind == LOGO:
+    a1: A1Config
+    plans_path: Path
+    run_dir: Path
+    groups: bool
+    devices: dict
+    table: object
+    resolved: object
+    config: object = None
+
+    def load(self):
+        """The main configuration, read once per process (it does not travel between processes)."""
+        if self.config is None:
+            self.config = self.a1.settings.load_config()
+        return self.config
+
+    def __getstate__(self):
+        state = dict(self.__dict__)
+        state["config"] = None
+        return state
+
+
+@dataclass
+class JobOutcome:
+    """What one plan and seed did; returned by a worker process to the one running the run."""
+
+    plan_id: str
+    seed: int
+    computed: list = field(default_factory=list)
+    skipped: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
+    elapsed: float = 0.0
+    did_work: bool = False
+    summary: str = ""
+
+
+#: A worker process's :class:`_Shared`, set by :func:`_start_worker`.
+_WORKER: dict = {}
+
+
+def _start_worker(shared: _Shared, log_file: Optional[str]) -> None:
+    """Set up a worker process: its share of the run, and its log lines (warnings on the console)."""
+    import sys
+
+    from yg_eo_soilnet.a1.logs import LOG_FORMAT, NOISY_LOGGERS
+
+    handlers: list = []
+    console = logging.StreamHandler(sys.stderr)
+    console.setLevel(logging.WARNING)
+    handlers.append(console)
+    if log_file:
+        to_file = logging.FileHandler(log_file, mode="a", encoding="utf-8")
+        to_file.setLevel(logging.INFO)
+        handlers.append(to_file)
+    for handler in handlers:
+        handler.setFormatter(
+            logging.Formatter(LOG_FORMAT.replace("%(message)s", f"[worker {os.getpid()}] %(message)s"))
+        )
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True)
+    for name in NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    _WORKER["shared"] = shared
+    # The numerical libraries' own thread pools (BLAS, OpenMP), held to this worker's share of the
+    # processor: otherwise every worker starts one thread per core and they slow each other down.
+    from threadpoolctl import threadpool_limits
+
+    _WORKER["limits"] = threadpool_limits(limits=shared.a1.settings.n_jobs)
+
+
+def _worker_job(row: dict, seed: int) -> JobOutcome:
+    """One plan and seed, in a worker process."""
+    from types import SimpleNamespace
+
+    return _run_one_plan(SimpleNamespace(**row), seed, _WORKER["shared"], logger=logging.getLogger(__name__))
+
+
+def _run_in_workers(jobs, shared: _Shared, workers: int, log_file, finished) -> None:
+    """Run the plan-and-seed jobs in ``workers`` processes; ``finished`` books each as it ends."""
+    import multiprocessing
+
+    # spawn, not fork: XGBoost's and the BLAS libraries' threads do not survive a fork. The thread
+    # counts are set in the environment the workers start with, before they load those libraries.
+    context = multiprocessing.get_context("spawn")
+    threads = str(shared.a1.settings.n_jobs)
+    saved = {name: os.environ.get(name) for name in THREAD_VARIABLES}
+    os.environ.update({name: threads for name in THREAD_VARIABLES})
+    try:
+        _run_pool(jobs, shared, workers, log_file, finished, context)
+    finally:
+        for name, value in saved.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+#: The environment variables that size the numerical libraries' thread pools.
+THREAD_VARIABLES = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS")
+
+
+def _run_pool(jobs, shared: _Shared, workers: int, log_file, finished, context) -> None:
+    """The process pool of :func:`_run_in_workers`."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=context,
+        initializer=_start_worker,
+        initargs=(shared, str(log_file) if log_file else None),
+    ) as pool:
+        futures = {pool.submit(_worker_job, row._asdict(), seed): row for row, seed in jobs}
+        try:
+            for position, future in enumerate(as_completed(futures), 1):
+                finished(position, future.result(), futures[future])
+        except BaseException:
+            for future in futures:
+                future.cancel()
+            raise
+
+
+def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
+    """Stage 1 and every stage-2 output of one plan and seed."""
+    started_plan = time.monotonic()
+    settings = shared.a1.settings.for_seed(seed)
+    config = shared.load()
+    table, resolved, run_dir = shared.table, shared.resolved, shared.run_dir
+    outcome = JobOutcome(plan_id=row.plan_id, seed=int(seed))
+    first = int(seed) == settings.seed
+    plan = SplitPlan.from_frame(pd.read_parquet(shared.plans_path / f"{row.plan_id}.parquet"), strategy=row.kind)
+    out = prediction_dir(run_dir, row.plan_id, seed)
+    models = settings.som_models
+    with_aux = GLOBAL_AUX in models
+
+    jobs = [(model, COMBINED_GROUP) for model in models]
+    if row.kind == LOGO and with_aux:
         # The reference of the transfer loss, on every covariate: always, not only with --groups.
         jobs.append((LOCAL, COMBINED_GROUP))
-    if groups:
+    if shared.groups and with_aux:
         jobs += [(GLOBAL_AUX, name) for name in resolved.groups]
         if row.kind == LOGO:
             jobs += [(LOCAL, name) for name in resolved.groups]
     todo = [(model, group) for model, group in jobs if not (out / _output_name(model, group)).exists()]
-    result.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
+    outcome.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
     for model, group in jobs:
         if (model, group) not in todo:
             logger.info(f"  {model} / {group}: already done, {_rmse_note(out / _output_name(model, group))}")
     dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
-    needs_dissimilarity = row.kind == LOGO and not dissimilarity_path.exists()
-    if row.kind == LOGO and not needs_dissimilarity:
-        result.skipped.append(str(dissimilarity_path))
+    # From the first seed only: how far a region lies from its training points does not depend on the seed.
+    needs_dissimilarity = first and row.kind == LOGO and not dissimilarity_path.exists()
+    if first and row.kind == LOGO and not needs_dissimilarity:
+        outcome.skipped.append(str(dissimilarity_path))
     if not todo and not needs_dissimilarity:
-        return False
+        return outcome
 
-    auxiliary = _stage1(row, plan, table, settings, config, run_dir, logger)
+    if needs_stage1(models):
+        auxiliary = _stage1(row, seed, plan, table, settings, config, run_dir, logger)
+    else:
+        auxiliary = folds_only(plan, settings, kind=row.kind, logger=logger)
+        logger.info(f"  stage 1: skipped, no model of {list(models)} reads it; {auxiliary.n_folds} fold(s) cut")
     context = build_context(table, plan, auxiliary, settings, config)
-    auxiliary_columns = list(resolved.groups.get(AUXILIARY_GROUP, ()))
-    global_columns = [column for column in resolved.combined if column not in auxiliary_columns]
+    auxiliary_columns = list(resolved.groups.get(AUXILIARY_GROUP, ())) if needs_stage1(models) else []
+    global_columns = [column for column in resolved.combined if column not in resolved.groups.get(AUXILIARY_GROUP, ())]
     region = table.frame[table.region_column] if table.region_column else None
+    scores: dict = {}
 
     for model, group in todo:
         started = time.monotonic()
         if model == LOCAL:
             columns = list(resolved.combined) if group == COMBINED_GROUP else list(resolved.groups[group])
             local = local_folds(context, plan.point_ids_for(TEST), table, logger=logger)
-            outcome = run_local(context, columns, local)
-            if outcome is None:
+            result = run_local(context, columns, local)
+            if result is None:
                 note = f"{row.plan_id}: no local score - {local.reason}"
-                if note not in result.notes:
-                    result.notes.append(note)
+                if note not in outcome.notes:
+                    outcome.notes.append(note)
                 logger.info(f"  {model} / {group}: skipped - {local.reason}")
                 continue
         elif group == COMBINED_GROUP:
-            outcome = run_model(
+            result = run_model(
                 context, model, global_columns=global_columns, auxiliary_columns=auxiliary_columns, logger=logger
             )
         else:
-            outcome = run_group(context, list(resolved.groups[group]))
-        frame = _rows(row, context, outcome, model, group, region, table)
+            result = run_group(context, list(resolved.groups[group]))
+        frame = _rows(row, seed, context, result, model, group, region, table, shared.devices)
         path = out / _output_name(model, group)
         _atomic_write_parquet(frame, path)
-        result.computed.append(str(path))
-        logger.info(f"  {model} / {group}: {format_duration(time.monotonic() - started)}, {_rmse_note(frame)}")
+        outcome.computed.append(str(path))
+        note = _rmse_note(frame)
+        if group == COMBINED_GROUP:
+            scores[model] = note
+        logger.info(f"  {model} / {group}: {format_duration(time.monotonic() - started)}, {note}")
 
     if needs_dissimilarity:
-        frame = _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger)
+        frame = _dissimilarity(row, context, table, global_columns, auxiliary_columns, outcome, logger)
         _atomic_write_parquet(frame, dissimilarity_path)
-        result.computed.append(str(dissimilarity_path))
-    return True
+        outcome.computed.append(str(dissimilarity_path))
+    outcome.did_work = True
+    outcome.elapsed = time.monotonic() - started_plan
+    shown = scores.get(GLOBAL) or next(iter(scores.values()), "")
+    outcome.summary = f"{GLOBAL if GLOBAL in scores else next(iter(scores), '')} {shown}".strip() or "dissimilarity"
+    return outcome
 
 
 def _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger) -> pd.DataFrame:
     """How far each point of a ``logo`` plan lies from its training points, in ``global_aux``'s inputs.
 
     The inputs are weighted by ``global_aux``'s feature importances; that model is fitted here if
-    its predictions were already on disk.
+    its predictions were already on disk. A run without stage 1 (``global`` alone) uses ``global``
+    and its inputs instead.
     """
     settings = context.settings
+    weighting = GLOBAL_AUX if auxiliary_columns else GLOBAL
     outcome = run_model(
-        context, GLOBAL_AUX, global_columns=global_columns, auxiliary_columns=auxiliary_columns, logger=logger
+        context, weighting, global_columns=global_columns, auxiliary_columns=auxiliary_columns, logger=logger
     )
     columns = list(global_columns) + [column for column in auxiliary_columns if column not in global_columns]
     weights = importance_weights(outcome.fitted, columns) if outcome.fitted is not None else None
     if weights is None:
         result.notes.append(
-            f"{row.plan_id}: {GLOBAL_AUX} has no feature importances; the DI weighs every input the same"
+            f"{row.plan_id}: {weighting} has no feature importances; the DI weighs every input the same"
         )
 
     carbonate = settings.carbonate.column
@@ -411,17 +676,19 @@ def _dissimilarity(row, context, table, global_columns, auxiliary_columns, resul
     return frame
 
 
-def _stage1(row, plan, table, settings, config, run_dir, logger) -> AuxiliaryPredictions:
-    """The plan's stage-1 predictions: read back when saved, otherwise computed and saved."""
-    path = run_dir / "stage1" / f"{row.plan_id}.parquet"
+def _stage1(row, seed, plan, table, settings, config, run_dir, logger) -> AuxiliaryPredictions:
+    """The plan's stage-1 predictions for one seed: read back when saved, otherwise computed and saved."""
+    path = stage1_path(run_dir, row.plan_id, seed)
     if path.exists():
         auxiliary = _auxiliary_from_frame(pd.read_parquet(path), settings)
-        logger.info(f"  stage 1: read from stage1/{path.name}; {_out_of_fold_r2(auxiliary, table, settings)}")
+        logger.info(
+            f"  stage 1: read from stage1/{row.plan_id}/{path.name}; {_out_of_fold_r2(auxiliary, table, settings)}"
+        )
         return auxiliary
     started = time.monotonic()
     auxiliary = predict_auxiliary(table, plan, settings, config, kind=row.kind, logger=logger)
     # The point ids are the frame's index; written as a column, so they survive the file.
-    _atomic_write_parquet(auxiliary.to_frame().reset_index(), path)
+    _atomic_write_parquet(auxiliary.to_frame().reset_index().assign(seed=int(seed)), path)
     logger.info(
         f"  stage 1: {format_duration(time.monotonic() - started)}; {_out_of_fold_r2(auxiliary, table, settings)}"
     )
@@ -434,12 +701,15 @@ def _counts(row) -> str:
     return text + (f" / {int(row.n_val):,} val" if int(row.n_val) else "")
 
 
-def _time_left(durations: list[float], plans_left: int) -> str:
-    """An estimate of the time left: the mean time of the plans computed so far, times those left."""
+def _time_left(durations: list[float], plans_left: int, workers: int = 1) -> str:
+    """An estimate of the time left: the mean time of the plans computed so far, times those left, over the workers."""
     mean = sum(durations) / len(durations)
     if not plans_left:
         return "that was the last plan"
-    return f"about {format_duration(mean * plans_left)} left ({format_duration(mean)} per plan over {len(durations)} computed)"
+    return (
+        f"about {format_duration(mean * plans_left / max(1, workers))} left ({format_duration(mean)} per plan over "
+        f"{len(durations)} computed)"
+    )
 
 
 def _rmse_note(predictions) -> str:
@@ -485,7 +755,7 @@ def _auxiliary_from_frame(frame: pd.DataFrame, settings) -> AuxiliaryPredictions
     )
 
 
-def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd.DataFrame:
+def _rows(row, seed, context, outcome: ModelResult, model, group, region, table, devices) -> pd.DataFrame:
     """The predictions table of one model on one plan."""
     ids = outcome.predicted.index
     coordinates = table.coordinates.reindex(ids)
@@ -498,6 +768,7 @@ def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd
             "fraction": np.full(len(ids), float(row.fraction) if pd.notna(row.fraction) else np.nan),
             "repeat": np.full(len(ids), float(row.repeat) if pd.notna(row.repeat) else np.nan),
             "block_size_m": np.full(len(ids), float(row.block_size_m) if pd.notna(row.block_size_m) else np.nan),
+            "seed": np.full(len(ids), int(seed), dtype="int64"),
             "point_id": ids.to_numpy(),
             "split": context.split.reindex(ids).to_numpy(),
             "region": (region.reindex(ids).to_numpy() if region is not None else None),
@@ -514,6 +785,8 @@ def _rows(row, context, outcome: ModelResult, model, group, region, table) -> pd
             "local_block": _local_column(outcome.local_block, ids),
             "model_role": outcome.role,
             "tuned_params": outcome.tuned_params_json,
+            "device_stage1": devices["stage1"],
+            "device_stage2": devices["stage2"],
         },
         columns=list(PREDICTION_COLUMNS),
     )
@@ -535,11 +808,11 @@ def collect_metrics(run_dir: Path) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        ``plan_id, kind, model, covariate_group, model_role, split, n, rmse, mae, bias, r2, rpd,
+        ``plan_id, seed, kind, model, covariate_group, model_role, split, n, rmse, mae, bias, r2, rpd,
         rpiq, n_fallback``.
     """
     rows = []
-    for path in sorted((Path(run_dir) / "predictions").glob("*/*.parquet")):
+    for path in prediction_paths(run_dir):
         frame = pd.read_parquet(path)
         for (split,), part in frame.groupby(["split"]):
             scores = regression_metrics(part["observed"], part["predicted"], split="x")
@@ -547,6 +820,7 @@ def collect_metrics(run_dir: Path) -> pd.DataFrame:
             rows.append(
                 {
                     "plan_id": first["plan_id"],
+                    "seed": int(first["seed"]) if "seed" in part else np.nan,
                     "kind": first["kind"],
                     "model": first["model"],
                     "covariate_group": first["covariate_group"],
@@ -635,12 +909,17 @@ def _clear_run_folder(run_dir: Path) -> None:
 def _config_hash(a1: A1Config, config, overrides: Optional[dict] = None) -> str:
     """One hash of every file the outputs depend on: the A1 settings, the groups, the main config, the spec.
 
-    Settings changed after reading (``overrides``, e.g. dev mode) are hashed too - but only when
-    there are some, so a plain run's hash, and every run folder made before overrides existed,
-    stays as it was.
+    The A1 settings are hashed as read, without their ``seeds``: a seed added to the list adds
+    outputs beside the others' and changes none of them, so the run folder takes it. (Comments
+    and layout of that file do not count either.) Settings changed after reading (``overrides``,
+    e.g. dev mode or ``--device``) are hashed too, when there are some.
     """
-    paths = [a1.path, a1.groups.source_path, a1.settings.main_config_path, getattr(config, "data_spec_path", None)]
+    paths = [a1.groups.source_path, a1.settings.main_config_path, getattr(config, "data_spec_path", None)]
     digest = hashlib.sha256()
+    if a1.path and os.path.exists(a1.path):
+        settings = dict(yaml.safe_load(Path(a1.path).read_text()) or {})
+        settings.pop("seeds", None)
+        digest.update(json.dumps(settings, sort_keys=True, default=str).encode())
     for path in paths:
         if path and os.path.exists(path):
             digest.update(Path(path).read_bytes())
@@ -696,6 +975,7 @@ def _start_parent(
     *,
     manifest: Optional[dict] = None,
     run_dir: Optional[Path] = None,
+    devices: Optional[dict] = None,
 ):
     """Open the run folder's parent MLflow run, with its provenance - the same one on every resume.
 
@@ -746,29 +1026,33 @@ def _start_parent(
             )
             or "none",
             "a1_min_cell_size": a1.settings.min_cell_size,
+            "a1_models": ",".join(a1.settings.som_models),
+            **{f"a1_device_{stage}": name for stage, name in (devices or {}).items()},
         }
     )
     mlflow.log_artifact(a1.path)
     return run
 
 
-def _log_plan(row, run_dir: Path) -> None:
-    """One sub-run per plan, with every model's scores on the test points (and validation, if any)."""
+def _log_plan(row, seed: int, run_dir: Path, devices: dict, *, first: bool = True) -> None:
+    """One sub-run per plan and seed, with every model's scores on the test points (and validation, if any)."""
     import mlflow
 
     from yg_eo_soilnet.tracking import start_child_run
 
     held_out = "" if pd.isna(row.held_out) else str(row.held_out)
-    with start_child_run(row.plan_id, tags={"plan_id": row.plan_id, "kind": row.kind, "held_out": held_out}):
+    tags = {"plan_id": row.plan_id, "kind": row.kind, "held_out": held_out, "seed": str(seed)}
+    with start_child_run(f"{row.plan_id}__seed_{seed}", tags=tags):
+        mlflow.log_params({"seed": int(seed), **{f"device_{stage}": name for stage, name in devices.items()}})
         metrics = {}
-        for path in sorted((run_dir / "predictions" / row.plan_id).glob("*.parquet")):
+        for path in sorted(prediction_dir(run_dir, row.plan_id, seed).glob("*.parquet")):
             frame = pd.read_parquet(path)
             model, group = frame["model"].iloc[0], frame["covariate_group"].iloc[0]
             for (split,), part in frame.groupby(["split"]):
                 scores = regression_metrics(part["observed"], part["predicted"], split=split)
                 metrics.update({f"{name}__{model}__{group}": value for name, value in scores.items()})
         dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
-        if dissimilarity_path.exists():
+        if dissimilarity_path.exists() and first:
             summary = region_summary(pd.read_parquet(dissimilarity_path)).iloc[0]
             for name in ("median_di", "share_outside", "carbonate_tvd"):
                 if name in summary and pd.notna(summary[name]):

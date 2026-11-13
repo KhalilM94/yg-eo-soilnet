@@ -42,7 +42,7 @@ from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.features import A1Table
 from yg_eo_soilnet.a1.logs import format_duration
-from yg_eo_soilnet.a1.pipelines import build_stage_pipeline
+from yg_eo_soilnet.a1.pipelines import build_stage_pipeline, predict_on_cpu
 from yg_eo_soilnet.a1.settings import A1Settings
 from yg_eo_soilnet.a1.strata import carbonate_class
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, VAL, SplitPlan
@@ -52,8 +52,17 @@ GLOBAL_AUX = "global_aux"
 PER_CLASS_MEASURED = "per_class_measured"
 PER_CLASS_PREDICTED = "per_class_predicted"
 LOCAL = "local"
-#: The models every plan gets.
+#: The models every plan gets, unless ``stage2.models`` lists fewer.
 MODELS = (GLOBAL, GLOBAL_AUX, PER_CLASS_MEASURED, PER_CLASS_PREDICTED)
+#: The models that read stage 1's predicted CaCO3 and CEC (the per-class models through their
+#: ``global_aux`` inputs and fallback); a run without any of them skips stage 1.
+STAGE1_MODELS = (GLOBAL_AUX, PER_CLASS_MEASURED, PER_CLASS_PREDICTED)
+
+
+def needs_stage1(models) -> bool:
+    """Whether any of these SOM models reads stage 1's predictions."""
+    return any(model in STAGE1_MODELS for model in models)
+
 
 #: ``model_role`` of an ordinary model.
 ROLE_MODEL = "model"
@@ -208,7 +217,7 @@ def fit_tuned(pipeline, grid: Mapping[str, list], X: pd.DataFrame, y: pd.Series,
             clone(pipeline),
             param_grid=dict(grid),
             cv=pairs,
-            scoring="neg_root_mean_squared_error",
+            scoring=_neg_rmse_on_cpu,
             refit=True,
             n_jobs=1,
         )
@@ -216,6 +225,13 @@ def fit_tuned(pipeline, grid: Mapping[str, list], X: pd.DataFrame, y: pd.Series,
         return search.best_estimator_, {**search.best_params_, "tuned": True}
     model = clone(pipeline).fit(X, y)
     return model, {**{name: values[0] for name, values in grid.items()}, "tuned": False}
+
+
+def _neg_rmse_on_cpu(estimator, X, y) -> float:
+    """The search's score, ``neg_root_mean_squared_error``, predicted on the processor (:func:`to_cpu`)."""
+    from sklearn.metrics import root_mean_squared_error
+
+    return -float(root_mean_squared_error(y, predict_on_cpu(estimator, X)))
 
 
 def run_model(
@@ -386,7 +402,13 @@ def local_folds(
         else:
             n_folds = min(settings.inner_cv_folds, n_blocks)
             outer = pd.Series(-1, index=measured, name="outer_fold")
-            splits = GroupKFold(n_splits=n_folds).split(np.zeros((len(measured), 1)), groups=block.to_numpy())
+            # Whole blocks per fold; dealt at random for every seed but the first, as stage 1's folds are.
+            cutter = (
+                GroupKFold(n_splits=n_folds, shuffle=True, random_state=settings.model_seed)
+                if settings.shuffle_groups
+                else GroupKFold(n_splits=n_folds)
+            )
+            splits = cutter.split(np.zeros((len(measured), 1)), groups=block.to_numpy())
             for fold, (_, test_positions) in enumerate(splits):
                 outer.iloc[test_positions] = fold
             folds = []
@@ -481,7 +503,7 @@ def _single_model(context: Stage2Context, columns: list[str]) -> ModelResult:
     )
     train, held = context.train_ids, context.held_out_ids
     fitted, params = fit_tuned(pipeline, grid, context.X.loc[train, columns], context.y.loc[train], context.folds)
-    predicted = pd.Series(np.asarray(fitted.predict(context.X.loc[held, columns]), dtype=float), index=held)
+    predicted = pd.Series(predict_on_cpu(fitted, context.X.loc[held, columns]), index=held)
     return ModelResult(predicted=predicted, fallback=pd.Series(False, index=held), tuned_params=params, fitted=fitted)
 
 
@@ -520,7 +542,7 @@ def _per_class(
         )
         params[str(label)] = {**chosen, "n_train": int(len(class_train))}
         if len(class_held):
-            predicted.loc[class_held] = np.asarray(fitted.predict(context.X.loc[class_held, columns]), dtype=float)
+            predicted.loc[class_held] = predict_on_cpu(fitted, context.X.loc[class_held, columns])
             used_fallback.loc[class_held] = False
     return ModelResult(predicted=predicted, fallback=used_fallback, tuned_params=params, role=role)
 

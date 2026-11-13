@@ -57,8 +57,10 @@ def test_every_plan_has_a_start_and_an_end_line(run):
     index, log = _index(run), run["log"]
     total = len(index)
     for position, row in enumerate(index.itertuples(), 1):
-        assert re.search(rf"\[{position}/{total}\] {row.plan_id} \({row.kind}\): [\d,]+ train / [\d,]+ test", log)
-        assert re.search(rf"\[{position}/{total}\] {row.plan_id} (done in|already done)", log)
+        assert re.search(
+            rf"\[{position}/{total}\] {row.plan_id} seed 42 \({row.kind}\): [\d,]+ train / [\d,]+ test", log
+        )
+        assert re.search(rf"\[{position}/{total}\] {row.plan_id} seed 42 (done in|already done)", log)
 
 
 def test_the_log_reports_stage1_each_model_the_local_folds_and_the_time_left(run):
@@ -76,7 +78,7 @@ def test_a_second_run_appends_and_says_every_plan_is_already_done(run, in_store)
     assert log.startswith(run["log"])  # the first run's lines are kept
     second = log[len(run["log"]) :]
     for row in _index(run).itertuples():
-        assert re.search(rf"\] {row.plan_id} already done", second)
+        assert re.search(rf"\] {row.plan_id} seed 42 already done", second)
     assert "already done, test RMSE" in second
 
 

@@ -20,6 +20,7 @@ from yg_eo_soilnet.a1 import stage2 as stage2_module
 from yg_eo_soilnet.a1.auxiliary import predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, load_a1_config
 from yg_eo_soilnet.a1.features import build_table
+from yg_eo_soilnet.a1.layout import prediction_dir, prediction_paths, stage1_path
 from yg_eo_soilnet.a1.plans import LOGO, RANDOM, plan_population, random_plan, write_plans
 from yg_eo_soilnet.a1.runner import (
     MANIFEST_FILE,
@@ -71,8 +72,7 @@ def demo_run(a1_settings_in, tmp_path_factory, mlflow_store):
 
 
 def _predictions(demo_run, plan_id=None):
-    root = demo_run["result"].run_dir / "predictions"
-    paths = sorted((root / plan_id).glob("*.parquet")) if plan_id else sorted(root.glob("*/*.parquet"))
+    paths = prediction_paths(demo_run["result"].run_dir, plan_id)
     return pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True)
 
 
@@ -144,9 +144,9 @@ def test_the_chosen_settings_are_recorded_with_every_row(demo_run):
 
 
 def test_the_stage_1_audit_is_saved_for_every_plan(demo_run):
-    stage1 = sorted(path.stem for path in (demo_run["result"].run_dir / "stage1").glob("*.parquet"))
+    stage1 = sorted(path.parent.name for path in (demo_run["result"].run_dir / "stage1").glob("*/seed_42.parquet"))
     assert len(stage1) == 3
-    audit = pd.read_parquet(demo_run["result"].run_dir / "stage1" / "random.parquet")
+    audit = pd.read_parquet(stage1_path(demo_run["result"].run_dir, "random", 42))
     assert {"split", "inner_fold", "a1_pred_caco3_pct_total", "predicted_by_caco3_pct_total"} <= set(audit.columns)
 
 
@@ -316,7 +316,7 @@ def test_a_second_run_computes_nothing(demo_run, monkeypatch):
 
 
 def test_deleting_one_output_recomputes_only_that_one(demo_run):
-    target = demo_run["result"].run_dir / "predictions" / "random" / f"{GLOBAL}__{COMBINED_GROUP}.parquet"
+    target = prediction_dir(demo_run["result"].run_dir, "random", 42) / f"{GLOBAL}__{COMBINED_GROUP}.parquet"
     before = pd.read_parquet(target)
     target.unlink()
     again = run_plans(demo_run["a1"], groups=True, tracking=False)
@@ -325,7 +325,7 @@ def test_deleting_one_output_recomputes_only_that_one(demo_run):
 
 
 def test_a_half_written_file_is_not_taken_as_done(demo_run):
-    target = demo_run["result"].run_dir / "predictions" / "random" / f"{GLOBAL_AUX}__{COMBINED_GROUP}.parquet"
+    target = prediction_dir(demo_run["result"].run_dir, "random", 42) / f"{GLOBAL_AUX}__{COMBINED_GROUP}.parquet"
     target.unlink()
     target.with_suffix(".parquet.partial").write_text("half")
     again = run_plans(demo_run["a1"], groups=True, tracking=False)
@@ -379,7 +379,7 @@ def test_the_run_is_recorded_in_mlflow_with_the_commit_and_every_plans_scores(de
 
 def test_metrics_cover_every_file_and_split(demo_run):
     metrics = collect_metrics(demo_run["result"].run_dir)
-    files = list((demo_run["result"].run_dir / "predictions").glob("*/*.parquet"))
+    files = prediction_paths(demo_run["result"].run_dir)
     assert len(metrics) >= len(files)
     assert set(metrics["split"]) == {TEST}  # no validation set by default
     assert (demo_run["result"].run_dir / METRICS_FILE).exists()
@@ -424,7 +424,7 @@ def test_the_full_demo_run_from_the_command_line(a1_settings_in, tmp_path, mlflo
         elapsed = time.monotonic() - started
         mlflow.set_tracking_uri(uri)
 
-    frame = pd.concat([pd.read_parquet(path) for path in (result.run_dir / "predictions").glob("*/*.parquet")])
+    frame = pd.concat([pd.read_parquet(path) for path in prediction_paths(result.run_dir)])
     rmse = _pooled_test_rmse(frame)
     print(f"full demo run: {elapsed:.0f} s; pooled test RMSE {rmse.round(2).to_dict()}")
     assert elapsed < 600
@@ -438,7 +438,7 @@ def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
     from yg_eo_soilnet.a1.runner import _auxiliary_from_frame
 
     a1 = demo_run["a1"]
-    saved = pd.read_parquet(demo_run["result"].run_dir / "stage1" / "random.parquet")
+    saved = pd.read_parquet(stage1_path(demo_run["result"].run_dir, "random", 42))
     assert "point_id" in saved.columns
     reread = _auxiliary_from_frame(saved, a1.settings)
     plan = _plan(demo_run, "random")
@@ -487,7 +487,12 @@ def test_asking_for_mixed_plans_runs_their_control_plans_too(demo_run, tmp_path,
     plans = tmp_path / "plans"
     write_plans(a1.settings, str(plans), kinds=[MIXED])
     seen = []
-    monkeypatch.setattr(runner, "_run_one_plan", lambda row, *args, **kwargs: seen.append(row.kind) or False)
+
+    def fake(row, seed, *args, **kwargs):
+        seen.append(row.kind)
+        return runner.JobOutcome(plan_id=row.plan_id, seed=seed)
+
+    monkeypatch.setattr(runner, "_run_one_plan", fake)
     run_plans(a1, plans_dir=str(plans), kinds=[MIXED], tracking=False, run_name="mixed")
     assert set(seen) == {MIXED, CONTROL}
 
@@ -521,7 +526,7 @@ def test_each_logo_plan_gets_a_dissimilarity_table_and_the_run_a_summary(demo_ru
 
     run_dir = demo_run["result"].run_dir
     written = sorted(path.stem for path in (run_dir / DISSIMILARITY_DIR).glob("*.parquet"))
-    logo = sorted({path.parent.name for path in (run_dir / "predictions").glob("logo_*/*.parquet")})
+    logo = sorted({path.parents[1].name for path in (run_dir / "predictions").glob("logo_*/seed_*/*.parquet")})
     assert written == logo and "random" not in written
 
     frame = pd.read_parquet(run_dir / DISSIMILARITY_DIR / f"{logo[0]}.parquet")
@@ -583,7 +588,9 @@ def test_a_dev_mode_run_never_resumes_into_a_full_run(demo_run):
     manifest = json.loads((quick.run_dir / MANIFEST_FILE).read_text())
     assert manifest["overrides"] == {"dev_mode": True}
     params = json.loads(
-        pd.read_parquet(quick.run_dir / "predictions" / "random" / "global__combined.parquet")["tuned_params"].iloc[0]
+        pd.read_parquet(prediction_dir(quick.run_dir, "random", 42) / "global__combined.parquet")["tuned_params"].iloc[
+            0
+        ]
     )
     assert params["tuned"] is False and params["model__max_depth"] == 3
 
@@ -663,9 +670,7 @@ def test_spatial_plans_of_each_block_size_carry_it_on_every_row(demo_run, tmp_pa
     index.to_csv(plans / "index.csv", index=False)
     result = run_plans(a1, plans_dir=str(plans), tracking=False, dev_mode=True, run_name="blocks")
 
-    frame = pd.concat(
-        [pd.read_parquet(path) for path in (result.run_dir / "predictions").glob("*/*.parquet")], ignore_index=True
-    )
+    frame = pd.concat([pd.read_parquet(path) for path in prediction_paths(result.run_dir)], ignore_index=True)
     sizes = frame.groupby("plan_id")["block_size_m"].unique().map(list).to_dict()
     assert sizes == {"kfold_10km_f0": [10_000.0], "kfold_25km_f0": [25_000.0]}
     assert set(result.metrics["plan_id"]) == {"kfold_10km_f0", "kfold_25km_f0"}

@@ -20,6 +20,7 @@ from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP
 from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach, shap_by_class
 from yg_eo_soilnet.a1.figures.labels import pretty_name
+from yg_eo_soilnet.a1.layout import ran_plan
 from yg_eo_soilnet.a1.figures.style import WIDTH_1COL, WIDTH_2COL, caption_line, class_color, letter, styled
 from yg_eo_soilnet.a1.plans import LOGO, RANDOM
 from yg_eo_soilnet.a1.stage2 import GLOBAL
@@ -34,13 +35,12 @@ def shap_plans(inputs: FigureInputs, plan_id: Optional[str] = None) -> list:
     """The plans figures 11 and S4 explain.
 
     ``plan_id`` when given (``--shap-plan``); otherwise ``random`` when the run has it, and each
-    leave-one-basin-out plan when it does not. Only plans the run actually ran (a stage-1 audit
-    exists) count.
+    leave-one-basin-out plan when it does not. Only plans the run actually ran count.
     """
     if plan_id:
         return [plan_id]
     index = inputs.index
-    ran = index[[(inputs.run_dir / "stage1" / f"{plan}.parquet").exists() for plan in index["plan_id"]]]
+    ran = index[[ran_plan(inputs.run_dir, plan) for plan in index["plan_id"]]]
     if RANDOM in set(ran["plan_id"]):
         return [RANDOM]
     logo = ran[ran["kind"] == LOGO].sort_values("plan_id")

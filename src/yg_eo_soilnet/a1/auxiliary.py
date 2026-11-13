@@ -7,7 +7,7 @@ score built on it. The rule is that no point is ever predicted by a model fitted
 * **test points** (and validation points, when the plan has any) are predicted by one model fitted
   on the training points;
 * **training points** are predicted *out of fold*: the training points are cut into folds, and each
-  fold is predicted by a model fitted on the other folds (:func:`sklearn.model_selection.cross_val_predict`);
+  fold is predicted by a model fitted on the other folds;
 * a training point whose own value was never measured contributed no label to any fit, so it is
   predicted by the model fitted on all training points, like a test point.
 
@@ -15,6 +15,10 @@ The folds follow the split. On a random split they are random (``KFold``). On a 
 split they keep each block or region whole (``GroupKFold`` on the plan's clusters), so stage 1 is
 no more optimistic about the training points than the split itself is about the test points. The
 fold of every training point is returned with the predictions, so a run can be audited afterwards.
+
+The folds depend on the settings' model seed
+(:attr:`~yg_eo_soilnet.a1.settings.A1Settings.model_seed`): random folds are drawn with it, and for
+every seed but the first, whole blocks or regions are dealt into folds at random too.
 """
 
 from __future__ import annotations
@@ -26,11 +30,11 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 from sklearn.base import clone
-from sklearn.model_selection import GroupKFold, KFold, cross_val_predict
+from sklearn.model_selection import GroupKFold, KFold
 
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.features import A1Table
-from yg_eo_soilnet.a1.pipelines import build_stage_pipeline
+from yg_eo_soilnet.a1.pipelines import build_stage_pipeline, predict_on_cpu
 from yg_eo_soilnet.a1.settings import A1Settings
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, VAL, SplitPlan
 
@@ -192,10 +196,14 @@ def inner_folds(
         return pd.Series(dtype=int, index=pd.Index([], name="point_id")), cv_kind
 
     placeholder = np.zeros((len(train_ids), 1))
-    if grouped:
+    if grouped and settings.shuffle_groups:
+        # A further seed: the groups dealt into folds at random, still whole.
+        cutter = GroupKFold(n_splits=n_folds, shuffle=True, random_state=settings.model_seed)
+        splits = cutter.split(placeholder, groups=groups)
+    elif grouped:
         splits = GroupKFold(n_splits=n_folds).split(placeholder, groups=groups)
     else:
-        splits = KFold(n_splits=n_folds, shuffle=True, random_state=settings.seed).split(placeholder)
+        splits = KFold(n_splits=n_folds, shuffle=True, random_state=settings.model_seed).split(placeholder)
     folds = np.full(len(train_ids), NOT_IN_A_FOLD, dtype=int)
     for fold, (_, held) in enumerate(splits):
         folds[held] = fold
@@ -296,7 +304,7 @@ def predict_auxiliary(
         if len(to_predict):
             final = clone(estimator_factory(target))
             final.fit(X.loc[measured_ids], table.frame.loc[measured_ids, target])
-            values.loc[to_predict] = np.asarray(final.predict(X.loc[to_predict]), dtype=float).reshape(-1)
+            values.loc[to_predict] = predict_on_cpu(final, X.loc[to_predict])
             source.loc[to_predict] = FULL_TRAIN
         predictions[column], predicted_by[target] = values, source
 
@@ -317,8 +325,8 @@ def predict_auxiliary(
 def _out_of_fold(estimator, X: pd.DataFrame, y: pd.Series, folds: pd.Series) -> Optional[np.ndarray]:
     """Out-of-fold predictions for the rows of ``X``, through the given folds; None when impossible.
 
-    The folds are handed to ``cross_val_predict`` as explicit index pairs, so the fit that predicted
-    each point is exactly the one the returned fold assignment names.
+    One fit per fold, on the other folds, so the fit that predicted each point is exactly the one
+    the returned fold assignment names.
     """
     if folds.empty:
         return None
@@ -332,4 +340,36 @@ def _out_of_fold(estimator, X: pd.DataFrame, y: pd.Series, folds: pd.Series) -> 
         pairs.append((kept, held))
     if len(pairs) < 2:
         return None
-    return np.asarray(cross_val_predict(clone(estimator), X, y, cv=pairs, n_jobs=1), dtype=float).reshape(-1)
+    # cross_val_predict's loop, with each fit moved to the processor before it predicts (to_cpu).
+    predicted = np.full(len(X), np.nan)
+    for kept, held in pairs:
+        fitted = clone(estimator).fit(X.iloc[kept], y.iloc[kept])
+        predicted[held] = predict_on_cpu(fitted, X.iloc[held])
+    return predicted
+
+
+def folds_only(
+    plan: SplitPlan, settings: A1Settings, *, kind: Optional[str] = None, logger: Optional[logging.Logger] = None
+) -> AuxiliaryPredictions:
+    """Stage 1 skipped: the folds it would have cut, which stage 2 tunes through, and no predictions.
+
+    For a run whose SOM models (``stage2.models``) never read the predicted CaCO3 and CEC -
+    ``global`` alone.
+
+    Returns
+    -------
+    AuxiliaryPredictions
+        With a ``predictions`` table of no columns, and ``predicted_by`` ``none`` everywhere.
+    """
+    ids = plan.assignments.index
+    folds, cv_kind = inner_folds(plan, settings, kind=kind, logger=logger)
+    all_folds = pd.Series(NOT_IN_A_FOLD, index=ids, dtype=int)
+    all_folds.loc[folds.index] = folds
+    return AuxiliaryPredictions(
+        predictions=pd.DataFrame(index=ids),
+        folds=all_folds,
+        predicted_by=pd.DataFrame({target: NOT_PREDICTED for target in settings.auxiliary.targets}, index=ids),
+        split=plan.assignments.rename("split"),
+        cv_kind=cv_kind,
+        n_folds=int(folds.nunique()) if len(folds) else 0,
+    )

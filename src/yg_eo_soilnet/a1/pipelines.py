@@ -7,11 +7,20 @@ and wrapped by :class:`~yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils.Pi
 its inputs are prepared exactly as the main pipeline prepares them: gaps filled with the median and
 flagged, numbers scaled for non-tree models, categories encoded, and the target log-transformed
 when it is listed in ``COLUMNS_TO_TRANSFORM``.
+
+The estimator is seeded with the settings' model seed
+(:attr:`~yg_eo_soilnet.a1.settings.A1Settings.model_seed`), and takes the run's processor
+(``run_a1.py --device``) and thread count (``--workers``) when it has those settings. A model
+fitted on the graphics card is moved to the processor before it predicts (:func:`to_cpu`): the
+data are on the processor, and XGBoost would otherwise copy them over, with a warning, on every
+call.
 """
 
 from __future__ import annotations
 
 from typing import Optional, Sequence
+
+import numpy as np
 
 from yg_eo_soilnet.a1.settings import A1Settings, StageSettings
 
@@ -68,18 +77,27 @@ def build_stage_pipeline(
     spec["init_args"] = {**(spec.get("init_args") or {}), **dict(stage.init_args)}
 
     built = ModelConfigFactory(registry={stage.estimator: spec}).build_model_configs(
-        num_features=len(feature_columns), default_seed=settings.seed
+        num_features=len(feature_columns), default_seed=settings.model_seed
     )
     if stage.estimator not in built:
         raise ValueError(f"Could not build {stage.estimator} from {spec.get('import_path')!r}; see the warning above.")
     model = built[stage.estimator]["model"]
+    exposed = model.get_params(deep=False)
+    if "random_state" in exposed and settings.model_seed != settings.seed:
+        # A further seed reseeds every estimator; the first keeps what the model list gives (the
+        # seed, unless an entry pins its own random_state).
+        model.set_params(random_state=int(settings.model_seed))
+    if settings.device is not None and "device" in exposed:
+        model.set_params(device=settings.device)
+    if settings.n_jobs is not None and "n_jobs" in exposed:
+        model.set_params(n_jobs=int(settings.n_jobs))
 
     features = list(feature_columns)
     categorical = [column for column in categorical_columns if column in features]
     numeric = [column for column in features if column not in categorical]
     is_log_target = target is not None and target in (getattr(config, "COLUMNS_TO_TRANSFORM", []) or [])
     builder = PipelineBuilder(
-        seed=settings.seed,
+        seed=settings.model_seed,
         tree_categorical_encoding=getattr(config, "TREE_CATEGORICAL_ENCODING", "ordinal"),
         tree_onehot_max_categories=getattr(config, "TREE_ONEHOT_MAX_CATEGORIES", None),
     )
@@ -95,3 +113,51 @@ def build_stage_pipeline(
     if grid:
         pipeline.set_params(**{name: values[0] for name, values in grid.items()})
     return pipeline, grid
+
+
+def final_estimator(fitted):
+    """The model inside a fitted pipeline: past the input preparation and the target transform."""
+    estimator = fitted.named_steps["model"] if hasattr(fitted, "named_steps") else fitted
+    # A log-transformed target wraps the model: regressor_ once fitted, regressor before.
+    for name in ("regressor_", "regressor"):
+        inner = getattr(estimator, name, None)
+        if inner is not None:
+            return inner
+    return estimator
+
+
+def to_cpu(fitted):
+    """Move a fitted model to the processor, where the data are, before it predicts; returns it.
+
+    Only a model with a ``device`` setting set to something else (XGBoost on ``cuda``) is changed.
+    The trees are the same; only where the prediction runs changes.
+    """
+    estimator = final_estimator(fitted)
+    params = estimator.get_params(deep=False) if hasattr(estimator, "get_params") else {}
+    if params.get("device") not in (None, "cpu") and hasattr(estimator, "get_booster"):
+        estimator.set_params(device="cpu")
+    return fitted
+
+
+def predict_on_cpu(fitted, X) -> np.ndarray:
+    """:func:`to_cpu`, then the model's predictions for ``X`` as a flat float array."""
+    return np.asarray(to_cpu(fitted).predict(X), dtype=float).reshape(-1)
+
+
+def stage_device(settings: A1Settings, config, stage: StageSettings) -> str:
+    """The processor a stage fits on: ``cpu``, ``cuda`` (or ``cuda:<n>``), or ``auto``.
+
+    Read from the estimator as it is built (the settings' ``--device`` override, the stage's
+    ``init_args``, the model list's), so it is what the fits use. An estimator without a ``device``
+    setting runs on the processor; one left to choose for itself (TabICL's default) is ``auto``.
+    """
+    pipeline, _ = build_stage_pipeline(settings, config, ["x"], stage=stage)
+    estimator = final_estimator(pipeline)
+    params = estimator.get_params(deep=False)
+    if "device" not in params:
+        return "cpu"
+    device = params["device"]
+    if device is None:
+        # XGBoost left unset stays on the processor; others (TabICL) pick for themselves.
+        return "cpu" if type(estimator).__module__.startswith("xgboost") else "auto"
+    return str(device)

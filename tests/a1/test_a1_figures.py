@@ -316,11 +316,13 @@ def test_figure_5_stage_1_r2_is_the_out_of_fold_r2_of_the_audits(tmp_path):
         for target in ("caco3", "cec"):
             audit[stage1_prediction_column(target)] = measured[target].to_numpy() + rng.normal(0, 3, n)
             audit[f"predicted_by_{target}"] = ["oof_fold_0"] * 40 + ["full_train"] * 20
-        audit.to_parquet(tmp_path / "stage1" / f"{plan_id}.parquet")
+        (tmp_path / "stage1" / plan_id).mkdir()
+        audit.to_parquet(tmp_path / "stage1" / plan_id / "seed_42.parquet")
         pooled["random" if plan_id == "random" else "kfold"].append(audit.iloc[:40])
     inputs = SimpleNamespace(
         index=index,
         run_dir=tmp_path,
+        fit_seed=42,
         table=SimpleNamespace(frame=measured),
         settings=SimpleNamespace(auxiliary=SimpleNamespace(targets=["caco3", "cec"])),
     )

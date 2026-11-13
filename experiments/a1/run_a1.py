@@ -21,10 +21,18 @@ leave-one-region-out plans, how far each held-out region lies from its training 
 index, area of applicability, MESS, carbonate mix, SOM correlations) goes to ``dissimilarity/`` and
 ``dissimilarity_summary.csv``. A run resumes: what is already written is skipped. See :mod:`yg_eo_soilnet.a1.runner`.
 
+Every seed of the settings (``seeds``) repeats the model fits on the same plans, into
+``predictions/<plan_id>/seed_<seed>/``; ``--seeds`` runs some of them. ``stage2.models`` lists the
+SOM models to fit; stage 1 is skipped when none of them reads it. ``--only`` limits the plans by
+name, ``--workers`` runs plans side by side, ``--device`` puts both stages on the processor or the
+graphics card (checked before anything is fitted).
+
 Run from the repository root::
 
     python experiments/a1/make_plans.py --config configs/a1/a1_demo.yml
     python experiments/a1/run_a1.py --config configs/a1/a1_demo.yml --kinds random,logo
+    python experiments/a1/run_a1.py --config configs/a1/a1_xgb.yml --groups --seeds 42 \
+        --only "random,kfold_10km_*,logo_*" --workers 4
 """
 
 from __future__ import annotations
@@ -67,6 +75,26 @@ def main(argv: list[str] | None = None) -> RunResult:
         action="store_true",
         help="Also fit one model per covariate group (the local model of each leave-one-region-out plan on every covariate is fitted either way).",
     )
+    parser.add_argument(
+        "--only",
+        default=None,
+        help='Comma-separated plan_id patterns, e.g. "random,kfold_10km_*,logo_*": only the plans matching one.',
+    )
+    parser.add_argument(
+        "--seeds", default=None, help="Comma-separated seeds to run, among the settings' seeds (default all)."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Plans (and seeds) fitted side by side in this many processes; each estimator gets cpu_count // workers threads.",
+    )
+    parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default=None,
+        help="The processor of both stages, replacing the settings' (default: as the settings say).",
+    )
     parser.add_argument("--run-name", default="default", help="The run folder under <output_dir>/runs/.")
     parser.add_argument(
         "--restart",
@@ -88,6 +116,8 @@ def main(argv: list[str] | None = None) -> RunResult:
     run_dir = Path(a1.settings.output_dir) / "runs" / args.run_name
     log_file = setup_logging(run_dir / LOG_FILE, quiet=args.quiet)
     kinds = [kind.strip() for kind in args.kinds.split(",") if kind.strip()] if args.kinds else None
+    only = [pattern.strip() for pattern in args.only.split(",") if pattern.strip()] if args.only else None
+    seeds = [int(seed) for seed in args.seeds.split(",") if seed.strip()] if args.seeds else None
     result = run_plans(
         a1,
         plans_dir=args.plans,
@@ -97,6 +127,10 @@ def main(argv: list[str] | None = None) -> RunResult:
         restart=args.restart,
         tracking=not args.no_mlflow,
         dev_mode=args.dev_mode,
+        seeds=seeds,
+        only=only,
+        workers=args.workers,
+        device=args.device,
         log_file=log_file,
     )
     lines = [f"{len(result.computed)} file(s) written, {len(result.skipped)} already done, in {result.run_dir}/"]

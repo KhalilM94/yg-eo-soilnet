@@ -66,6 +66,9 @@ def _rows(points, predicted, *, model="m", plan_id="random", kind=RANDOM, split=
             "fallback": False,
             "model_role": "model",
             "tuned_params": "{}",
+            "seed": 42,
+            "device_stage1": "cpu",
+            "device_stage2": "cpu",
         },
         columns=list(PREDICTION_COLUMNS),
     )
@@ -455,7 +458,7 @@ def test_evaluate_writes_mixed_scores_apart_from_the_pooled_tables(tmp_path, mon
             _rows(points, _noisy(points, 2.5, 1), model=GLOBAL_AUX),
         ]
     ).assign(block_size_m=np.nan, local_fold=np.nan, local_block=np.nan)
-    monkeypatch.setattr(evaluation, "load_predictions", lambda run_dir: frame)
+    monkeypatch.setattr(evaluation, "load_predictions", lambda run_dir, **_: frame)
     tables = evaluate._evaluate(tmp_path, 10.0, 0, 50, None)
     for name in ("scores.csv", "scores_by_class.csv", "intervals.csv"):
         assert not set(tables[name]["kind"]) & {MIXED, CONTROL}, name

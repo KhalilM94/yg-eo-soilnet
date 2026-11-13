@@ -1,0 +1,109 @@
+# Paper A1, XGBoost in both stages: the main experiment, repeated without TabICL.
+# Same data, covariates, plans and stage-2 settings as configs/a1/a1.yml; only stage 1 changes, and
+# three seeds repeat the model fits on the same plans.
+# The TabICL run (results/a1) is kept as it is; this one writes to results/a1_xgb.
+#
+# Run with:
+#   python experiments/a1/preflight.py    --config configs/a1/a1_xgb.yml
+#   python experiments/a1/make_plans.py   --config configs/a1/a1_xgb.yml --kinds random,spatial_kfold,logo
+#   # covariate groups and the local models: first seed only, 10 km blocks and basins only
+#   python experiments/a1/run_a1.py --config configs/a1/a1_xgb.yml --kinds random,spatial_kfold,logo \
+#       --groups --seeds 42 --only "random,kfold_10km_*,logo_*"
+#   # every input, every seed, every plan (block-size sensitivity included)
+#   python experiments/a1/run_a1.py --config configs/a1/a1_xgb.yml --kinds random,spatial_kfold,logo
+#   python experiments/a1/evaluate.py     --config configs/a1/a1_xgb.yml
+#   python experiments/a1/make_figures.py --config configs/a1/a1_xgb.yml
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+# The 10 major hydraulic basins.
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+# Stage 1: XGBoost, not tuned; the values are written out (the model-list defaults at the time of
+# the mixed run) so a later change to configs/sklearn/model_registry.yml cannot change this run.
+stage1:
+  estimator: XGBoost
+  # Stage 1 stays on the processor: a few untuned fits per plan, and the same as the stage 1 of
+  # results/a1_mixed. Switch to cuda only if the GPU check of Prompt 1 shows that
+  # multi_output_tree (both targets in one model) runs on the graphics card.
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  # Stage 2 (the tuned SOM models, where the run time goes) on the graphics card. Needs the CUDA
+  # build of XGBoost: run with `pixi run -e dev` or `-e core-gpu`, not `-e core`.
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  # Every SOM model (the default).
+  models: [global, global_aux, per_class_measured, per_class_predicted]
+inner_cv_folds: 5
+# The first seed fixes the plans (splits, blocks, folds of the plans); every seed repeats the model
+# fits on those same plans: the stage-1 cross-fitting folds, the stage-2 inner folds and the
+# estimators' random_state.
+seeds: [42, 7, 2026]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+plans:
+  random:
+    test_size: 0.15
+    val_size: 0
+  spatial_kfold:
+    method: grid
+    n_clusters: 50
+    cell_size_m: 10000
+    # Block-size sensitivity: one set of 5 folds per size.
+    cell_sizes_m: [5000, 10000, 25000, 50000]
+    n_folds: 5
+    val_size: 0
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou, Tensift, Loukkous, Bouregreg]
+    validation_region: false
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_xgb
+mlflow_experiment: Paper_A1

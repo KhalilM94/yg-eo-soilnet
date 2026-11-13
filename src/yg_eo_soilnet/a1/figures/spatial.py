@@ -13,6 +13,7 @@ from matplotlib.lines import Line2D
 from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach
+from yg_eo_soilnet.a1.layout import find_stage1
 from yg_eo_soilnet.a1.figures.labels import pretty_name, pretty_split
 from yg_eo_soilnet.a1.figures.style import (
     MAIN_MODELS,
@@ -82,8 +83,8 @@ def stage1_out_of_fold(inputs: FigureInputs) -> pd.DataFrame:
     measured = inputs.table.frame
     pooled: dict = {}
     for row in index.itertuples():
-        path = inputs.run_dir / "stage1" / f"{row.plan_id}.parquet"
-        if not path.exists():
+        path = find_stage1(inputs.run_dir, row.plan_id, inputs.fit_seed)
+        if path is None:
             continue
         audit = pd.read_parquet(path).set_index("point_id")
         for target in inputs.settings.auxiliary.targets:

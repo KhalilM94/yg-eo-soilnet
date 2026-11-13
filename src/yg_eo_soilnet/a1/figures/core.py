@@ -27,6 +27,7 @@ from scipy.stats import rankdata
 from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1 import evaluation
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config, stage1_prediction_column
+from yg_eo_soilnet.a1.layout import find_stage1, ran_plan
 from yg_eo_soilnet.a1.plans import LOGO, RANDOM, SPATIAL_KFOLD
 from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX
 from yg_eo_soilnet.a1.strata import carbonate_class
@@ -123,8 +124,27 @@ class FigureInputs:
 
     @property
     def predictions(self) -> pd.DataFrame:
-        """Every prediction file of the run (:func:`~yg_eo_soilnet.a1.evaluation.load_predictions`)."""
-        return self._cached("predictions", lambda: evaluation.load_predictions(self.run_dir))
+        """The run's predictions of its first seed (:func:`~yg_eo_soilnet.a1.evaluation.load_predictions`).
+
+        The figures show the primary result, the first seed; ``evaluate.py``'s ``seed_summary.csv``
+        says how far the other seeds move it. A run without its first seed shows the seed it has
+        first in :func:`~yg_eo_soilnet.a1.evaluation.seed_order`.
+        """
+
+        def build():
+            frame = evaluation.load_predictions(self.run_dir, first_seed=self.settings.seed)
+            return frame[frame["seed"] == self.fit_seed_of(frame)].reset_index(drop=True)
+
+        return self._cached("predictions", build)
+
+    def fit_seed_of(self, frame: pd.DataFrame) -> int:
+        """The seed the figures show: the settings' first, or the first the run has."""
+        return evaluation.seed_order(frame, self.settings.seed)[0]
+
+    @property
+    def fit_seed(self) -> int:
+        """The seed the figures show (:meth:`fit_seed_of` the run's predictions)."""
+        return int(self.predictions["seed"].iloc[0]) if not self.predictions.empty else self.settings.seed
 
     @property
     def transfer(self) -> pd.DataFrame:
@@ -216,9 +236,9 @@ class FigureInputs:
 
     def stage1(self, plan_id: str) -> pd.DataFrame:
         """The stage-1 audit of one plan: ``point_id, split, inner_fold``, the predictions."""
-        path = self.run_dir / "stage1" / f"{plan_id}.parquet"
-        if not path.exists():
-            raise FileNotFoundError(f"No stage-1 audit for plan {plan_id!r} in {self.run_dir}.")
+        path = find_stage1(self.run_dir, plan_id, self.fit_seed)
+        if path is None:
+            raise FileNotFoundError(f"No stage-1 audit for plan {plan_id!r} (seed {self.fit_seed}) in {self.run_dir}.")
         return pd.read_parquet(path)
 
     @property
@@ -638,7 +658,7 @@ def _require_plan(inputs: FigureInputs, index: pd.DataFrame, plan_id: str) -> No
     A run made with ``--kinds logo,mixed`` has no ``random`` plan, the default of ``--shap-plan``;
     a plan the run skipped has no stage-1 audit.
     """
-    ran = index[[(inputs.run_dir / "stage1" / f"{plan}.parquet").exists() for plan in index["plan_id"]]]
+    ran = index[[ran_plan(inputs.run_dir, plan) for plan in index["plan_id"]]]
     if plan_id in set(ran["plan_id"]):
         return
     preferred = ran[ran["kind"] == LOGO]
@@ -669,12 +689,20 @@ def shap_by_class(inputs: FigureInputs, *, plan_id: str = RANDOM, model: str = G
     from yg_eo_soilnet.a1.stage2 import build_context, run_model
     from yg_eo_soilnet.datamodules.splitting import SplitPlan
 
-    settings = inputs.settings
+    from yg_eo_soilnet.a1.pipelines import to_cpu
+
     index = pd.read_csv(inputs.plans_dir / "index.csv")
     _require_plan(inputs, index, plan_id)
+    # Refitted as the run fitted the seed the figures show, then explained on the processor.
+    settings = inputs.settings.for_seed(inputs.fit_seed)
     kind = index.set_index("plan_id").loc[plan_id, "kind"]
     plan = SplitPlan.from_frame(pd.read_parquet(inputs.plans_dir / f"{plan_id}.parquet"), strategy=kind)
-    auxiliary = _auxiliary_from_frame(inputs.stage1(plan_id), settings)
+    if find_stage1(inputs.run_dir, plan_id, inputs.fit_seed) is not None:
+        auxiliary = _auxiliary_from_frame(inputs.stage1(plan_id), settings)
+    else:  # a run whose models never read stage 1 (stage2.models: [global]) did not fit it
+        from yg_eo_soilnet.a1.auxiliary import folds_only
+
+        auxiliary = folds_only(plan, settings, kind=kind)
     table = inputs.table
     context = build_context(table, plan, auxiliary, settings, inputs.config)
     resolved = inputs.a1.resolve_groups(table)
@@ -688,6 +716,7 @@ def shap_by_class(inputs: FigureInputs, *, plan_id: str = RANDOM, model: str = G
     )
 
     test = context.split.index[(context.split == TEST).to_numpy()]
+    to_cpu(outcome.fitted)
     preprocessor = outcome.fitted.named_steps["preprocessor"]
     estimator = outcome.fitted.named_steps["model"]
     estimator = getattr(estimator, "regressor_", estimator)

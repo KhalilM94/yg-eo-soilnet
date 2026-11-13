@@ -35,6 +35,8 @@ import pandas as pd
 
 from yg_eo_soilnet.a1.config import COMBINED_GROUP
 from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, RANDOM, SPATIAL_KFOLD, slug
+from yg_eo_soilnet.a1.devices import UNKNOWN_DEVICE
+from yg_eo_soilnet.a1.layout import prediction_paths
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
 from yg_eo_soilnet.a1.stage2 import GLOBAL_AUX, LOCAL
 from yg_eo_soilnet.datamodules.splitting import TEST
@@ -79,8 +81,10 @@ def load_predictions(
     kinds: Optional[Iterable[str]] = None,
     models: Optional[Iterable[str]] = None,
     covariate_groups: Optional[Iterable[str]] = None,
+    seeds: Optional[Iterable[int]] = None,
+    first_seed: Optional[int] = None,
 ) -> pd.DataFrame:
-    """Every prediction file of a run folder, in one table.
+    """Every prediction file of a run folder, in one table - every seed's, one ``seed`` column apart.
 
     Parameters
     ----------
@@ -88,6 +92,11 @@ def load_predictions(
         The run folder, ``<output_dir>/runs/<run name>/``.
     kinds, models, covariate_groups : iterable of str, optional
         Keep only these plan kinds, models or covariate groups.
+    seeds : iterable of int, optional
+        Keep only these seeds.
+    first_seed : int, optional
+        The seed of a folder written before seeds were repeated (one file per plan, no ``seed``
+        column): the run's first seed. -1 when not given. Its devices read ``unknown``.
 
     Returns
     -------
@@ -102,12 +111,17 @@ def load_predictions(
         If a file lacks some of those columns: it was written by an older ``run_a1.py``, and the
         run must be redone with ``--restart``.
     """
-    paths = sorted((Path(run_dir) / "predictions").glob("*/*.parquet"))
+    paths = prediction_paths(run_dir)
     if not paths:
         raise FileNotFoundError(f"No prediction files under {Path(run_dir) / 'predictions'}; run run_a1.py first.")
     frames = []
     for path in paths:
         frame = pd.read_parquet(path)
+        if "seed" not in frame.columns:
+            frame["seed"] = -1 if first_seed is None else int(first_seed)
+        for column in ("device_stage1", "device_stage2"):
+            if column not in frame.columns:
+                frame[column] = UNKNOWN_DEVICE
         missing = [column for column in PREDICTION_COLUMNS if column not in frame.columns]
         if missing:
             raise ValueError(
@@ -122,9 +136,15 @@ def load_predictions(
                 "local_fold": float,
                 "local_block": float,
                 "held_out": object,
+                "seed": "int64",
             }
         )
-        for column, wanted in (("kind", kinds), ("model", models), ("covariate_group", covariate_groups)):
+        for column, wanted in (
+            ("kind", kinds),
+            ("model", models),
+            ("covariate_group", covariate_groups),
+            ("seed", None if seeds is None else [int(seed) for seed in seeds]),
+        ):
             if wanted is not None:
                 frame = frame[frame[column].isin(list(wanted))]
         frames.append(frame[list(PREDICTION_COLUMNS)])
@@ -786,7 +806,16 @@ def _pooled_scope(kind: str, block_size_m) -> str:
     return kind
 
 
-def headline_metrics(
+def headline_metrics(frame: pd.DataFrame, **tables) -> dict[str, float]:
+    """The headline metrics of a run as a dict, ``name -> value`` (:func:`headline_table`).
+
+    Takes the same arguments as :func:`headline_table`.
+    """
+    rows = headline_table(frame, **tables)
+    return dict(zip(rows["name"], rows["value"]))
+
+
+def headline_table(
     frame: pd.DataFrame,
     *,
     intervals: Optional[pd.DataFrame] = None,
@@ -828,19 +857,31 @@ def headline_metrics(
 
     Returns
     -------
-    dict of str to float
-        Undefined scores are left out.
+    pandas.DataFrame
+        ``name, metric, scope, model, covariate_group, bound, value``: one row per metric, its
+        parts apart (``bound`` is ``lo``/``hi`` for an interval bound, empty otherwise; ``model``
+        is empty for a transfer drop). Undefined scores are left out.
     """
     from yg_eo_soilnet.a1.tracking import metric_name
 
     def group_part(group):
         return None if group == DEFAULT_GROUP else group
 
-    metrics: dict[str, float] = {}
+    rows: list = []
 
-    def add(name: str, value) -> None:
+    def add(score: str, scope: str, model, group, value, bound=None) -> None:
         if value is not None and np.isfinite(value):
-            metrics[name] = float(value)
+            rows.append(
+                {
+                    "name": metric_name(score, scope, model, group, bound),
+                    "metric": score,
+                    "scope": scope,
+                    "model": model or "",
+                    "covariate_group": group or "",
+                    "bound": bound or "",
+                    "value": float(value),
+                }
+            )
 
     test = frame[frame["split"] == TEST]
     pooled = test[test["kind"].isin([RANDOM, SPATIAL_KFOLD])]
@@ -848,34 +889,31 @@ def headline_metrics(
         for row in grouped_metrics(pooled, ["kind", "block_size_m", "model", "covariate_group"], min_n=0).itertuples():
             scope = _pooled_scope(row.kind, row.block_size_m)
             for score in HEADLINE_SCORES:
-                add(metric_name(score, scope, row.model, group_part(row.covariate_group)), getattr(row, score))
+                add(score, scope, row.model, group_part(row.covariate_group), getattr(row, score))
 
     logo = test[test["kind"] == LOGO]
     if not logo.empty:
         regions = grouped_metrics(logo, ["held_out", "model", "covariate_group"], min_n=0)
         for row in regions.itertuples():
             for score in HEADLINE_SCORES:
-                add(
-                    metric_name(score, f"logo_{row.held_out}", row.model, group_part(row.covariate_group)),
-                    getattr(row, score),
-                )
+                add(score, f"logo_{row.held_out}", row.model, group_part(row.covariate_group), getattr(row, score))
         means = regions.groupby(["model", "covariate_group"], sort=True)[list(HEADLINE_SCORES)].mean()
         for (model, group), row in means.iterrows():
             for score in HEADLINE_SCORES:
-                add(metric_name(score, "logo_mean", model, group_part(group)), row[score])
+                add(score, "logo_mean", model, group_part(group), row[score])
 
     if transfer is not None and not transfer.empty:
         drops = transfer[(transfer["kind"] == LOGO) & transfer["has_local"]]
         for row in drops.itertuples():
-            add(metric_name("rmse_drop", f"logo_{row.region}", row.covariate_group), row.rmse_drop)
+            add("rmse_drop", f"logo_{row.region}", None, row.covariate_group, row.rmse_drop)
         for group, values in drops.groupby("covariate_group")["rmse_drop"]:
-            add(metric_name("rmse_drop", "logo_mean", group), values.mean())
+            add("rmse_drop", "logo_mean", None, group, values.mean())
 
     if mixed is not None and not mixed.empty:
         for row in mixed[mixed["covariate_group"] == DEFAULT_GROUP].itertuples():
             scope = f"{row.kind}_{row.region}_f{float(row.fraction):g}"
             for score in HEADLINE_SCORES:
-                add(metric_name(score, scope, row.model), getattr(row, score))
+                add(score, scope, row.model, None, getattr(row, score))
 
     for table, scope_of in (
         (intervals, lambda row: _pooled_scope(row["kind"], row.get("block_size_m"))),
@@ -888,8 +926,9 @@ def headline_metrics(
                 continue
             for bound in ("low", "high"):
                 suffix = "lo" if bound == "low" else "hi"
-                add(metric_name(row["metric"], scope_of(row), row["model"], suffix), row[bound])
-    return metrics
+                add(row["metric"], scope_of(row), row["model"], None, row[bound], bound=suffix)
+    columns = ["name", "metric", "scope", "model", "covariate_group", "bound", "value"]
+    return pd.DataFrame(rows, columns=columns).drop_duplicates("name", keep="last").reset_index(drop=True)
 
 
 def region_names(frame: pd.DataFrame) -> dict[str, str]:
@@ -902,3 +941,95 @@ def region_names(frame: pd.DataFrame) -> dict[str, str]:
     """
     names = frame.loc[frame["kind"] == LOGO, "held_out"].dropna().unique()
     return {slug(name): str(name) for name in sorted(names, key=slug)}
+
+
+# --- seeds -----------------------------------------------------------------------------------------
+
+#: The columns that name a comparison of ``differences.csv``, whatever the seed.
+DIFFERENCE_KEYS = (
+    "kind",
+    "block_size_m",
+    "held_out",
+    "region",
+    "fraction",
+    "model",
+    "covariate_group",
+    "a",
+    "b",
+    "metric",
+)
+
+
+def seed_order(frame: pd.DataFrame, first_seed: Optional[int] = None) -> list[int]:
+    """The seeds of a predictions table, the first seed (the primary result) first, then the others in order."""
+    seeds = sorted(int(seed) for seed in pd.unique(frame["seed"]))
+    if first_seed is not None and int(first_seed) in seeds:
+        seeds.remove(int(first_seed))
+        seeds.insert(0, int(first_seed))
+    return seeds
+
+
+def seed_summary(headlines: pd.DataFrame) -> pd.DataFrame:
+    """How much each headline metric moves from seed to seed.
+
+    Parameters
+    ----------
+    headlines : pandas.DataFrame
+        :func:`headline_table` of every seed, stacked, with a ``seed`` column; the first seed's
+        rows first. Interval bounds (``bound`` set) are left out: each seed's own interval already
+        says how uncertain its estimate is.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per metric (``name``, with its ``metric, scope, model, covariate_group``):
+        ``first_seed``, its value there (``first``), and the ``mean``, ``sd`` (n - 1), ``min`` and
+        ``max`` over the ``n_seeds`` seeds that have it.
+    """
+    columns = [
+        "name",
+        "metric",
+        "scope",
+        "model",
+        "covariate_group",
+        "first_seed",
+        "first",
+        "mean",
+        "sd",
+        "min",
+        "max",
+        "n_seeds",
+    ]
+    if headlines.empty:
+        return pd.DataFrame(columns=columns)
+    rows = headlines[headlines["bound"] == ""]
+    first_seed = int(rows["seed"].iloc[0])
+    keys = ["name", "metric", "scope", "model", "covariate_group"]
+    summary = rows.groupby(keys, sort=False)["value"].agg(["mean", "std", "min", "max", "count"]).reset_index()
+    summary = summary.rename(columns={"std": "sd", "count": "n_seeds"})
+    first = rows[rows["seed"] == first_seed].set_index("name")["value"]
+    summary["first_seed"] = first_seed
+    summary["first"] = summary["name"].map(first)
+    return summary[columns]
+
+
+def same_sign_counts(differences: pd.DataFrame) -> pd.DataFrame:
+    """Add ``n_seeds_same_sign`` and ``n_seeds`` to a ``differences.csv`` of several seeds.
+
+    For each comparison (the same models, plans and score), how many seeds give an estimate of the
+    same sign as the first seed's - the first seed being the one the table lists first. A
+    difference that flips sign from seed to seed rests on the folds the points happened to fall in.
+    """
+    if differences.empty or "seed" not in differences:
+        return differences
+    keys = [column for column in DIFFERENCE_KEYS if column in differences.columns]
+    first_seed = differences["seed"].iloc[0]
+    keyed = differences.assign(_key=differences[keys].astype(str).agg("|".join, axis=1))
+    reference = np.sign(keyed[keyed["seed"] == first_seed].set_index("_key")["estimate"])
+    same = np.sign(keyed["estimate"]).to_numpy() == keyed["_key"].map(reference).to_numpy()
+    counts = (
+        keyed.assign(_same=same).groupby("_key").agg(n_seeds_same_sign=("_same", "sum"), n_seeds=("seed", "nunique"))
+    )
+    out = keyed.join(counts, on="_key").drop(columns="_key")
+    out["n_seeds_same_sign"] = out["n_seeds_same_sign"].astype(int)
+    return out

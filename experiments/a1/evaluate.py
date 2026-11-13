@@ -28,9 +28,19 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
 ``transfer.csv``
     For ``logo`` and ``mixed`` plans, the local against the transferred score per region and
     covariate group, and the drop between them.
+``seed_summary.csv``
+    For a run of several seeds: each headline metric's value on the first seed and its mean, SD,
+    min and max over the seeds.
+
+Every table has a ``seed`` column: one block of rows per seed the run has. The primary result is
+the first seed's, with its block-bootstrap intervals; the other seeds repeat the model fits on the
+same plans, and ``seed_summary.csv`` says how far the scores move between them.
+``differences.csv`` also gives, for each comparison, the number of seeds whose difference has the
+sign of the first seed's (``n_seeds_same_sign`` of ``n_seeds``).
 
 Unless ``--no-mlflow`` is given, the tables, ``region_names.json`` and the headline metrics
-(:func:`yg_eo_soilnet.a1.evaluation.headline_metrics`) are also added to the run folder's MLflow
+(:func:`yg_eo_soilnet.a1.evaluation.headline_metrics`, of the first seed; with several seeds also
+``<metric>__..._sd``, their SD over the seeds) are also added to the run folder's MLflow
 run - the parent run ``run_a1.py`` opened, whose id the folder's ``manifest.json`` records.
 
 Run from the repository root, after ``run_a1.py``::
@@ -75,6 +85,7 @@ TABLES = (
     "differences.csv",
     "transfer.csv",
     "scores_mixed.csv",
+    "seed_summary.csv",
 )
 #: The held-out regions' names as they appear in metric names, beside the tables.
 REGION_NAMES_FILE = "region_names.json"
@@ -120,13 +131,64 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     with contextlib.ExitStack() as stack:
         # Opened first, so a run folder whose MLflow run is gone fails before any work is done.
         tracking = None if args.no_mlflow else stack.enter_context(reopen_parent(run_dir, settings.load_config()))
-        tables = _evaluate(run_dir, block_km, seed, args.n_boot, tracking)
+        tables = _evaluate(run_dir, block_km, seed, args.n_boot, tracking, first_seed=settings.seed)
     return tables
 
 
-def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) -> dict[str, pd.DataFrame]:
-    """Write the tables, print the headline, and add both to the open MLflow run (``tracking``)."""
-    everything = evaluation.load_predictions(run_dir)
+def _evaluate(
+    run_dir: Path, block_km: float, seed: int, n_boot: int, tracking, *, first_seed: int | None = None
+) -> dict[str, pd.DataFrame]:
+    """Write the tables, print the headline, and add both to the open MLflow run (``tracking``).
+
+    ``seed`` seeds the resampling; ``first_seed`` is the run's first seed, the primary result.
+    """
+    everything = evaluation.load_predictions(run_dir, first_seed=first_seed)
+    seeds = evaluation.seed_order(everything, first_seed)
+    per_seed = {
+        fit_seed: _seed_tables(everything[everything["seed"] == fit_seed], block_km, seed, n_boot) for fit_seed in seeds
+    }
+    tables = {
+        name: _stack([per_seed[fit_seed][name].assign(seed=fit_seed) for fit_seed in seeds])
+        for name in TABLES
+        if name != "seed_summary.csv"
+    }
+    tables["differences.csv"] = evaluation.same_sign_counts(tables["differences.csv"])
+    headlines = pd.concat(
+        [per_seed[fit_seed]["headline"].assign(seed=fit_seed) for fit_seed in seeds], ignore_index=True
+    )
+    tables["seed_summary.csv"] = evaluation.seed_summary(headlines)
+
+    out = run_dir / "evaluation"
+    out.mkdir(parents=True, exist_ok=True)
+    for name, table in tables.items():
+        table.to_csv(out / name, index=False)
+    regions = evaluation.region_names(everything)
+    (out / REGION_NAMES_FILE).write_text(json.dumps(regions, indent=2, ensure_ascii=False) + "\n")
+    primary = per_seed[seeds[0]]
+    headline = dict(zip(primary["headline"]["name"], primary["headline"]["value"]))
+    if len(seeds) > 1:
+        spread = tables["seed_summary.csv"].dropna(subset=["sd"])
+        headline.update({f"{name}_sd": float(sd) for name, sd in zip(spread["name"], spread["sd"])})
+    if tracking is not None:
+        import mlflow
+
+        for name in (*TABLES, REGION_NAMES_FILE):
+            mlflow.log_artifact(str(out / name), "evaluation")
+        mlflow.log_metrics(headline)
+        mlflow.set_tags({f"region__{key}": name for key, name in regions.items()})
+    _print_summary(primary, tables, seeds, block_km, n_boot, out, tracking, len(headline))
+    return tables
+
+
+def _stack(parts: list) -> pd.DataFrame:
+    """One table from every seed's, ``seed`` first; an empty table keeps its columns."""
+    kept = [part for part in parts if not part.empty]
+    stacked = pd.concat(kept, ignore_index=True) if kept else parts[0]
+    return stacked[["seed", *[column for column in stacked.columns if column != "seed"]]]
+
+
+def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: int) -> dict[str, pd.DataFrame]:
+    """Every table of one seed's predictions, and its headline metrics (``headline``, a table)."""
     # Mixed and control plans are scored per region and share (below); pooled they mean nothing.
     frame = evaluation.pooled_rows(everything)
     test = frame[frame["split"] == TEST]
@@ -146,10 +208,10 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
     transfer = evaluation.transfer_table(everything)
     mixed = evaluation.mixed_scores(everything)
     paired = evaluation.mixed_differences(everything, block_km=block_km, n=n_boot, seed=seed)
-    differences = pd.concat([table for table in (boot.differences, paired) if not table.empty], ignore_index=True)
-    if differences.empty:
-        differences = boot.differences
-    tables = {
+    # A run of one model (stage2.models: [global]) has neither: the table keeps its columns, empty.
+    kept = [table for table in (boot.differences, paired) if not table.empty]
+    differences = pd.concat(kept, ignore_index=True) if kept else boot.differences
+    return {
         "scores.csv": evaluation.grouped_metrics(frame, ["kind", "block_size_m", "model", "covariate_group", "split"]),
         "scores_by_class.csv": evaluation.grouped_metrics(
             combined, ["kind", "block_size_m", "model", "carbonate_class_measured"]
@@ -159,34 +221,29 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
         "differences.csv": differences,
         "transfer.csv": transfer,
         "scores_mixed.csv": mixed,
+        "headline": evaluation.headline_table(
+            frame, intervals=boot.intervals, region_intervals=by_region, transfer=transfer, mixed=mixed
+        ),
+        "_model_differences": boot.differences,
+        "_paired": paired,
     }
-    out = run_dir / "evaluation"
-    out.mkdir(parents=True, exist_ok=True)
-    for name, table in tables.items():
-        table.to_csv(out / name, index=False)
-    regions = evaluation.region_names(everything)
-    (out / REGION_NAMES_FILE).write_text(json.dumps(regions, indent=2, ensure_ascii=False) + "\n")
-    headline = evaluation.headline_metrics(
-        frame, intervals=boot.intervals, region_intervals=by_region, transfer=transfer, mixed=mixed
-    )
-    if tracking is not None:
-        import mlflow
 
-        for name in (*TABLES, REGION_NAMES_FILE):
-            mlflow.log_artifact(str(out / name), "evaluation")
-        mlflow.log_metrics(headline)
-        mlflow.set_tags({f"region__{key}": name for key, name in regions.items()})
 
-    rmse = boot.intervals[boot.intervals["metric"] == "rmse"]
+def _print_summary(primary, tables, seeds, block_km, n_boot, out, tracking, n_headline) -> None:
+    """The end summary: the first seed's scores and differences, and the spread over the seeds."""
+    intervals = primary["intervals.csv"]
+    rmse = intervals[intervals["metric"] == "rmse"]
     summary(
-        f"Test RMSE, every covariate, with 95 % block-bootstrap intervals ({block_km:g} km blocks, {n_boot} draws):"
+        f"Test RMSE, every covariate, with 95 % block-bootstrap intervals ({block_km:g} km blocks, {n_boot} draws)"
+        + (f", seed {seeds[0]} of {len(seeds)}:" if len(seeds) > 1 else ":")
     )
     summary(
         rmse[["kind", "block_size_m", "model", "estimate", "low", "high", "n", "n_blocks"]]
         .round(3)
         .to_string(index=False)
     )
-    differences = boot.differences[boot.differences["metric"] == "rmse"]
+    differences = primary["_model_differences"]
+    differences = differences[differences["metric"] == "rmse"]
     if not differences.empty:
         summary("RMSE differences (a - b; negative means a is better):")
         summary(
@@ -194,6 +251,7 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
             .round(4)
             .to_string(index=False)
         )
+    paired = primary["_paired"]
     paired_rmse = paired[(paired["metric"] == "rmse") & (paired["model"] == GLOBAL)] if not paired.empty else paired
     if not paired_rmse.empty:
         summary("Mixed minus control, global model, RMSE (negative: the other basins help):")
@@ -202,12 +260,16 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
             .round(4)
             .to_string(index=False)
         )
+    if len(seeds) > 1:
+        spread = tables["seed_summary.csv"]
+        spread = spread[spread["name"].str.startswith("rmse__") & (spread["covariate_group"] == "")]
+        summary(f"Test RMSE over the {len(seeds)} seeds {seeds} (mean, SD, min, max):")
+        summary(spread[["scope", "model", "first", "mean", "sd", "min", "max"]].round(3).to_string(index=False))
     summary(f"Tables in {out}/: {', '.join(TABLES)}")
     if tracking is not None:
         summary(
-            f"Added to MLflow run {tracking.info.run_id}: the tables (evaluation/) and {len(headline)} headline metrics."
+            f"Added to MLflow run {tracking.info.run_id}: the tables (evaluation/) and {n_headline} headline metrics."
         )
-    return tables
 
 
 if __name__ == "__main__":

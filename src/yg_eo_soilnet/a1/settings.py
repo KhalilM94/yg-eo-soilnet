@@ -28,6 +28,8 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "FAO_CARBONATE_EDGES",
     "FAO_CARBONATE_LABELS",
+    "DEVICES",
+    "SOM_MODELS",
     "STAGE1_ESTIMATORS",
     "A1Settings",
     "AuxiliarySettings",
@@ -56,6 +58,10 @@ REGION_SOURCES = (REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS)
 
 #: The estimators stage 1 may use to predict the auxiliary properties.
 STAGE1_ESTIMATORS = ("TabICL", "XGBoost")
+#: The SOM models ``stage2.models`` may list (:data:`yg_eo_soilnet.a1.stage2.MODELS`), in their order.
+SOM_MODELS = ("global", "global_aux", "per_class_measured", "per_class_predicted")
+#: The processors ``run_a1.py --device`` accepts.
+DEVICES = ("cpu", "cuda")
 
 #: ``plans.spatial_kfold.method``: blocks from k-means on the coordinates, or from a regular grid.
 KFOLD_METHODS = ("kmeans", "grid")
@@ -126,12 +132,15 @@ class StageSettings:
         Replaces the entry's ``params`` grid when set: each setting (``model__max_depth``) with the
         list of values to try. Stage 2 is tuned over it by inner cross-validation; stage 1 is not
         tuned and takes one value per setting.
+    models : tuple of str or None
+        Stage 2 only: the SOM models to fit, among :data:`SOM_MODELS`; every one when None.
     """
 
     estimator: str
     import_path: Optional[str] = None
     init_args: Mapping[str, Any] = field(default_factory=dict)
     params: Optional[Mapping[str, Any]] = None
+    models: Optional[tuple[str, ...]] = None
 
 
 @dataclass(frozen=True)
@@ -370,8 +379,10 @@ class A1Settings:
         How many folds the training points are split into inside each stage: for stage 1, so each
         point's prediction comes from a model that never saw it; for both, to choose settings.
     seeds : tuple of int
-        The random seeds. The first one seeds the splits and folds; each further one repeats the
-        experiment, so the spread between repeats can be reported.
+        The random seeds. The first alone builds the plans (splits, blocks, mixed draws), so adding
+        a seed never changes a plan. Every seed repeats the model fits on those plans: the stage-1
+        cross-fitting folds, the stage-2 search folds (which are stage 1's), the ``local`` model's
+        folds and the estimators' ``random_state`` (:meth:`for_seed`).
     output_dir : str
         Where the tables and figures are written as plain files, one folder per experiment.
     mlflow_experiment : str
@@ -392,6 +403,14 @@ class A1Settings:
         The settings of each part; see their own classes.
     source_path : str or None
         The file these settings were read from.
+    fit_seed : int or None
+        Set by :meth:`for_seed`, never in the file: the seed of the model fits; the first of
+        :attr:`seeds` when None.
+    device : str or None
+        Set by ``run_a1.py --device``, never in the file: the processor of both stages, replacing
+        the ``device`` the stages' ``init_args`` give.
+    n_jobs : int or None
+        Set by ``run_a1.py --workers``, never in the file: the threads each estimator may use.
     """
 
     main_config_path: str
@@ -415,14 +434,50 @@ class A1Settings:
     preflight: PreflightSettings = field(default_factory=PreflightSettings)
     plans: PlanSettings = field(default_factory=PlanSettings)
     source_path: Optional[str] = None
+    fit_seed: Optional[int] = None
+    device: Optional[str] = None
+    n_jobs: Optional[int] = None
 
     def __post_init__(self):
         _validate(self)
 
     @property
     def seed(self) -> int:
-        """The seed of the splits and folds: the first of :attr:`seeds`."""
+        """The seed of the plans: the first of :attr:`seeds`."""
         return self.seeds[0]
+
+    @property
+    def model_seed(self) -> int:
+        """The seed of the model fits: :attr:`fit_seed`, or the first of :attr:`seeds`."""
+        return self.seed if self.fit_seed is None else self.fit_seed
+
+    @property
+    def shuffle_groups(self) -> bool:
+        """Whether folds of whole blocks or regions are dealt at random (``model_seed``).
+
+        Not for the first seed, whose folds are the ones every run before seeds were repeated used
+        (``GroupKFold`` without shuffling); each further seed deals the groups into folds at random,
+        or spatial and regional plans would repeat the same fits.
+        """
+        return self.model_seed != self.seed
+
+    @property
+    def som_models(self) -> tuple[str, ...]:
+        """The SOM models to fit: ``stage2.models``, in :data:`SOM_MODELS` order; all of them by default."""
+        chosen = self.stage2.models
+        return SOM_MODELS if chosen is None else tuple(model for model in SOM_MODELS if model in chosen)
+
+    def for_seed(self, seed: int) -> "A1Settings":
+        """These settings with the model fits seeded by ``seed``, one of :attr:`seeds`.
+
+        Raises
+        ------
+        ValueError
+            If ``seed`` is not one of :attr:`seeds`.
+        """
+        if int(seed) not in self.seeds:
+            raise ValueError(f"Seed {seed} is not among the settings' seeds {list(self.seeds)}.")
+        return replace(self, fit_seed=int(seed))
 
     def load_config(self):
         """Read the main configuration these settings point to.
@@ -472,7 +527,21 @@ def dev_mode_settings(settings: A1Settings) -> A1Settings:
     >>> quick.target
     'organic_matter_g_kg'
     """
-    return replace(settings, stage1=DEV_MODE_STAGE1, stage2=DEV_MODE_STAGE2, inner_cv_folds=DEV_MODE_INNER_CV_FOLDS)
+    return replace(
+        settings,
+        stage1=replace(DEV_MODE_STAGE1, init_args={**DEV_MODE_STAGE1.init_args, **_device_of(settings.stage1)}),
+        stage2=replace(
+            DEV_MODE_STAGE2,
+            init_args={**DEV_MODE_STAGE2.init_args, **_device_of(settings.stage2)},
+            models=settings.stage2.models,
+        ),
+        inner_cv_folds=DEV_MODE_INNER_CV_FOLDS,
+    )
+
+
+def _device_of(stage: StageSettings) -> dict:
+    """``{"device": ...}`` when the stage names a processor, so dev mode keeps it; empty otherwise."""
+    return {"device": stage.init_args["device"]} if "device" in (stage.init_args or {}) else {}
 
 
 def load_settings(path: str) -> A1Settings:
@@ -662,6 +731,10 @@ def _stage_kwargs(name: str):
         if not isinstance(init_args, Mapping):
             raise ValueError(f"{name}.init_args must be a mapping of argument to value; got {init_args!r}")
         kwargs["init_args"] = dict(init_args)
+        if values.get("models") is not None:
+            if name != "stage2":
+                raise ValueError(f"{name}.models: only stage2 lists the SOM models to fit.")
+            kwargs["models"] = _strings(values["models"], f"{name}.models")
         if values.get("params") is not None:
             params = values["params"]
             if not isinstance(params, Mapping):
@@ -818,6 +891,16 @@ def _validate(settings: A1Settings) -> None:
         )
     if settings.inner_cv_folds < 2:
         raise ValueError(f"inner_cv_folds must be at least 2; got {settings.inner_cv_folds}")
+    if settings.stage1.models is not None:
+        raise ValueError("stage1.models: only stage2 lists the SOM models to fit.")
+    if settings.stage2.models is not None:
+        unknown = [model for model in settings.stage2.models if model not in SOM_MODELS]
+        if unknown or not settings.stage2.models:
+            raise ValueError(f"stage2.models must list some of {list(SOM_MODELS)}; got {list(settings.stage2.models)}")
+    if settings.device is not None and settings.device not in DEVICES:
+        raise ValueError(f"device must be one of {list(DEVICES)}; got {settings.device!r}")
+    if settings.n_jobs is not None and settings.n_jobs < 1:
+        raise ValueError(f"n_jobs must be at least 1; got {settings.n_jobs}")
     if not settings.seeds:
         raise ValueError("seeds must list at least one random seed.")
     if len(set(settings.seeds)) != len(settings.seeds):
