@@ -758,6 +758,60 @@ def test_the_make_figures_script_refuses_an_unknown_figure_name(capsys):
     assert "Unknown figure names" in capsys.readouterr().err
 
 
+def test_the_shap_figures_name_a_plan_the_run_has_when_the_default_one_is_missing(tmp_path):
+    # A run made with --kinds logo,mixed: no random plan, the default of --shap-plan.
+    (tmp_path / "stage1").mkdir()
+    pd.DataFrame(
+        {"plan_id": ["mixed_r01_n_p10_s0", "logo_r01_north", "control_r01_n_p10_s0"], "kind": [MIXED, LOGO, CONTROL]}
+    ).to_csv(tmp_path / "index.csv", index=False)
+    for plan in ("mixed_r01_n_p10_s0", "logo_r01_north", "control_r01_n_p10_s0"):
+        (tmp_path / "stage1" / f"{plan}.parquet").write_bytes(b"")
+    inputs = SimpleNamespace(plans_dir=tmp_path, run_dir=tmp_path, settings=None, _cache={})
+    inputs._cached = lambda key, build: inputs._cache.setdefault(key, build())
+    for figure in (shap.figure_shap_groups(inputs, plan_id=RANDOM), shap.figure_shap_features(inputs, plan_id=RANDOM)):
+        assert figures.is_message_figure(figure) and not figures.is_failed(figure)
+        assert "'random' is not among this run's plans" in figure._a1_message
+        assert "--shap-plan logo_r01_north" in figure._a1_message  # a held-out-basin plan first
+
+
+def test_one_failing_figure_does_not_stop_the_others(monkeypatch, tmp_path, caplog):
+    drawn_design = design.draw_design(
+        pd.DataFrame([("inputs", "x"), ("stage 1", "y"), ("validation", "Random split")], columns=["step", "text"])
+    )
+
+    def broken():
+        raise KeyError("random")
+
+    monkeypatch.setattr(
+        render, "_builders", lambda *args, **kwargs: {"fig01_design": broken, "fig02_map": lambda: drawn_design}
+    )
+    inputs = SimpleNamespace(run_dir=tmp_path, n_boot=10)
+    with caplog.at_level(logging.ERROR, logger=render.__name__):
+        drawn = figures.render_all(inputs, tmp_path / "figures", only=["fig01_design", "fig02_map"], close=True)
+    assert figures.is_failed(drawn["fig01_design"]) and "KeyError" in drawn["fig01_design"]._a1_message
+    assert not figures.is_message_figure(drawn["fig02_map"])
+    assert (tmp_path / "figures" / "fig01_design.png").exists() and (tmp_path / "figures" / "fig02_map.png").exists()
+    assert any(record.exc_info for record in caplog.records)  # the traceback is logged
+    assert "failed with KeyError" in render.read_captions(tmp_path / "figures" / "captions.md")["fig01_design"]
+
+
+def test_the_make_figures_script_exits_with_an_error_when_a_figure_failed(monkeypatch, tmp_path):
+    import experiments.a1.make_figures as script
+
+    failed = figures.core._missing("failed with KeyError: 'random'")
+    failed._a1_failed = True
+    monkeypatch.setattr(script, "load_a1_config", lambda path: None)
+    monkeypatch.setattr(
+        script.figures.FigureInputs,
+        "from_run",
+        classmethod(lambda cls, *args, **kwargs: SimpleNamespace(run_dir=tmp_path)),
+    )
+    monkeypatch.setattr(script.figures, "render_all", lambda *args, **kwargs: {"fig11_shap_groups": failed})
+    with pytest.raises(SystemExit) as exit_info:
+        script.main(["--out", str(tmp_path / "figures"), "--no-mlflow", "--quiet"])
+    assert "fig11_shap_groups" in str(exit_info.value.code)  # a message, so the exit status is 1
+
+
 # --- acceptance ------------------------------------------------------------------------------------
 
 

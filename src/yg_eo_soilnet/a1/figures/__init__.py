@@ -53,6 +53,7 @@ from yg_eo_soilnet.a1.figures.render import (
     FIGURE_NAMES,
     MAIN_FIGURES,
     SUPPLEMENTARY_FIGURES,
+    is_failed,
     render_all,
     select_figures,
 )
@@ -74,6 +75,7 @@ __all__ = [
     "dissimilarity_frame",
     "figure_caption",
     "figure_data",
+    "is_failed",
     "is_message_figure",
     "pretty_name",
     "pretty_split",

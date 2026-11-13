@@ -55,6 +55,11 @@ def main(argv: list[str] | None = None) -> dict:
     -------
     dict
         File name to figure (closed once saved).
+
+    Raises
+    ------
+    SystemExit
+        Once every figure is saved, when any failed with an error (exit code 1).
     """
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
@@ -72,7 +77,10 @@ def main(argv: list[str] | None = None) -> dict:
         "--n-boot", type=int, default=1000, help="Bootstrap resamples for the intervals the figures compute."
     )
     parser.add_argument(
-        "--shap-plan", default=RANDOM, help="The plan whose global model figures 11 and S4 explain (default random)."
+        "--shap-plan",
+        default=RANDOM,
+        help="The plan whose global model figures 11 and S4 explain (default random; a run without random "
+        "plans needs a plan_id from its index.csv).",
     )
     parser.add_argument(
         "--only",
@@ -119,10 +127,19 @@ def main(argv: list[str] | None = None) -> dict:
         plt.close(figure)
     summary(f"Figures in {folder}/ (PNG and PDF; data in data/, draft captions in captions.md):")
     for name, figure in drawn.items():
-        note = f"  - not drawn: {figure._a1_message}" if figures.is_message_figure(figure) else ""
+        if figures.is_failed(figure):
+            note = f"  - FAILED: {figure._a1_message} (traceback in make_figures.log)"
+        elif figures.is_message_figure(figure):
+            note = f"  - not drawn: {figure._a1_message}"
+        else:
+            note = ""
         summary(f"  {name}{note}")
     if tracking is not None:
         summary(f"Added to MLflow run {tracking.info.run_id} under figures/.")
+    failed = [name for name, figure in drawn.items() if figures.is_failed(figure)]
+    if failed:
+        # The other figures are saved; the exit code still tells a script or CI that some failed.
+        raise SystemExit(f"{len(failed)} figure(s) failed: {', '.join(failed)}.")
     return drawn
 
 

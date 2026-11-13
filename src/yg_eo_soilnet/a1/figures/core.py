@@ -630,6 +630,23 @@ def _tree_shap(model, prepared) -> np.ndarray:
     return np.asarray(shap.TreeExplainer(model).shap_values(prepared))
 
 
+def _require_plan(inputs: FigureInputs, index: pd.DataFrame, plan_id: str) -> None:
+    """Raise FileNotFoundError, naming a plan the run does have, when ``plan_id`` cannot be refitted.
+
+    A run made with ``--kinds logo,mixed`` has no ``random`` plan, the default of ``--shap-plan``;
+    a plan the run skipped has no stage-1 audit.
+    """
+    ran = index[[(inputs.run_dir / "stage1" / f"{plan}.parquet").exists() for plan in index["plan_id"]]]
+    if plan_id in set(ran["plan_id"]):
+        return
+    preferred = ran[ran["kind"] == LOGO]
+    suggestion = (preferred if not preferred.empty else ran)["plan_id"].head(1).tolist()
+    kinds = ", ".join(dict.fromkeys(ran["kind"].astype(str))) or "none"
+    where = "is not among this run's plans" if plan_id not in set(index["plan_id"]) else "was not run"
+    hint = f"; pass --shap-plan {suggestion[0]}" if suggestion else ""
+    raise FileNotFoundError(f"plan {plan_id!r} {where} (its plans are {kinds}){hint}.")
+
+
 def shap_by_class(inputs: FigureInputs, *, plan_id: str = RANDOM, model: str = GLOBAL_AUX) -> pd.DataFrame:
     """Mean |SHAP| of each input of ``model``, over one plan's test points, per carbonate class.
 
@@ -652,6 +669,7 @@ def shap_by_class(inputs: FigureInputs, *, plan_id: str = RANDOM, model: str = G
 
     settings = inputs.settings
     index = pd.read_csv(inputs.plans_dir / "index.csv")
+    _require_plan(inputs, index, plan_id)
     kind = index.set_index("plan_id").loc[plan_id, "kind"]
     plan = SplitPlan.from_frame(pd.read_parquet(inputs.plans_dir / f"{plan_id}.parquet"), strategy=kind)
     auxiliary = _auxiliary_from_frame(inputs.stage1(plan_id), settings)

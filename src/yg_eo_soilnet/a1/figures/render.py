@@ -30,6 +30,7 @@ from yg_eo_soilnet.a1.figures import (
 )
 from yg_eo_soilnet.a1.figures.core import (
     FigureInputs,
+    _missing,
     figure_caption,
     figure_data,
     is_message_figure,
@@ -150,7 +151,9 @@ def render_all(
     Returns
     -------
     dict
-        File name to figure, in :data:`FIGURE_NAMES` order.
+        File name to figure, in :data:`FIGURE_NAMES` order. A figure that fails with an error is
+        logged with its traceback and saved as a note in its place (:func:`is_failed`); the others
+        are still drawn.
     """
     names = select_figures(only, skip)
     folder = Path(folder) if folder else inputs.run_dir / "figures"
@@ -159,7 +162,12 @@ def render_all(
     builders = _builders(inputs, relief=relief, cache_dir=cache_dir, n_boot=inputs.n_boot, shap_plan=shap_plan)
     figures, captions = {}, {}
     for name in names:
-        figure = builders[name]()
+        try:
+            figure = builders[name]()
+        except Exception as error:  # one broken figure must not cost the others (fig03 alone takes minutes)
+            logger.exception(f"{name}: failed")
+            figure = _missing(f"failed with {type(error).__name__}: {error}")
+            figure._a1_failed = True
         save_figure(figure, name, folder)
         for table_name, table in figure_data(figure).items():
             if table_name in LATEX_TABLES:
@@ -168,7 +176,9 @@ def render_all(
                 (folder / "data").mkdir(parents=True, exist_ok=True)
                 table.to_csv(folder / "data" / f"{table_name}.csv", index=False)
         captions[name] = figure_caption(figure)
-        if is_message_figure(figure):
+        if is_failed(figure):
+            pass  # logged with its traceback above
+        elif is_message_figure(figure):
             logger.warning(f"{name}: {figure._a1_message}")
         else:
             logger.info(f"{name}: drawn")
@@ -177,6 +187,11 @@ def render_all(
         figures[name] = figure
     write_captions(captions, folder / CAPTIONS_FILE)
     return figures
+
+
+def is_failed(figure) -> bool:
+    """Whether a figure of :func:`render_all` failed with an error (saved as a note in its place)."""
+    return bool(getattr(figure, "_a1_failed", False))
 
 
 def write_captions(captions: dict, path) -> Path:
