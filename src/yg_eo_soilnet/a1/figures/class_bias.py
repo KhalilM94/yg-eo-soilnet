@@ -20,6 +20,7 @@ from yg_eo_soilnet.a1.figures.style import (
     MAIN_MODELS,
     MODEL_ORDER,
     SOM_UNIT,
+    WIDTH_1COL,
     WIDTH_2COL,
     better_label,
     bias_axis,
@@ -191,8 +192,12 @@ def _legend(figure, models) -> None:
             [], [], ls="", marker="o", markerfacecolor="white", markeredgecolor=ps.MUTED, label="Fewer than 30 points"
         )
     )
+    narrow = figure.get_figwidth() < WIDTH_2COL * 0.9
     figure.legend(
-        handles=handles, loc="outside upper center", ncol=len(handles) if len(handles) <= 4 else 3, frameon=False
+        handles=handles,
+        loc="outside upper center",
+        ncol=1 if narrow else (len(handles) if len(handles) <= 4 else 3),
+        frameon=False,
     )
 
 
@@ -204,12 +209,18 @@ def draw_class_bias(bias: pd.DataFrame, *, labels, block_km: float = 10):
     if bias.empty:
         return _missing("No per-class bias to draw.")
     designs = list(dict.fromkeys(bias["design"]))
+    width = WIDTH_2COL if len(designs) > 1 else WIDTH_1COL
     figure, axes = plt.subplots(
-        1, len(designs), figsize=(WIDTH_2COL, 2.9), layout="constrained", sharey=True, squeeze=False
+        1,
+        len(designs),
+        figsize=(width, 2.9 if len(designs) > 1 else 3.6),
+        layout="constrained",
+        sharey=True,
+        squeeze=False,
     )
     for position, (axis, design) in enumerate(zip(axes.flat, designs)):
         _points(axis, bias[bias["design"] == design], labels, [m for m in MAIN_MODELS if m in set(bias["model"])])
-        bias_axis(axis)
+        bias_axis(axis, labels=position == len(designs) - 1)
         if position:
             axis.set_ylabel("")
         axis.set_xlabel("Measured CaCO₃ class")
@@ -237,7 +248,7 @@ def draw_class_scores(intervals: pd.DataFrame, *, labels, block_km: float = 10):
             axis = axes[row, column]
             _points(axis, intervals[(intervals["design"] == design) & (intervals["metric"] == metric)], labels, models)
             if metric == "bias":
-                bias_axis(axis)
+                bias_axis(axis, labels=column == len(designs) - 1)
                 axis.set_xlabel("Measured CaCO₃ class")
             else:
                 axis.set_ylabel(better_label("RPIQ", "higher"))

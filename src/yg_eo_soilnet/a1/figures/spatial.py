@@ -118,9 +118,12 @@ def stage1_out_of_fold(inputs: FigureInputs) -> pd.DataFrame:
 def figure_spatial(inputs: FigureInputs):
     """Figure 5: R2, RMSE, RPIQ and bias of the main models, and stage 1's R2, along the designs."""
     scores = spatial_scores(inputs.intervals)
-    if scores.empty:
+    designs = list(dict.fromkeys(scores.sort_values("x")["design"])) if not scores.empty else []
+    if len(designs) < 2:
+        held = f" ({designs[0]})" if designs else ""
         return _missing(
-            "No scores per validation design: run evaluate.py, or run_a1.py with random, spatial or logo plans."
+            f"This run has {len(designs) or 'no'} validation design{held} of random, spatial blocks and "
+            "leave one basin out; figure 5 compares them along the distance to training and needs at least two."
         )
     stage1 = stage1_out_of_fold(inputs)
     figure = draw_spatial(scores, stage1, labels=inputs.settings.auxiliary.targets, block_km=inputs.block_km)
@@ -146,7 +149,8 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
 
     designs = scores.drop_duplicates("x").sort_values("x")
     figure, axes = plt.subplots(2, 3, figsize=(WIDTH_2COL, 4.8), layout="constrained", sharex=True)
-    offsets = dict(zip(MAIN_MODELS, np.linspace(-0.12, 0.12, len(MAIN_MODELS))))
+    # A fixed spread around each design, whatever their number.
+    offsets = dict(zip(MAIN_MODELS, (-0.2, 0.0, 0.2)))
     for code, axis, (metric, name, unit, better) in zip("abcd", axes.flat, PANELS):
         part = scores[scores["metric"] == metric]
         for model in MAIN_MODELS:
@@ -171,7 +175,7 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
                 markeredgewidth=0.4,
             )
         if metric == "bias":
-            bias_axis(axis)
+            bias_axis(axis)  # the direction words go in its right margin, beside panel e
         else:
             axis.set_ylabel(better_label(name, better, unit))
         letter(axis, code)
@@ -186,7 +190,6 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
             line = line.sort_values("x")
             color, marker = styles.get(target, (ps.INK_2, "^"))
             stage_axis.plot(line["x"], line["r2"], color=color, marker=marker, ms=4, lw=1.2, label=pretty_name(target))
-        stage_axis.legend(title="Stage 1, out of fold", loc="lower left")
     stage_axis.set_ylabel(better_label("R²", "higher"))
     letter(stage_axis, "e")
     legend_axis = axes.flat[5]
@@ -195,12 +198,23 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
         Line2D([], [], color=model_color(m), marker=model_marker(m), ms=5, lw=1.2, label=pretty_name(m))
         for m in MAIN_MODELS
     ]
-    legend_axis.legend(handles=handles, title="SOM model", loc="center", frameon=False)
+    # Both legends in the empty sixth panel: neither sits on data.
+    som_legend = legend_axis.legend(handles=handles, title="SOM model (a-d)", loc="upper left", frameon=False)
+    if not stage1.empty:
+        legend_axis.add_artist(som_legend)  # kept when the second legend replaces it as the axes' legend
+        legend_axis.legend(
+            handles=stage_axis.get_legend_handles_labels()[0],
+            title="Stage 1, out of fold (e)",
+            loc="lower left",
+            frameon=False,
+        )
     for axis in axes[1]:
         axis.set_xticks(designs["x"], list(designs["design"]), rotation=35, ha="right", rotation_mode="anchor")
     for axis in axes[0]:
         axis.tick_params(labelbottom=False)
-    figure.supxlabel("Validation design, by distance between training and test points →", fontsize=7.5)
+    for axis in axes[1][:2]:
+        # On the axes, not the figure: a figure-level label ignores the strip kept for the caption line.
+        axis.set_xlabel("Validation design, farther from training →")
     caption_line(
         figure,
         f"Error bars: 95 % block-bootstrap intervals ({block_km:g} km blocks), on the test points of every fold pooled.",

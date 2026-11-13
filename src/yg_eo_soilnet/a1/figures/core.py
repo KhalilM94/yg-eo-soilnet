@@ -592,12 +592,14 @@ def stage1_points(inputs: FigureInputs, plan_id: str = RANDOM) -> pd.DataFrame:
 
 
 def dissimilarity_frame(transfer: pd.DataFrame, summary: pd.DataFrame) -> pd.DataFrame:
-    """The ``logo`` transfer drop of every region beside how different the region is."""
+    """Each held-out region's transfer scores (every input) beside how different the region is.
+
+    Read from the same ``dissimilarity_summary.csv`` as figure 10. A region without a local score
+    keeps its row, with a NaN transfer drop.
+    """
     if transfer.empty or summary.empty:
         return pd.DataFrame()
-    logo = transfer[
-        (transfer["kind"] == LOGO) & (transfer["covariate_group"] == COMBINED_GROUP) & transfer["has_local"]
-    ]
+    logo = transfer[(transfer["kind"] == LOGO) & (transfer["covariate_group"] == COMBINED_GROUP)]
     summary = summary.assign(region=summary["held_out"].astype(str))
     return logo.assign(region=logo["region"].astype(str)).merge(summary, on="region", how="inner")
 

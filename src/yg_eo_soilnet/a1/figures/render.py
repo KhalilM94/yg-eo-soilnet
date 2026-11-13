@@ -38,6 +38,7 @@ from yg_eo_soilnet.a1.figures.core import (
     write_table,
 )
 from yg_eo_soilnet.a1.plans import RANDOM
+from yg_eo_soilnet.a1.stage2 import GLOBAL
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,13 @@ CAPTIONS_FILE = "captions.md"
 
 
 def _builders(
-    inputs: FigureInputs, *, relief: bool, cache_dir: Optional[str], n_boot: int, shap_plan: str
+    inputs: FigureInputs,
+    *,
+    relief: bool,
+    cache_dir: Optional[str],
+    n_boot: int,
+    shap_plan: Optional[str],
+    mixed_model: str = GLOBAL,
 ) -> dict[str, Callable]:
     return {
         "fig01_design": lambda: design.figure_design(inputs),
@@ -83,7 +90,7 @@ def _builders(
         "fig06_obs_pred": lambda: obs_pred.figure_obs_pred(inputs),
         "fig07_class_bias": lambda: class_bias.figure_class_bias(inputs),
         "fig08_transfer": lambda: transfer.figure_transfer(inputs),
-        "fig09_mixed": lambda: transfer.figure_mixed(inputs),
+        "fig09_mixed": lambda: transfer.figure_mixed(inputs, model=mixed_model),
         "fig10_basins": lambda: basins.figure_basins(inputs),
         "fig11_shap_groups": lambda: shap.figure_shap_groups(inputs, plan_id=shap_plan),
         "figS1_obs_pred_blocks": lambda: obs_pred.figure_obs_pred_blocks(inputs),
@@ -123,7 +130,8 @@ def render_all(
     relief: bool = True,
     cache_dir: Optional[str] = None,
     n_boot: Optional[int] = None,
-    shap_plan: str = RANDOM,
+    shap_plan: Optional[str] = None,
+    mixed_model: str = GLOBAL,
     close: bool = False,
     only: Optional[Sequence[str]] = None,
     skip: Optional[Sequence[str]] = None,
@@ -141,8 +149,11 @@ def render_all(
         Where the map's tiles and borders are cached.
     n_boot : int, optional
         Bootstrap draws for the intervals the figures compute themselves; ``inputs.n_boot`` unless given.
-    shap_plan : str, default "random"
-        The plan whose global model figures 11 and S4 explain.
+    shap_plan : str, optional
+        The plan whose global model figures 11 and S4 explain; by default the random split, or each
+        leave-one-basin-out plan when the run has no random split (:func:`.shap.shap_plans`).
+    mixed_model : str, default "global"
+        The model figure 9 follows through the mixed and control plans.
     close : bool, default False
         Close each figure once saved, to free memory when they are not going to be shown.
     only, skip : list of str, optional
@@ -159,7 +170,9 @@ def render_all(
     folder = Path(folder) if folder else inputs.run_dir / "figures"
     if n_boot is not None:
         inputs.n_boot = n_boot
-    builders = _builders(inputs, relief=relief, cache_dir=cache_dir, n_boot=inputs.n_boot, shap_plan=shap_plan)
+    builders = _builders(
+        inputs, relief=relief, cache_dir=cache_dir, n_boot=inputs.n_boot, shap_plan=shap_plan, mixed_model=mixed_model
+    )
     figures, captions = {}, {}
     for name in names:
         try:
@@ -168,6 +181,8 @@ def render_all(
             logger.exception(f"{name}: failed")
             figure = _missing(f"failed with {type(error).__name__}: {error}")
             figure._a1_failed = True
+        if is_message_figure(figure):
+            figure = _named_note(figure, name)
         save_figure(figure, name, folder)
         for table_name, table in figure_data(figure).items():
             if table_name in LATEX_TABLES:
@@ -187,6 +202,16 @@ def render_all(
         figures[name] = figure
     write_captions(captions, folder / CAPTIONS_FILE)
     return figures
+
+
+def _named_note(figure, name: str):
+    """A note figure redrawn with the figure's name, so two notes never make identical files."""
+    message, failed = figure._a1_message, is_failed(figure)
+    plt.close(figure)
+    note = _missing(f"{name} is not drawn. {message[:1].upper()}{message[1:]}")
+    note._a1_message = message
+    note._a1_failed = failed
+    return note
 
 
 def is_failed(figure) -> bool:

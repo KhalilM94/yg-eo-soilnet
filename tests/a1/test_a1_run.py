@@ -7,6 +7,7 @@ four-point grid, runs once in the slow acceptance test.
 
 import json
 import time
+from pathlib import Path
 
 import mlflow
 import numpy as np
@@ -165,6 +166,17 @@ def test_logo_plans_get_local_scores_inside_the_held_out_region_only(demo_run):
     assert set(local["point_id"]) == set(plan.point_ids_for(TEST))
     assert set(local["covariate_group"]) == {COMBINED_GROUP, *demo_run["a1"].groups.names}
     assert LOCAL not in set(_predictions(demo_run, "random")["model"])
+
+
+def test_the_local_model_on_every_covariate_is_fitted_without_groups(a1_settings_in, tmp_path, mlflow_store):
+    with mlflow_store(tmp_path / "mlruns") as uri:
+        path = _fast_settings_file(a1_settings_in(tmp_path), tmp_path / "out", uri)
+        a1 = load_a1_config(str(path))
+        write_plans(a1.settings, str(tmp_path / "out" / "plans"), kinds=[LOGO])
+        result = run_plans(a1, groups=False, tracking=False, run_name="plain")
+
+    local = [Path(path).name for path in result.computed if Path(path).name.startswith(f"{LOCAL}__")]
+    assert local and set(local) == {f"{LOCAL}__{COMBINED_GROUP}.parquet"}  # no per-group local without --groups
 
 
 def test_a_region_too_small_for_a_local_score_is_skipped_and_said(a1_settings_in, tmp_path, mlflow_store):
@@ -417,8 +429,9 @@ def test_the_full_demo_run_from_the_command_line(a1_settings_in, tmp_path, mlflo
     print(f"full demo run: {elapsed:.0f} s; pooled test RMSE {rmse.round(2).to_dict()}")
     assert elapsed < 600
     assert rmse[PER_CLASS_MEASURED] < rmse[GLOBAL]
-    # Every model of the 3 plans (random, two held-out regions), and a dissimilarity table per logo plan.
-    assert len(result.computed) == 3 * len(MODELS) + 2
+    # Every model of the 3 plans (random, two held-out regions), and per logo plan a dissimilarity table and the
+    # local model on every covariate (fitted without --groups too).
+    assert len(result.computed) == 3 * len(MODELS) + 2 + 2
 
 
 def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
@@ -607,8 +620,12 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
         f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")
     )
     assert (tmp_path / "captions.md").exists() and any((tmp_path / "data").glob("*.csv"))
-    # The module's run has random and logo plans only: figure 9 needs mixed plans and says so.
-    assert [name for name, figure in drawn.items() if is_message_figure(figure)] == ["fig09_mixed"]
+    # The module's run has random and logo plans only: figure 9 needs mixed plans, and figure S1 block sizes
+    # beyond figure 6's; both say so.
+    assert [name for name, figure in drawn.items() if is_message_figure(figure)] == [
+        "fig09_mixed",
+        "figS1_obs_pred_blocks",
+    ]
 
 
 def test_the_figure_script_draws_only_the_figures_asked_for(demo_run, tmp_path):

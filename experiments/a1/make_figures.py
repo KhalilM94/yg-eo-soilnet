@@ -38,7 +38,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 from yg_eo_soilnet.a1 import figures  # noqa: E402
 from yg_eo_soilnet.a1.config import load_a1_config  # noqa: E402
-from yg_eo_soilnet.a1.plans import RANDOM  # noqa: E402
+from yg_eo_soilnet.a1.stage2 import GLOBAL, MODELS  # noqa: E402
 from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.tracking import log_figures, reopen_parent  # noqa: E402
 
@@ -78,9 +78,15 @@ def main(argv: list[str] | None = None) -> dict:
     )
     parser.add_argument(
         "--shap-plan",
-        default=RANDOM,
-        help="The plan whose global model figures 11 and S4 explain (default random; a run without random "
-        "plans needs a plan_id from its index.csv).",
+        default=None,
+        help="The plan whose global model figures 11 and S4 explain (default: the random split, or each "
+        "leave-one-basin-out plan when the run has none).",
+    )
+    parser.add_argument(
+        "--mixed-model",
+        default=GLOBAL,
+        choices=list(MODELS),
+        help="The model figure 9 follows through the mixed and control plans (default global).",
     )
     parser.add_argument(
         "--only",
@@ -89,6 +95,11 @@ def main(argv: list[str] | None = None) -> dict:
     )
     parser.add_argument("--skip", default=None, help="Do not draw these figures, comma-separated file names.")
     parser.add_argument("--no-relief", action="store_true", help="Flat ground under the map, no relief tiles.")
+    parser.add_argument(
+        "--check-text",
+        action="store_true",
+        help="Report every text that overlaps another or crosses an axes frame (drawn at 300 dpi).",
+    )
     parser.add_argument(
         "--no-mlflow", action="store_true", help="Save the files only; do not add them to the run's MLflow run."
     )
@@ -117,12 +128,20 @@ def main(argv: list[str] | None = None) -> dict:
             relief=not args.no_relief,
             n_boot=args.n_boot,
             shap_plan=args.shap_plan,
+            mixed_model=args.mixed_model,
             close=False,
             only=only,
             skip=skip,
         )
         if tracking is not None:
             log_figures(drawn, folder)
+    collisions = {}
+    if args.check_text:
+        from yg_eo_soilnet.a1.figures.style import text_collisions
+
+        collisions = {
+            name: text_collisions(figure) for name, figure in drawn.items() if not figures.is_message_figure(figure)
+        }
     for figure in drawn.values():
         plt.close(figure)
     summary(f"Figures in {folder}/ (PNG and PDF; data in data/, draft captions in captions.md):")
@@ -136,6 +155,12 @@ def main(argv: list[str] | None = None) -> dict:
         summary(f"  {name}{note}")
     if tracking is not None:
         summary(f"Added to MLflow run {tracking.info.run_id} under figures/.")
+    if args.check_text:
+        clashing = {name: problems for name, problems in collisions.items() if problems}
+        summary(f"Text check (300 dpi): {len(collisions) - len(clashing)} of {len(collisions)} figures clear.")
+        for name, problems in clashing.items():
+            for problem in problems:
+                summary(f"  {name}: {problem}")
     failed = [name for name, figure in drawn.items() if figures.is_failed(figure)]
     if failed:
         # The other figures are saved; the exit code still tells a script or CI that some failed.

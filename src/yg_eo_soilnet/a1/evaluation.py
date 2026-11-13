@@ -33,7 +33,8 @@ from typing import Iterable, Optional, Sequence
 import numpy as np
 import pandas as pd
 
-from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED, RANDOM, SPATIAL_KFOLD, slug
+from yg_eo_soilnet.a1.config import COMBINED_GROUP
+from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, RANDOM, SPATIAL_KFOLD, slug
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
 from yg_eo_soilnet.a1.stage2 import GLOBAL_AUX, LOCAL
 from yg_eo_soilnet.datamodules.splitting import TEST
@@ -661,6 +662,113 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
     return table
 
 
+# --- mixed and control plans ------------------------------------------------------------------------
+
+#: What the mixed-against-control rows of ``differences.csv`` are called in their ``kind`` column.
+MIXED_VS_CONTROL = "mixed_vs_control"
+
+
+def pooled_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """The rows that may be pooled into one score per kind: every kind but ``mixed`` and ``control``.
+
+    A ``mixed`` or ``control`` plan exists for every share and repeat of a held-out region, and
+    each tests the region's remaining points: pooled, one point would count once per share and
+    repeat (99,760 rows from 3,661 points, on the real data). Those plans are scored per region and
+    share instead (:func:`mixed_scores`, :func:`mixed_differences`).
+    """
+    return df[~df["kind"].isin(DIVIDED_KINDS)]
+
+
+def mixed_scores(df: pd.DataFrame, *, min_n: int = MIN_GROUP_SIZE) -> pd.DataFrame:
+    """Test scores of the ``mixed`` and ``control`` plans per region, share, model and covariate group.
+
+    Each repeat is scored on its own test points, then the repeats of a share are averaged, as
+    :func:`transfer_table` does.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``kind, region, fraction, model, covariate_group, n_repeats, n`` (mean test points per
+        repeat), then the mean of each score and ``rmse_sd`` (its spread over the repeats).
+    """
+    test = df[(df["split"] == TEST) & df["kind"].isin(DIVIDED_KINDS)]
+    columns = ["kind", "region", "fraction", "model", "covariate_group", "n_repeats", "n", *SCORES, "rmse_sd"]
+    if test.empty:
+        return pd.DataFrame(columns=columns)
+    per_repeat = grouped_metrics(
+        test, ["kind", "held_out", "fraction", "repeat", "model", "covariate_group"], min_n=min_n
+    )
+    keys = ["kind", "held_out", "fraction", "model", "covariate_group"]
+    grouped = per_repeat.groupby(keys, sort=True)
+    table = grouped[["n", *SCORES]].mean()
+    table["n_repeats"] = grouped.size()
+    table["rmse_sd"] = grouped["rmse"].std(ddof=1)
+    return table.reset_index().rename(columns={"held_out": "region"})[columns]
+
+
+def mixed_differences(df: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000, seed: int = 42) -> pd.DataFrame:
+    """Mixed minus control per region, share and model, paired on the test points they share.
+
+    Within a repeat, a ``mixed`` plan and its ``control`` plan test the same points of the region, so
+    their difference is a paired comparison: both are scored on each bootstrap resample of the
+    blocks, and the repeats of a share are resampled together (a point counts once per repeat). The
+    p-value tests "no difference"; ``p_holm`` corrects it across the shares of one region, model and
+    score - the family a reader of one fig09 panel takes in at once. Every covariate (``combined``).
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``kind`` (``mixed_vs_control``), ``region, fraction, model, a`` (``mixed``), ``b``
+        (``control``), ``metric, estimate`` (score(mixed) - score(control)), ``low, high, p_value,
+        p_holm, n, n_blocks, n_valid_draws, n_unpaired, small``.
+    """
+    test = df[(df["split"] == TEST) & df["kind"].isin(DIVIDED_KINDS) & (df["covariate_group"] == COMBINED_GROUP)]
+    columns = [
+        "kind",
+        "region",
+        "fraction",
+        "model",
+        "a",
+        "b",
+        "metric",
+        "estimate",
+        "low",
+        "high",
+        "p_value",
+        "p_holm",
+        "n",
+        "n_blocks",
+        "n_valid_draws",
+        "n_unpaired",
+        "small",
+    ]
+    if test.empty:
+        return pd.DataFrame(columns=columns)
+    # The pairing key: the same region, share and repeat, whichever of the two plans.
+    shared = test.assign(
+        fraction=test["fraction"].astype(float).round(6),
+        plan_id=test["held_out"].astype(str)
+        + "|"
+        + test["fraction"].astype(float).round(6).astype(str)
+        + "|"
+        + test["repeat"].astype(str),
+    )
+    result = block_bootstrap(
+        shared,
+        ["kind", "held_out", "fraction", "model"],
+        block_km=block_km,
+        n=n,
+        seed=seed,
+        compare=[(MIXED, CONTROL)],
+        compare_on="kind",
+    )
+    differences = result.differences.rename(columns={"held_out": "region"})
+    if differences.empty:
+        return pd.DataFrame(columns=columns)
+    differences["p_holm"] = differences.groupby(["region", "model", "metric"], sort=False)["p_value"].transform(holm)
+    return differences.assign(kind=MIXED_VS_CONTROL)[columns].sort_values(["region", "model", "metric", "fraction"])
+
+
 # --- headline metrics, for MLflow ---------------------------------------------------------------
 
 #: The scores logged as headline metrics.
@@ -684,6 +792,7 @@ def headline_metrics(
     intervals: Optional[pd.DataFrame] = None,
     region_intervals: Optional[pd.DataFrame] = None,
     transfer: Optional[pd.DataFrame] = None,
+    mixed: Optional[pd.DataFrame] = None,
 ) -> dict[str, float]:
     """The scores of a run worth a glance in MLflow, named ``<score>__<plans>__<model>[__<group>]``.
 
@@ -696,7 +805,10 @@ def headline_metrics(
 
     ``__<group>`` is added for a model fitted on one covariate group only, and left out for every
     covariate (``combined``). Also: the transfer drop per region and group
-    (``rmse_drop__logo_<region>__<group>`` and ``rmse_drop__logo_mean__<group>``), and the
+    (``rmse_drop__logo_<region>__<group>`` and ``rmse_drop__logo_mean__<group>``); the ``mixed``
+    and ``control`` plans per region and share, averaged over the repeats and never pooled
+    (``rmse__mixed_<region>_f<share>__<model>``, ``rmse__control_<region>_f<share>__<model>``,
+    every covariate, from ``mixed``); and the
     bootstrap interval bounds of RMSE and R² (``...__lo`` / ``...__hi``) wherever ``intervals``
     (pooled: random and each block size) or ``region_intervals`` (each region) hold them. Names are
     MLflow-safe: lower-case letters, digits and underscores (:func:`~yg_eo_soilnet.a1.tracking.metric_name`).
@@ -711,6 +823,8 @@ def headline_metrics(
         Its intervals by ``kind, held_out, model``, on the ``logo`` rows.
     transfer : pandas.DataFrame, optional
         :func:`transfer_table`.
+    mixed : pandas.DataFrame, optional
+        :func:`mixed_scores`.
 
     Returns
     -------
@@ -756,6 +870,12 @@ def headline_metrics(
             add(metric_name("rmse_drop", f"logo_{row.region}", row.covariate_group), row.rmse_drop)
         for group, values in drops.groupby("covariate_group")["rmse_drop"]:
             add(metric_name("rmse_drop", "logo_mean", group), values.mean())
+
+    if mixed is not None and not mixed.empty:
+        for row in mixed[mixed["covariate_group"] == DEFAULT_GROUP].itertuples():
+            scope = f"{row.kind}_{row.region}_f{float(row.fraction):g}"
+            for score in HEADLINE_SCORES:
+                add(metric_name(score, scope, row.model), getattr(row, score))
 
     for table, scope_of in (
         (intervals, lambda row: _pooled_scope(row["kind"], row.get("block_size_m"))),

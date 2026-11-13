@@ -14,8 +14,12 @@ from yg_eo_soilnet.a1.evaluation import (
     _scores,
     block_bootstrap,
     grouped_metrics,
+    headline_metrics,
     holm,
     load_predictions,
+    mixed_differences,
+    mixed_scores,
+    pooled_rows,
     spatial_blocks,
     transfer_table,
 )
@@ -372,6 +376,93 @@ def test_mixed_plans_are_compared_with_their_own_control_and_averaged_over_repea
     assert row["rmse_transferred"] == pytest.approx(1.5) and row["rmse_local"] == pytest.approx(4.5)
     assert row["rmse_drop"] == pytest.approx(-3.0)  # negative: the other regions help
     assert row["rmse_drop_sd"] == pytest.approx(np.std([-2.0, -4.0], ddof=1))
+
+
+def _mixed_run(points, *, shares=(0.3, 0.6), repeats=2, mixed_sd=1.0, control_sd=4.0):
+    """Mixed and control plans of region A: within a share and repeat, both test the same points."""
+    rows = []
+    rng = np.random.default_rng(3)
+    for fraction in shares:
+        for repeat in range(repeats):
+            test = points.sample(frac=1 - fraction, random_state=int(fraction * 100) + repeat)
+            for kind, sd in ((MIXED, mixed_sd), (CONTROL, control_sd)):
+                for model in (GLOBAL, GLOBAL_AUX):
+                    rows.append(
+                        _rows(
+                            test,
+                            test["observed"] + rng.normal(0, sd, len(test)),
+                            model=model,
+                            plan_id=f"{kind}_A_p{int(fraction * 100)}_s{repeat}",
+                            kind=kind,
+                            held_out="A",
+                            fraction=fraction,
+                            repeat=float(repeat),
+                        )
+                    )
+    return pd.concat(rows, ignore_index=True)
+
+
+def test_mixed_and_control_plans_are_never_pooled_into_one_score():
+    points = _points(120)
+    frame = pd.concat([_mixed_run(points), _rows(points, _noisy(points, 2.0, 0), model=GLOBAL)])
+    pooled = pooled_rows(frame)
+    assert set(pooled["kind"]) == {RANDOM}
+    scores = grouped_metrics(pooled, ["kind", "model"])
+    assert (scores["n"] == 120).all()  # each point once, not once per share and repeat
+
+
+def test_mixed_scores_are_per_region_and_share_averaged_over_repeats():
+    frame = _mixed_run(_points(120))
+    table = mixed_scores(frame).set_index(["kind", "region", "fraction", "model", "covariate_group"])
+    row = table.loc[(MIXED, "A", 0.3, GLOBAL, "combined")]
+    repeats = frame[(frame["kind"] == MIXED) & (frame["fraction"] == 0.3) & (frame["model"] == GLOBAL)]
+    per_repeat = [
+        regression_metrics(part["observed"].to_numpy(), part["predicted"].to_numpy())["rmse_test"]
+        for _, part in repeats.groupby("repeat")
+    ]
+    assert row["n_repeats"] == 2 and row["rmse"] == pytest.approx(np.mean(per_repeat))
+    assert row["n"] == pytest.approx(84)  # 70 % of 120 points per repeat
+
+
+def test_mixed_minus_control_is_paired_and_holm_corrected_across_shares():
+    frame = _mixed_run(_points(240), shares=(0.2, 0.4, 0.6))
+    table = mixed_differences(frame, n=200)
+    rmse = table[(table["metric"] == "rmse") & (table["model"] == GLOBAL)]
+    assert len(rmse) == 3 and set(rmse["kind"]) == {"mixed_vs_control"}
+    assert (rmse["a"] == MIXED).all() and (rmse["b"] == CONTROL).all() and (rmse["n_unpaired"] == 0).all()
+    assert (rmse["estimate"] < 0).all() and (rmse["high"] < 0).all()  # mixed clearly better
+    # The family is the shares of one region, model and score.
+    assert rmse["p_holm"].tolist() == pytest.approx(holm(rmse["p_value"]).tolist())
+
+
+def test_mixed_scores_get_their_own_headline_metrics_and_no_pooled_ones():
+    points = _points(120)
+    frame = pd.concat([_mixed_run(points), _rows(points, _noisy(points, 2.0, 0), model=GLOBAL)])
+    metrics = headline_metrics(pooled_rows(frame), mixed=mixed_scores(frame))
+    assert "rmse__mixed_a_f0_3__global" in metrics and "rmse__control_a_f0_6__global_aux" in metrics
+    assert not any(name.startswith(("rmse__mixed__", "rmse__control__")) for name in metrics)
+
+
+def test_evaluate_writes_mixed_scores_apart_from_the_pooled_tables(tmp_path, monkeypatch):
+    from experiments.a1 import evaluate
+    from yg_eo_soilnet.a1 import evaluation
+
+    points = _points(120)
+    frame = pd.concat(
+        [
+            _mixed_run(points),
+            _rows(points, _noisy(points, 2.0, 0), model=GLOBAL),
+            _rows(points, _noisy(points, 2.5, 1), model=GLOBAL_AUX),
+        ]
+    ).assign(block_size_m=np.nan, local_fold=np.nan, local_block=np.nan)
+    monkeypatch.setattr(evaluation, "load_predictions", lambda run_dir: frame)
+    tables = evaluate._evaluate(tmp_path, 10.0, 0, 50, None)
+    for name in ("scores.csv", "scores_by_class.csv", "intervals.csv"):
+        assert not set(tables[name]["kind"]) & {MIXED, CONTROL}, name
+    differences = tables["differences.csv"]
+    assert set(differences["kind"]) == {RANDOM, "mixed_vs_control"}
+    assert set(tables["scores_mixed.csv"]["kind"]) == {MIXED, CONTROL}
+    assert (tmp_path / "evaluation" / "scores_mixed.csv").exists()
 
 
 # --- reading a run folder -------------------------------------------------------------------------

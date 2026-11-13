@@ -98,30 +98,44 @@ def better_label(name: str, direction: Optional[str], unit: Optional[str] = None
     return f"{text}, {direction} is better" if direction else text
 
 
-def bias_axis(axis, *, orientation: str = "y", unit: str = SOM_UNIT) -> None:
-    """Mark zero as "no bias" and name the two sides of a bias axis (predicted minus measured)."""
-    if orientation == "y":
-        axis.axhline(0, color=ps.INK_2, lw=0.8, zorder=1)
-        axis.set_ylabel(f"Bias ({unit}), predicted − measured")
-        axis.text(
-            1.0,
-            0.0,
-            " no bias",
-            transform=axis.get_yaxis_transform(),
-            ha="left",
-            va="center",
-            fontsize=7,
-            color=ps.INK_2,
-        )
-        axis.text(
-            0.01, 0.98, "↑ over-predicts", transform=axis.transAxes, ha="left", va="top", fontsize=7, color=ps.INK_2
-        )
-        axis.text(
-            0.01, 0.02, "↓ under-predicts", transform=axis.transAxes, ha="left", va="bottom", fontsize=7, color=ps.INK_2
-        )
-    else:
+def direction_axis(axis, *, above: str, below: str, zero: str, labels: bool = True) -> None:
+    """A zero line, and words for zero and either side of it in the right margin, level with zero.
+
+    The words never sit on a whisker, a point or the line itself. With ``labels=False`` (every panel
+    of a row but the last) only the line is drawn.
+    """
+    from matplotlib.transforms import blended_transform_factory, offset_copy
+
+    axis.axhline(0, color=ps.INK_2, lw=0.8, zorder=1)
+    if not labels:
+        return
+    margin = blended_transform_factory(axis.transAxes, axis.transData)
+    for text, dy, va in ((f"↑ {above}", 7, "bottom"), (zero, 0, "center"), (f"↓ {below}", -7, "top")):
+        if text:
+            axis.text(
+                1.02,
+                0.0,
+                text,
+                transform=offset_copy(margin, fig=axis.figure, x=0, y=dy, units="points"),
+                ha="left",
+                va=va,
+                fontsize=7,
+                color=ps.INK_2,
+                clip_on=False,
+            )
+
+
+def bias_axis(axis, *, orientation: str = "y", unit: str = SOM_UNIT, labels: bool = True) -> None:
+    """Mark zero as "no bias" and name the two sides of a bias axis (predicted minus measured).
+
+    The words sit in the right margin, level with zero (:func:`direction_axis`).
+    """
+    if orientation != "y":
         axis.axvline(0, color=ps.INK_2, lw=0.8, zorder=1)
         axis.set_xlabel(f"Bias ({unit}), predicted − measured")
+        return
+    axis.set_ylabel(f"Bias ({unit}), predicted − measured")
+    direction_axis(axis, above="over-predicts", below="under-predicts", zero="no bias", labels=labels)
 
 
 def caption_line(figure, text: str) -> None:
@@ -260,3 +274,92 @@ def figure_fonts(figure) -> list:
         if text.get_visible() and str(text.get_text()).strip():
             sizes.append(float(text.get_fontsize()))
     return sizes
+
+
+# --- the overlap check -----------------------------------------------------------------------------
+
+
+def _drawn_texts(figure, dpi: float) -> list:
+    """Every text the figure actually draws (ticks outside the view limits are not drawn), at ``dpi``."""
+    from matplotlib.text import Text
+
+    drawn = []
+    original_draw = Text.draw
+
+    def recording_draw(self, renderer):
+        if self.get_visible() and str(self.get_text()).strip():
+            drawn.append(self)
+        return original_draw(self, renderer)
+
+    original_dpi = figure.dpi
+    try:
+        figure.set_dpi(dpi)
+        Text.draw = recording_draw
+        figure.canvas.draw()
+    finally:
+        Text.draw = original_draw
+    return drawn, original_dpi
+
+
+def _text_polygon(text, renderer):
+    """A text's outline on screen, as a polygon: its own box, rotated with it."""
+    from shapely import affinity
+    from shapely.geometry import box
+
+    rotated = text.get_window_extent(renderer)
+    angle = text.get_rotation()
+    if angle % 180 == 0:
+        return box(rotated.x0, rotated.y0, rotated.x1, rotated.y1)
+    # The box of a rotated rectangle is centred on it: rebuild the rectangle there.
+    text.set_rotation(0)
+    flat = text.get_window_extent(renderer)
+    text.set_rotation(angle)
+    centre_x, centre_y = (rotated.x0 + rotated.x1) / 2, (rotated.y0 + rotated.y1) / 2
+    rectangle = box(
+        centre_x - flat.width / 2, centre_y - flat.height / 2, centre_x + flat.width / 2, centre_y + flat.height / 2
+    )
+    return affinity.rotate(rectangle, angle, origin=(centre_x, centre_y))
+
+
+def text_collisions(figure, *, dpi: float = 300, tolerance_px: float = 0.5) -> list:
+    """Every pair of drawn texts that overlap, and every text that crosses a visible axes spine.
+
+    The figure is drawn at ``dpi``; each text's outline is its own box, rotated with it (so two
+    rotated tick labels side by side do not count as touching). Outlines are shrunk by
+    ``tolerance_px`` first, so texts that merely touch are not reported.
+
+    Returns
+    -------
+    list of str
+        One line per problem, naming the texts; empty when nothing collides.
+    """
+    from shapely.geometry import LineString
+
+    texts, original_dpi = _drawn_texts(figure, dpi)
+    try:
+        renderer = figure.canvas.get_renderer()
+        shapes = [(text, _text_polygon(text, renderer).buffer(-tolerance_px)) for text in texts]
+        problems = []
+        for index, (a, shape_a) in enumerate(shapes):
+            for b, shape_b in shapes[index + 1 :]:
+                if shape_a.is_empty or shape_b.is_empty:
+                    continue
+                if shape_a.intersects(shape_b):
+                    problems.append(f"{a.get_text()!r} overlaps {b.get_text()!r}")
+        for axis in figure.axes:
+            if not axis.get_visible() or not axis.axison:
+                continue
+            for name, spine in axis.spines.items():
+                if not spine.get_visible():
+                    continue
+                vertices = spine.get_transform().transform_path(spine.get_path()).vertices
+                if len(vertices) < 2:
+                    continue
+                line = LineString(vertices)
+                for text, shape in shapes:
+                    if not shape.is_empty and shape.intersects(line):
+                        problems.append(f"{text.get_text()!r} crosses the {name} edge of an axes")
+        return problems
+    finally:
+        figure.set_dpi(original_dpi)
+        figure.canvas.draw()

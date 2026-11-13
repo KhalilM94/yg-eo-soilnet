@@ -13,8 +13,9 @@ points:
 ``per_class_predicted``
     One model per class, by PREDICTED CaCO3.
 
-``--groups`` also fits ``global_aux`` on each covariate group alone, and for leave-one-region-out
-plans a ``local`` model inside the held-out region. Per-point predictions go to
+For leave-one-region-out plans, a ``local`` model is also fitted inside the held-out region, the
+reference of the transfer loss. ``--groups`` also fits ``global_aux``, and that ``local`` model, on
+each covariate group alone. Per-point predictions go to
 ``<output_dir>/runs/<run name>/predictions/``, scores to ``metrics.csv`` there and to MLflow. For
 leave-one-region-out plans, how far each held-out region lies from its training data (dissimilarity
 index, area of applicability, MESS, carbonate mix, SOM correlations) goes to ``dissimilarity/`` and
@@ -61,7 +62,11 @@ def main(argv: list[str] | None = None) -> RunResult:
     )
     parser.add_argument("--plans", default=None, help="The plan folder (default <output_dir>/plans).")
     parser.add_argument("--kinds", default=None, help="Comma-separated plan kinds to run (default all).")
-    parser.add_argument("--groups", action="store_true", help="Also fit one model per covariate group.")
+    parser.add_argument(
+        "--groups",
+        action="store_true",
+        help="Also fit one model per covariate group (the local model of each leave-one-region-out plan on every covariate is fitted either way).",
+    )
     parser.add_argument("--run-name", default="default", help="The run folder under <output_dir>/runs/.")
     parser.add_argument(
         "--restart",

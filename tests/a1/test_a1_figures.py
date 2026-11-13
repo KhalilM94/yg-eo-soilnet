@@ -137,7 +137,9 @@ def test_a_bias_axis_names_zero_and_both_sides():
     figure, axis = plt.subplots()
     style.bias_axis(axis)
     texts = [text.get_text() for text in axis.texts]
-    assert " no bias" in texts and "↑ over-predicts" in texts and "↓ under-predicts" in texts
+    assert "no bias" in texts and "↑ over-predicts" in texts and "↓ under-predicts" in texts
+    # In the right margin, beside the panel: never on a whisker or the zero line.
+    assert all(text.get_position()[0] > 1 for text in axis.texts)
     assert "g kg⁻¹" in axis.get_ylabel()
 
 
@@ -332,6 +334,101 @@ def test_figure_5_stage_1_r2_is_the_out_of_fold_r2_of_the_audits(tmp_path):
     assert table.loc[(SPATIAL_KFOLD, "cec"), "n"] == 80  # both folds pooled, out-of-fold rows only
 
 
+def test_figure_5_needs_two_designs_and_says_how_many_the_run_has():
+    one = _intervals(sizes=())
+    one = one[one["kind"] == LOGO]
+    inputs = SimpleNamespace(intervals=one)
+    figure = spatial.figure_spatial(inputs)
+    assert figures.is_message_figure(figure)
+    assert "1 validation design (Leave one basin out)" in figure._a1_message
+
+
+def test_figure_s1_is_a_note_unless_two_designs_are_left_out_of_figure_6():
+    inputs = SimpleNamespace(
+        predictions=pd.DataFrame({"kind": [RANDOM, SPATIAL_KFOLD, LOGO]}),
+        primary_block_size=10_000.0,
+        block_sizes=[10_000.0, 25_000.0],
+    )
+    figure = obs_pred.figure_obs_pred_blocks(inputs)
+    assert figures.is_message_figure(figure) and "1 validation design beyond those of figure 6" in figure._a1_message
+
+
+def test_figure_s5_is_drawn_from_the_dissimilarity_summary_without_a_local_model():
+    transfer_table = pd.DataFrame(
+        {
+            "kind": LOGO,
+            "region": ["North", "South"],
+            "covariate_group": "combined",
+            "has_local": False,
+            "rmse_transferred": [11.0, 12.0],
+            "rmse_drop": np.nan,
+        }
+    )
+    summary = pd.DataFrame(
+        {
+            "held_out": ["North", "South"],
+            "median_di": [0.3, 0.5],
+            "carbonate_tvd": [0.1, 0.2],
+            "spearman_som_cec_diff": [0.1, -0.2],
+        }
+    )
+    frame = figures.dissimilarity_frame(transfer_table, summary)
+    assert len(frame) == 2
+    figure = basins.draw_dissimilarity(frame)
+    assert not figures.is_message_figure(figure)
+    assert "Transferred RMSE" in figure.axes[0].get_ylabel()  # no local model: the transferred RMSE itself
+
+
+def test_without_a_random_plan_the_shap_figures_explain_each_held_out_basin(tmp_path, caplog):
+    (tmp_path / "stage1").mkdir()
+    plans = ["logo_r07_sebou", "logo_r06_oum_er_rbia", "mixed_r06_p10_s0"]
+    pd.DataFrame(
+        {"plan_id": plans, "kind": [LOGO, LOGO, MIXED], "held_out": ["Sebou", "Oum Er Rbia", "Oum Er Rbia"]}
+    ).to_csv(tmp_path / "index.csv", index=False)
+    for plan in plans:
+        (tmp_path / "stage1" / f"{plan}.parquet").write_bytes(b"")
+    inputs = SimpleNamespace(plans_dir=tmp_path, run_dir=tmp_path, index=pd.read_csv(tmp_path / "index.csv"))
+    with caplog.at_level(logging.INFO, logger=shap.__name__):
+        chosen = shap.shap_plans(inputs)
+    assert chosen == ["logo_r06_oum_er_rbia", "logo_r07_sebou"]
+    assert any("logo_r06_oum_er_rbia" in record.getMessage() for record in caplog.records)  # logged
+    assert shap.plan_title(inputs, "logo_r07_sebou") == "Sebou held out"
+    assert shap.shap_plans(inputs, "logo_r07_sebou") == ["logo_r07_sebou"]  # --shap-plan still decides
+
+
+def test_figure_1_lists_only_the_designs_of_the_run():
+    assert design.validation_designs([LOGO, MIXED, CONTROL], [], ["A", "B"]) == [
+        "Leave one basin out (2 basins)",
+        "Mixed: share of the basin moved into training",
+        "Control: the moved points alone",
+    ]
+    assert design.validation_designs([SPATIAL_KFOLD], [5_000.0, 10_000.0, 50_000.0], []) == [
+        "Spatial blocks, 5-50 km grid"
+    ]
+
+
+def test_notes_carry_their_figure_name_so_no_two_files_are_the_same(tmp_path, monkeypatch):
+    import hashlib
+
+    def note():
+        return figures.core._missing("This run has no random split.")
+
+    monkeypatch.setattr(render, "_builders", lambda *args, **kwargs: {"fig04_stage1": note, "fig11_shap_groups": note})
+    figures.render_all(
+        SimpleNamespace(run_dir=tmp_path, n_boot=10),
+        tmp_path / "f",
+        only=["fig04_stage1", "fig11_shap_groups"],
+        close=True,
+    )
+    digests = {
+        hashlib.sha256((tmp_path / "f" / f"{name}.png").read_bytes()).hexdigest()
+        for name in ("fig04_stage1", "fig11_shap_groups")
+    }
+    assert len(digests) == 2
+    captions = render.read_captions(tmp_path / "f" / "captions.md")
+    assert captions["fig04_stage1"] == "Not drawn: This run has no random split."
+
+
 # --- figure 6: the numbers in the box --------------------------------------------------------------
 
 
@@ -353,6 +450,8 @@ def test_figure_6_stats_are_the_metrics_slope_and_spread_ratio_recomputed():
             "kind": RANDOM,
             "block_size_m": np.nan,
             "design": "Random",
+            "panel": "Random",
+            "held_out": np.nan,
             "point_id": range(300),
             "observed": observed,
             "predicted": predicted,
@@ -360,9 +459,14 @@ def test_figure_6_stats_are_the_metrics_slope_and_spread_ratio_recomputed():
         }
     )
     figure = obs_pred.draw_obs_pred(points, labels=LABELS)
-    box = next(text.get_text() for text in figure.axes[0].texts if text.get_text().startswith("n = "))
+    box_text = next(text for text in figure.axes[0].texts if text.get_text().startswith("n = "))
+    box = box_text.get_text()
+    assert box_text.get_position() == (0.97, 0.03) and box_text.get_ha() == "right"  # lower right
     assert f"slope = {stats['slope']:.2f}" in box and f"RMSE = {stats['rmse']:.2f}" in box
     assert figure.axes[0].get_xlim() == figure.axes[0].get_ylim() and figure.axes[0].get_xlim()[0] == 0
+    assert figure.get_figwidth() == pytest.approx(style.WIDTH_1COL)  # one panel, one column
+    # The class lines are named at their right end, outside the panel, not in the legend.
+    assert {labels.pretty_name(label) for label in LABELS} <= {text.get_text() for text in figure.axes[0].texts}
     _check_print_size(figure)
 
 
@@ -387,7 +491,7 @@ def _mixed_inputs(with_mixed=True):
                                 "fraction": fraction,
                                 "repeat": repeat,
                                 "split": "test",
-                                "model": GLOBAL_AUX,
+                                "model": GLOBAL,
                                 "covariate_group": "combined",
                                 "observed": observed,
                                 "predicted": observed + rng.normal(0, 2 if kind == MIXED else 4, 40),
@@ -414,7 +518,7 @@ def _mixed_inputs(with_mixed=True):
                     "fraction": np.nan,
                     "repeat": np.nan,
                     "split": "test",
-                    "model": GLOBAL_AUX,
+                    "model": GLOBAL,
                     "covariate_group": "combined",
                     "observed": [1.0, 2.0],
                     "predicted": [1.5, 2.5],
@@ -444,6 +548,50 @@ def test_figure_9_puts_the_number_of_moved_samples_on_x_with_the_range_over_repe
     figure = transfer.figure_mixed(_mixed_inputs())
     assert not figures.is_message_figure(figure) and "fig09_mixed_summary" in figures.figure_data(figure)
     _check_print_size(figure)
+
+
+def test_figure_9_pairs_mixed_and_control_on_their_shared_test_points():
+    curves = transfer.mixed_curves(_mixed_inputs())
+    paired = transfer.mixed_paired(curves)
+    assert len(paired) == 4  # 2 shares x 2 repeats
+    one = paired.iloc[0]
+    mixed = curves[
+        (curves["kind"] == MIXED) & (curves["fraction"] == one["fraction"]) & (curves["repeat"] == one["repeat"])
+    ]
+    control = curves[
+        (curves["kind"] == CONTROL) & (curves["fraction"] == one["fraction"]) & (curves["repeat"] == one["repeat"])
+    ]
+    assert one["difference"] == pytest.approx(mixed["rmse"].iloc[0] - control["rmse"].iloc[0])
+    assert "fig09_mixed_paired" in figures.figure_data(transfer.figure_mixed(_mixed_inputs()))
+
+
+def test_figure_9_reference_lines_lie_inside_the_y_limits():
+    inputs = _mixed_inputs()
+    observed = np.random.default_rng(8).gamma(4, 5, 60)
+    # Leave one basin out far worse than any mixed plan: its line must still be inside the axes.
+    logo = pd.DataFrame(
+        {
+            "plan_id": "logo_north",
+            "kind": LOGO,
+            "held_out": "North",
+            "fraction": np.nan,
+            "repeat": np.nan,
+            "split": "test",
+            "model": GLOBAL,
+            "covariate_group": "combined",
+            "observed": observed,
+            "predicted": observed + 40.0,
+        }
+    )
+    inputs.predictions = pd.concat([inputs.predictions, logo], ignore_index=True)
+    figure = transfer.figure_mixed(inputs)
+    reference = transfer.mixed_references(inputs).set_index("region").loc["North", "rmse_transferred"]
+    upper = figure.axes[0]
+    low, high = upper.get_ylim()
+    assert low < reference < high
+    legend = [text.get_text() for text in figure.legends[0].get_texts()]
+    assert "No local points (leave one basin out)" in legend
+    assert "Local model, all the basin's points" not in legend  # not drawn, so not in the legend
 
 
 # --- every figure draws ----------------------------------------------------------------------
@@ -547,6 +695,7 @@ def _drawn_figures(offline_points):
         ]
     )
     obs = obs[obs["model"].isin(style.MAIN_MODELS)]
+    obs = obs.assign(panel=obs["design"], held_out=np.nan)
     intervals = _class_intervals()
     points = pd.DataFrame(
         {
@@ -562,7 +711,8 @@ def _drawn_figures(offline_points):
     grid = pd.DataFrame(
         rng.normal(0, 1, (3, 3)), index=["North", "South", "East"], columns=["combined", "terrain", "climate"]
     )
-    summary = transfer.mixed_summary(transfer.mixed_curves(_mixed_inputs()))
+    curves = transfer.mixed_curves(_mixed_inputs())
+    summary, paired = transfer.mixed_summary(curves), transfer.mixed_paired(curves)
     basin_table = pd.DataFrame(
         {
             "basin": ["North", "South"],
@@ -574,7 +724,10 @@ def _drawn_figures(offline_points):
             "rho_caco3_train": [0.25, 0.2],
             "rho_cec_basin": [0.4, 0.1],
             "rho_cec_train": [0.35, 0.3],
+            "rmse_transferred": [11.0, 10.2],
+            "rmse_local": [9.8, 10.5],
             "rmse_drop": [1.2, -0.3],
+            "r2_transferred": [0.05, -0.1],
         }
     )
     groups = pd.DataFrame(
@@ -619,7 +772,9 @@ def _drawn_figures(offline_points):
         "fig06_obs_pred": obs_pred.draw_obs_pred(obs[obs["model"] == GLOBAL], labels=LABELS),
         "fig07_class_bias": class_bias.draw_class_bias(intervals[intervals["metric"] == "bias"], labels=LABELS),
         "fig08_transfer": transfer.draw_transfer(points, grid),
-        "fig09_mixed": transfer.draw_mixed(summary, points),
+        "fig09_mixed": transfer.draw_mixed(
+            summary, pd.DataFrame({"region": ["North"], "rmse_transferred": [11.0], "rmse_local": [9.0]}), paired
+        ),
         "fig10_basins": basins.draw_basins(basins.printable(basin_table)),
         "fig11_shap_groups": shap.draw_shap_groups(
             groups, labels=LABELS, order=["satellite", "climate", "terrain", "legacy_soil"]
@@ -638,11 +793,29 @@ def test_every_figure_draws_at_print_size_with_no_text_under_7_pt(offline):
         _check_print_size(figure)
 
 
+def test_no_text_overlaps_another_or_crosses_an_axes_frame(offline):
+    """At 300 dpi, every drawn text clear of the others and of every visible spine."""
+    for name, figure in _drawn_figures(_points()).items():
+        assert style.text_collisions(figure) == [], name
+
+
+def test_the_collision_check_finds_two_texts_on_top_of_each_other():
+    figure, axis = plt.subplots()
+    axis.text(0.5, 0.5, "first", transform=axis.transAxes)
+    axis.text(0.5, 0.5, "second", transform=axis.transAxes)
+    axis.text(0.98, 0.5, "astride the frame", transform=axis.transAxes)
+    problems = style.text_collisions(figure)
+    assert any("'first' overlaps 'second'" in problem for problem in problems)
+    assert any("astride the frame" in problem and "edge" in problem for problem in problems)
+
+
 def test_the_map_has_a_bar_panel_beside_it_and_names_the_points_without_carbonate(offline):
     figure = maps.draw_map(_points(), labels=LABELS, held_out=["North"], relief=False)
-    assert len(figure.axes) == 2  # the map, and the points per basin beside it - not an inset
-    legend = [text.get_text() for text in figure.axes[0].get_legend().get_texts()]
-    assert any(text.startswith("CaCO₃ not measured") for text in legend)
+    # The map, the points per basin beside it - not an inset - and one legend row under both.
+    assert len(figure.axes) == 3
+    legend = figure.axes[2].get_legend()
+    assert legend._ncols == len(legend.get_texts())  # a single row
+    assert any(text.get_text().startswith("not measured") for text in legend.get_texts())
 
 
 def test_the_confusion_matrix_is_in_row_percent_with_the_share_correct_in_the_title():
@@ -666,7 +839,7 @@ def test_the_confusion_matrix_is_in_row_percent_with_the_share_correct_in_the_ti
 def test_missing_inputs_give_a_message_not_an_error():
     for figure in (
         transfer.draw_transfer(pd.DataFrame(), pd.DataFrame()),
-        transfer.draw_mixed(pd.DataFrame(), pd.DataFrame()),
+        transfer.draw_mixed(pd.DataFrame(), pd.DataFrame(), pd.DataFrame()),
         basins.draw_dissimilarity(pd.DataFrame()),
         basins.draw_basins(pd.DataFrame()),
         class_bias.draw_class_scores(pd.DataFrame(), labels=LABELS),
@@ -729,16 +902,15 @@ def test_render_all_writes_the_figure_its_data_and_its_caption(tmp_path):
         n_boot=10,
         block_sizes=[5_000.0, 25_000.0],
         held_out_names=["North", "South"],
-        settings=SimpleNamespace(
-            inner_cv_folds=5, plans=SimpleNamespace(spatial_kfold=SimpleNamespace(block_sizes_m=lambda: ()))
-        ),
+        predictions=pd.DataFrame({"kind": [SPATIAL_KFOLD, LOGO]}),
     )
     drawn = figures.render_all(inputs, tmp_path / "figures", only=["fig01_design"], close=True)
     assert list(drawn) == ["fig01_design"]
     folder = tmp_path / "figures"
     assert (folder / "fig01_design.png").exists() and (folder / "data" / "fig01_design.csv").exists()
     captions = render.read_captions(folder / "captions.md")
-    assert list(captions) == ["fig01_design"] and "5, 25 km" in captions["fig01_design"]
+    assert list(captions) == ["fig01_design"] and "5-25 km grid" in captions["fig01_design"]
+    assert "Random" not in captions["fig01_design"]  # only the designs the run has
     # A later --only run keeps the captions of the figures it did not draw.
     render.write_captions({"fig05_spatial": "Figure 5."}, folder / "captions.md")
     assert list(render.read_captions(folder / "captions.md")) == ["fig01_design", "fig05_spatial"]
@@ -768,6 +940,7 @@ def test_the_shap_figures_name_a_plan_the_run_has_when_the_default_one_is_missin
         (tmp_path / "stage1" / f"{plan}.parquet").write_bytes(b"")
     inputs = SimpleNamespace(plans_dir=tmp_path, run_dir=tmp_path, settings=None, _cache={})
     inputs._cached = lambda key, build: inputs._cache.setdefault(key, build())
+    # Asked for explicitly (--shap-plan random): a note naming a plan the run has.
     for figure in (shap.figure_shap_groups(inputs, plan_id=RANDOM), shap.figure_shap_features(inputs, plan_id=RANDOM)):
         assert figures.is_message_figure(figure) and not figures.is_failed(figure)
         assert "'random' is not among this run's plans" in figure._a1_message
@@ -776,7 +949,10 @@ def test_the_shap_figures_name_a_plan_the_run_has_when_the_default_one_is_missin
 
 def test_one_failing_figure_does_not_stop_the_others(monkeypatch, tmp_path, caplog):
     drawn_design = design.draw_design(
-        pd.DataFrame([("inputs", "x"), ("stage 1", "y"), ("validation", "Random split")], columns=["step", "text"])
+        pd.DataFrame(
+            [("inputs", "x"), ("stage 1", "y"), *(("stage 2", model) for model in "abcd"), ("validation", "Random")],
+            columns=["step", "text"],
+        )
     )
 
     def broken():
@@ -840,7 +1016,8 @@ def test_every_figure_renders_from_a_demo_run(a1_settings_in, tmp_path, mlflow_s
     drawn = figures.render_all(inputs, relief=False, n_boot=50, close=True)
     assert list(drawn) == list(figures.FIGURE_NAMES)
     messages = {name: figure._a1_message for name, figure in drawn.items() if figures.is_message_figure(figure)}
-    assert not messages
+    # Figure S1 shows the block sizes figure 6 leaves out; this run has fewer than two of them.
+    assert set(messages) <= {"figS1_obs_pred_blocks"}, messages
     folder = inputs.run_dir / "figures"
     for name in figures.FIGURE_NAMES:
         for suffix in (".png", ".pdf"):
@@ -849,3 +1026,40 @@ def test_every_figure_renders_from_a_demo_run(a1_settings_in, tmp_path, mlflow_s
     assert {"table_rpiq_by_class.tex", "table_basins.tex", "fig05_spatial_scores.csv"} <= {
         path.name for path in (folder / "data").iterdir()
     }
+
+
+@pytest.mark.slow
+def test_a_logo_and_mixed_run_draws_every_figure_it_can_and_no_two_alike(
+    a1_settings_in, tmp_path, mlflow_store, offline
+):
+    """Acceptance: a run of leave-one-basin-out and mixed plans only, without --groups."""
+    import hashlib
+
+    from yg_eo_soilnet.a1.config import load_a1_config
+    from yg_eo_soilnet.a1.plans import write_plans
+    from yg_eo_soilnet.a1.runner import run_plans
+
+    with mlflow_store(tmp_path / "mlruns") as uri:
+        path = a1_settings_in(tmp_path)(
+            main_overrides={"MLFLOW_TRACKING_URI": uri},
+            as_file=True,
+            output_dir=str(tmp_path / "out"),
+            stage1={"estimator": "XGBoost", "init_args": {"n_estimators": 30}},
+            stage2={"estimator": "XGBoost", "init_args": {"n_estimators": 30}, "params": {"model__max_depth": [3]}},
+            inner_cv_folds=2,
+            plans={"mixed": {"fractions": [0.3, 0.6], "n_repeats": 2}},
+        )
+        a1 = load_a1_config(str(path))
+        write_plans(a1.settings, str(tmp_path / "out" / "plans"), kinds=[LOGO, MIXED])
+        run_plans(a1, groups=False, tracking=False)
+
+    inputs = figures.FigureInputs.from_run(a1)
+    assert LOCAL in set(inputs.predictions["model"])  # the local reference, without --groups
+    drawn = figures.render_all(inputs, relief=False, n_boot=30, close=True)
+    messages = {name for name, figure in drawn.items() if figures.is_message_figure(figure)}
+    # Only what this run cannot have: no random split (4), one design (5), no other block size (S1).
+    assert messages == {"fig04_stage1", "fig05_spatial", "figS1_obs_pred_blocks"}
+    folder = inputs.run_dir / "figures"
+    digests = [hashlib.sha256((folder / f"{name}.png").read_bytes()).hexdigest() for name in figures.FIGURE_NAMES]
+    assert len(set(digests)) == len(digests)  # no figure is a copy of another
+    assert (folder / "data" / "fig09_mixed_paired.csv").exists()

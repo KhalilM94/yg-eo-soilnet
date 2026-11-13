@@ -4,7 +4,9 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
 :mod:`yg_eo_soilnet.a1.evaluation`) and writes, into ``<output_dir>/runs/<run name>/evaluation/``:
 
 ``scores.csv``
-    RMSE, MAE, R², bias, RPD and RPIQ per plan kind, model, covariate group and split. Every table
+    RMSE, MAE, R², bias, RPD and RPIQ per plan kind, model, covariate group and split, for the
+    kinds that can be pooled - ``mixed`` and ``control`` plans are scored per region and share in
+    ``scores_mixed.csv`` instead, since pooled they would count one point many times. Every table
     keeps ``spatial_kfold`` scores of different block sizes apart (``block_size_m``): each point is
     tested once per size, so pooling them would count it several times. Comparing the sizes is the
     block-size sensitivity check.
@@ -15,7 +17,12 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
     spatial blocks.
 ``differences.csv``
     The same for ``per_class_measured``, ``per_class_predicted`` and ``global_aux`` each minus
-    ``global``, scored on the same points, with p-values and their Holm correction.
+    ``global``, scored on the same points, with p-values and their Holm correction; and, in rows of
+    kind ``mixed_vs_control``, each ``mixed`` plan minus its ``control`` plan per region, share and
+    model, paired on the test points they share, Holm-corrected across the shares.
+``scores_mixed.csv``
+    The ``mixed`` and ``control`` scores per region, share, model and covariate group, each repeat
+    scored on its own test points and the repeats averaged.
 ``intervals_by_region.csv``
     The same intervals for each held-out region of the ``logo`` plans.
 ``transfer.csv``
@@ -67,6 +74,7 @@ TABLES = (
     "intervals_by_region.csv",
     "differences.csv",
     "transfer.csv",
+    "scores_mixed.csv",
 )
 #: The held-out regions' names as they appear in metric names, beside the tables.
 REGION_NAMES_FILE = "region_names.json"
@@ -118,7 +126,9 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
 
 def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) -> dict[str, pd.DataFrame]:
     """Write the tables, print the headline, and add both to the open MLflow run (``tracking``)."""
-    frame = evaluation.load_predictions(run_dir)
+    everything = evaluation.load_predictions(run_dir)
+    # Mixed and control plans are scored per region and share (below); pooled they mean nothing.
+    frame = evaluation.pooled_rows(everything)
     test = frame[frame["split"] == TEST]
     combined = test[test["covariate_group"] == COMBINED_GROUP]
     boot = evaluation.block_bootstrap(
@@ -133,7 +143,12 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
         if not logo.empty
         else pd.DataFrame(columns=["kind", "held_out", "model", "metric", "estimate", "low", "high"])
     )
-    transfer = evaluation.transfer_table(frame)
+    transfer = evaluation.transfer_table(everything)
+    mixed = evaluation.mixed_scores(everything)
+    paired = evaluation.mixed_differences(everything, block_km=block_km, n=n_boot, seed=seed)
+    differences = pd.concat([table for table in (boot.differences, paired) if not table.empty], ignore_index=True)
+    if differences.empty:
+        differences = boot.differences
     tables = {
         "scores.csv": evaluation.grouped_metrics(frame, ["kind", "block_size_m", "model", "covariate_group", "split"]),
         "scores_by_class.csv": evaluation.grouped_metrics(
@@ -141,17 +156,18 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
         ),
         "intervals.csv": boot.intervals,
         "intervals_by_region.csv": by_region,
-        "differences.csv": boot.differences,
+        "differences.csv": differences,
         "transfer.csv": transfer,
+        "scores_mixed.csv": mixed,
     }
     out = run_dir / "evaluation"
     out.mkdir(parents=True, exist_ok=True)
     for name, table in tables.items():
         table.to_csv(out / name, index=False)
-    regions = evaluation.region_names(frame)
+    regions = evaluation.region_names(everything)
     (out / REGION_NAMES_FILE).write_text(json.dumps(regions, indent=2, ensure_ascii=False) + "\n")
     headline = evaluation.headline_metrics(
-        frame, intervals=boot.intervals, region_intervals=by_region, transfer=transfer
+        frame, intervals=boot.intervals, region_intervals=by_region, transfer=transfer, mixed=mixed
     )
     if tracking is not None:
         import mlflow
@@ -175,6 +191,14 @@ def _evaluate(run_dir: Path, block_km: float, seed: int, n_boot: int, tracking) 
         summary("RMSE differences (a - b; negative means a is better):")
         summary(
             differences[["kind", "block_size_m", "a", "b", "estimate", "low", "high", "p_holm"]]
+            .round(4)
+            .to_string(index=False)
+        )
+    paired_rmse = paired[(paired["metric"] == "rmse") & (paired["model"] == GLOBAL)] if not paired.empty else paired
+    if not paired_rmse.empty:
+        summary("Mixed minus control, global model, RMSE (negative: the other basins help):")
+        summary(
+            paired_rmse[["region", "fraction", "estimate", "low", "high", "p_holm", "n"]]
             .round(4)
             .to_string(index=False)
         )

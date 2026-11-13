@@ -6,8 +6,9 @@ For each plan of ``index.csv`` (written by ``experiments/a1/make_plans.py``):
    its audit table is saved as ``stage1/<plan_id>.parquet``;
 2. each stage-2 model (:mod:`yg_eo_soilnet.a1.stage2`) is fitted and its test predictions (and
    validation predictions, when the plans have a validation set; by default they do not) saved as ``predictions/<plan_id>/<model>__<covariate group>.parquet``;
-3. with ``groups``, ``global_aux`` is also fitted on each covariate group alone, and for ``logo``
-   plans a within-region ``local`` model is scored inside the held-out region.
+3. for ``logo`` plans, a within-region ``local`` model on every covariate is scored inside the
+   held-out region - the reference of the transfer loss; with ``groups``, ``global_aux`` and
+   ``local`` are also fitted on each covariate group alone.
 
 Everything lands in one run folder, ``<output_dir>/runs/<run name>/``. A file that already exists is
 not computed again, so an interrupted run carries on where it stopped. Files are written under a
@@ -166,7 +167,8 @@ def run_plans(
         Only plans of these kinds; every kind unless given. ``mixed`` brings its ``control`` plans
         with it, as in ``make_plans.py``: a mixed score means little without them.
     groups : bool, default False
-        Also fit ``global_aux`` per covariate group, and the ``local`` models of ``logo`` plans.
+        Also fit ``global_aux`` and (for ``logo`` plans) ``local`` on each covariate group alone.
+        The ``local`` model on every covariate is fitted for ``logo`` plans either way.
     restart : bool, default False
         Clear a run folder made from other settings or plans, instead of refusing to add to it.
     tracking : bool, default True
@@ -310,10 +312,13 @@ def _run_one_plan(row, plans_path, run_dir, table, resolved, a1, config, *, grou
     out = run_dir / "predictions" / row.plan_id
 
     jobs = [(model, COMBINED_GROUP) for model in MODELS]
+    if row.kind == LOGO:
+        # The reference of the transfer loss, on every covariate: always, not only with --groups.
+        jobs.append((LOCAL, COMBINED_GROUP))
     if groups:
         jobs += [(GLOBAL_AUX, name) for name in resolved.groups]
         if row.kind == LOGO:
-            jobs += [(LOCAL, name) for name in [*resolved.groups, COMBINED_GROUP]]
+            jobs += [(LOCAL, name) for name in resolved.groups]
     todo = [(model, group) for model, group in jobs if not (out / _output_name(model, group)).exists()]
     result.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
     for model, group in jobs:

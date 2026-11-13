@@ -104,7 +104,7 @@ def figure_correlations(inputs: FigureInputs, *, n: int = 1000):
             else ""
         )
         + f"{int(shown['significant'].sum())} of {len(shown)} cells differ from 0 (block bootstrap, Holm). "
-        "(b) Median bare-soil Sentinel-2 reflectance per class, with its interquartile range."
+        "(b) Median bare-soil Sentinel-2 reflectance per class; bars span the interquartile range."
     )
     return attach(figure, {"fig03_correlations": shown, "fig03_spectra": spectra}, caption)
 
@@ -172,7 +172,7 @@ def draw_correlations(
                 heat.axhline(position - 0.5, color="white", lw=2.0)
             start = position
     colorbar = figure.colorbar(image, ax=heat, orientation="horizontal", shrink=0.8, pad=0.02, aspect=30)
-    colorbar.set_label("Spearman ρ with SOM (outlined: differs from 0)")
+    colorbar.set_label("Spearman ρ with SOM")
     colorbar.outline.set_visible(False)
     colorbar.ax.tick_params(length=0, labelsize=7)
     letter(heat, "a")
@@ -184,14 +184,17 @@ def draw_correlations(
         bands = load_labels().get("bands") or {}
         ticks = spectra.drop_duplicates("band").sort_values("wavelength_nm")
         place = dict(zip(ticks["band"], range(len(ticks))))
+        # Each class a little to the side of the band, so its IQR bar never hides another's.
+        offsets = dict(zip(labels, np.linspace(-0.24, 0.24, len(labels)) if len(labels) > 1 else [0.0]))
         for label in labels:
             part = spectra[spectra["class"] == label]
             if part.empty:
                 continue
             color = class_color(label)
-            spectrum.fill_between(part["band"].map(place), part["q25"], part["q75"], color=color, alpha=0.2, lw=0)
+            x = part["band"].map(place).to_numpy(dtype=float) + offsets[label]
+            spectrum.vlines(x, part["q25"], part["q75"], color=color, lw=1.0, alpha=0.9, zorder=2)
             spectrum.plot(
-                part["band"].map(place),
+                x,
                 part["median"],
                 color=color,
                 lw=1.5,
@@ -206,7 +209,7 @@ def draw_correlations(
         ]
         spectrum.set_xticks(range(len(ticks)), names, fontsize=7, rotation=45, ha="right", rotation_mode="anchor")
         spectrum.set_xlabel("Sentinel-2 band, by wavelength (evenly spaced)")
-        spectrum.set_ylabel("Bare-soil reflectance (median and IQR)")
+        spectrum.set_ylabel("Bare-soil reflectance (median, bar: IQR)")
         handles = [
             Patch(facecolor=class_color(label), edgecolor=ps.INK_2, lw=0.3, label=pretty_name(label))
             for label in labels

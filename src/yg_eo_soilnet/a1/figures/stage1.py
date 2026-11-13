@@ -19,6 +19,11 @@ def figure_stage1(inputs: FigureInputs, *, plan_id: str = RANDOM):
     try:
         points = stage1_points(inputs, plan_id)
     except FileNotFoundError:
+        if plan_id not in set(inputs.index["plan_id"]):
+            return _missing(
+                f"This run has no {plan_id!r} plan; figure 4 shows stage 1 on the random split (make_plans.py "
+                "and run_a1.py with --kinds random)."
+            )
         return _missing(f"No stage-1 audit for plan {plan_id!r}: run run_a1.py with that plan first.")
     names = {inputs.carbonate_column: ("CaCO₃", "%")}
     if inputs.cec_column:
