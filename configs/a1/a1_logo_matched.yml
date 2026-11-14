@@ -1,0 +1,92 @@
+# Paper A1, gap 3: is the transfer failure in Oum Er Rbia and Sebou a matter of the basin, or of
+# how much training data is left when that basin is held out (Oum Er Rbia holds 37 % of the
+# points)? Leave one basin out again, with the training set cut to the same size for every
+# held-out basin: 3,600 points (about what remains when Oum Er Rbia is held out), drawn as whole
+# 10 km blocks, 5 draws per basin. The unmatched scores are in results/a1_xgb (same models).
+#
+# Run with:
+#   python experiments/a1/make_plans.py --config configs/a1/a1_logo_matched.yml --kinds logo
+#   python experiments/a1/run_a1.py     --config configs/a1/a1_logo_matched.yml --kinds logo
+#   python experiments/a1/evaluate.py   --config configs/a1/a1_logo_matched.yml
+#   python experiments/a1/compare.py --runs results/a1_xgb/runs/default \
+#       results/a1_logo_matched/runs/default --out results/a1_compare_logo
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+stage1:
+  estimator: XGBoost
+  # Stage 1 stays on the processor: a few untuned fits per plan, and the same as the stage 1 of
+  # results/a1_mixed. Switch to cuda only if the GPU check of Prompt 1 shows that
+  # multi_output_tree (both targets in one model) runs on the graphics card.
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  # Stage 2 (the tuned SOM models, where the run time goes) on the graphics card. Needs the CUDA
+  # build of XGBoost: run with `pixi run -e dev` or `-e core-gpu`, not `-e core`.
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  models: [global, global_aux, per_class_measured, per_class_predicted]
+inner_cv_folds: 5
+seeds: [42]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+plans:
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou, Tensift, Loukkous, Bouregreg]
+    validation_region: false
+    # Training cut to this many points (whole 10 km blocks, drawn at random), n_repeats draws per
+    # held-out basin; null (the default) keeps every other basin's points.
+    training_size: 3600
+    n_repeats: 5
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_logo_matched
+mlflow_experiment: Paper_A1

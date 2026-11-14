@@ -307,11 +307,21 @@ class LogoPlanSettings:
         held-out one is training. Validation points are never fitted or tuned on, so turning it on
         only trains the models on one region fewer; it logs a warning. Applies to the ``mixed``
         plans too, which hold out the same region.
+    training_size : int, optional
+        Cut each ``logo`` plan's training set to about this many points, drawn as whole blocks of
+        ``bootstrap.block_size_km`` (:func:`~yg_eo_soilnet.a1.plans.matched_logo_plans`), so every
+        held-out region is learnt from the same amount of data. The other regions' points not drawn
+        are left out of the plan, neither trained nor tested on. None (the default) keeps every
+        training point, with the plan ids and files of plain ``logo`` plans.
+    n_repeats : int, default 1
+        How many draws of the training blocks per held-out region, with ``training_size`` only.
     """
 
     min_points: int = 100
     held_out: Optional[tuple[str, ...]] = None
     validation_region: bool = False
+    training_size: Optional[int] = None
+    n_repeats: int = 1
 
 
 #: The extra arms of the mixed experiment (``plans.mixed.arms``).
@@ -860,6 +870,12 @@ def _logo_kwargs(values: Mapping) -> dict:
         if not isinstance(value, bool):
             raise ValueError(f"plans.logo.validation_region must be true or false; got {value!r}")
         kwargs["validation_region"] = value
+    for key in ("training_size", "n_repeats"):
+        if values.get(key) is not None:
+            value = values[key]
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ValueError(f"plans.logo.{key} must be a whole number; got {value!r}")
+            kwargs[key] = value
     return kwargs
 
 
@@ -1018,6 +1034,16 @@ def _validate_plans(plans: PlanSettings) -> None:
         if repeated:
             raise ValueError(f"plans.logo.held_out names {repeated} more than once.")
 
+    logo = plans.logo
+    if logo.training_size is not None and logo.training_size < 1:
+        raise ValueError(f"plans.logo.training_size must be at least 1, or null; got {logo.training_size}")
+    if logo.n_repeats < 1:
+        raise ValueError(f"plans.logo.n_repeats must be at least 1; got {logo.n_repeats}")
+    if logo.n_repeats > 1 and logo.training_size is None:
+        raise ValueError(
+            f"plans.logo.n_repeats={logo.n_repeats} repeats the draw of plans.logo.training_size, which is not "
+            "set: every repeat would be the same plan."
+        )
     mixed = plans.mixed
     if not mixed.fractions or any(not 0.0 < p < 1.0 for p in mixed.fractions):
         raise ValueError(f"plans.mixed.fractions must lie strictly between 0 and 1; got {list(mixed.fractions)}")

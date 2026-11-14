@@ -31,6 +31,11 @@ A region with fewer than ``plans.logo.min_points`` points (100) is never held ou
 for validation: its score would rest on too few points. ``plans.logo.held_out`` narrows the regions
 held out to a list of names. Every region not held out stays in training.
 
+**Matched training size.** With ``plans.logo.training_size``, each ``logo`` plan's training set is
+cut to about that many points, drawn as whole bootstrap blocks, ``plans.logo.n_repeats`` times per
+held-out region (:func:`matched_logo_plans`, ids ``logo_m<size>_<region>_s<repeat>``): a region is
+then judged on the same amount of training data as every other.
+
 **No validation set, by default.** A1 chooses its settings by cross-validation inside the training
 points (grouped by block or region on the spatial plans) and fits both stages on the training points
 only, so validation points would never be fitted or tuned on: they would only take data away from
@@ -51,7 +56,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Sequence, Union
 
 import numpy as np
 import pandas as pd
@@ -96,6 +101,10 @@ INDEX_COLUMNS = (
 #: What ``held_out_list`` says when no list was given and every large enough region is held out.
 ALL_ELIGIBLE = "all eligible"
 INDEX_FILE = "index.csv"
+#: The columns ``index.csv`` gains when ``plans.logo.training_size`` cuts the logo plans' training
+#: sets: the size asked for, and the other regions' points left out of the plan (``n_train`` is the
+#: size drawn). A folder without matched plans keeps the plain index, byte for byte.
+MATCHED_INDEX_COLUMNS = ("training_size", "n_left_out")
 #: The model family recorded in every plan's ``eligible_*`` column: A1 trains scikit-learn models.
 FAMILY = "sklearn"
 
@@ -133,6 +142,10 @@ class BuiltPlan:
     held_out_list : str or None
         For the region plans, the regions asked to be held out (``;``-separated), or
         :data:`ALL_ELIGIBLE`.
+    training_size : int or None
+        For matched ``logo`` plans, the training size asked for (``plans.logo.training_size``).
+    n_left_out : int or None
+        For matched ``logo`` plans, the other regions' points not drawn into training.
     """
 
     plan_id: str
@@ -146,6 +159,8 @@ class BuiltPlan:
     block_size_m: Optional[float] = None
     min_points: Optional[int] = None
     held_out_list: Optional[str] = None
+    training_size: Optional[int] = None
+    n_left_out: Optional[int] = None
 
     def index_row(self) -> dict:
         """The plan's row of ``index.csv``."""
@@ -162,6 +177,8 @@ class BuiltPlan:
             "n_train": counts[TRAIN],
             "n_val": counts[VAL],
             "n_test": counts[TEST],
+            "training_size": self.training_size if self.training_size is not None else np.nan,
+            "n_left_out": self.n_left_out if self.n_left_out is not None else np.nan,
         }
 
 
@@ -398,7 +415,7 @@ def block_size_tag(size_m: float) -> str:
     return f"{size_m / 1000:g}km"
 
 
-def whole_blocks_for(blocks: pd.Series, n_points: int, *, seed: int) -> pd.Index:
+def whole_blocks_for(blocks: pd.Series, n_points: int, *, seed: Union[int, Sequence[int]]) -> pd.Index:
     """Whole blocks, drawn in a seeded random order, until they hold about ``n_points`` points.
 
     Drawing a share of the blocks would miss the target whenever blocks differ in size, which
@@ -412,7 +429,7 @@ def whole_blocks_for(blocks: pd.Series, n_points: int, *, seed: int) -> pd.Index
         Each point's block, indexed by point id.
     n_points : int
         How many points to aim for.
-    seed : int
+    seed : int or sequence of int
         Fixes the order the blocks are drawn in.
 
     Returns
@@ -451,12 +468,16 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
     Every other region is training. With ``plans.logo.validation_region``, one other eligible region
     is set aside for validation instead (:func:`validation_region`).
 
+    With ``plans.logo.training_size``, the training set is cut instead (:func:`matched_logo_plans`).
+
     Returns
     -------
     list of BuiltPlan
         ``logo_r<id>_<name>``, with each point's region as its cluster.
     """
     _require_regions(population, LOGO)
+    if settings.plans.logo.training_size is not None:
+        return matched_logo_plans(population, settings)
     plans = []
     for region in population.held_out:
         test_ids = population.region_points(region)
@@ -474,6 +495,107 @@ def logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPl
             )
         )
     return plans
+
+
+def matched_logo_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltPlan]:
+    """Leave one region out with the training set cut to the same size for every held-out region.
+
+    Holding out a large region also removes much of the training data, so a poor transfer score
+    could mean "this region is different" or only "less to learn from". Here the training points of
+    each plain ``logo`` plan are cut to about ``plans.logo.training_size`` points by drawing whole
+    square blocks of ``bootstrap.block_size_km`` (:func:`training_blocks`) in a random order until
+    the size is reached (:func:`whole_blocks_for`, so the size is missed by less than one block).
+    The points not drawn are left out of the plan: neither trained nor tested on. The test set is
+    the whole held-out region, as in the plain plan; validation points, if any, are kept.
+
+    Each region gets ``plans.logo.n_repeats`` draws, seeded by ``[first seed, repeat, region]``. A
+    region whose training set is already no larger than ``training_size`` keeps every training
+    point, with a warning. Each plan's size is logged and recorded in ``index.csv``
+    (``training_size`` asked, ``n_train`` drawn, ``n_left_out``).
+
+    Returns
+    -------
+    list of BuiltPlan
+        ``logo_m<size>_r<id>_<name>_s<repeat>``, repeats from 0, with each point's region as its
+        cluster.
+    """
+    _require_regions(population, LOGO)
+    logger = logging.getLogger(__name__)
+    options = settings.plans.logo
+    size = int(options.training_size)
+    blocks = training_blocks(population, settings)
+    plans = []
+    for region in population.held_out:
+        test_ids = population.region_points(region)
+        val_ids = _validation_points(population, region, settings)
+        full = _assignments(population.ids, test=test_ids, val=val_ids)
+        available = full.index[full.to_numpy() == TRAIN]
+        tag = _region_tag(population, region)
+        name = population.region_names[region]
+        if len(available) <= size:
+            logger.warning(
+                f"Holding out {name} leaves {len(available)} training point(s), no more than "
+                f"plans.logo.training_size={size}: its matched plans use them all."
+            )
+        for repeat in range(options.n_repeats):
+            if len(available) <= size:
+                drawn = available
+            else:
+                drawn = whole_blocks_for(blocks.reindex(available), size, seed=[settings.seed, repeat, region])
+            left_out = available.difference(drawn)
+            assignments = full.drop(left_out)
+            plan = _plan(assignments, LOGO, settings, clusters=population.region_ids, population=population)
+            plan_id = f"logo_m{size}_{tag}_s{repeat}"
+            logger.info(
+                f"{plan_id}: {len(drawn)} training point(s) (asked {size}) in "
+                f"{blocks.reindex(drawn).nunique()} block(s) of {settings.bootstrap.block_size_km:g} km; "
+                f"{len(left_out)} left out, {len(test_ids)} to test."
+            )
+            plans.append(
+                BuiltPlan(
+                    plan_id=plan_id,
+                    kind=LOGO,
+                    plan=plan,
+                    held_out=name,
+                    repeat=repeat,
+                    held_out_cluster=region,
+                    training_size=size,
+                    n_left_out=len(left_out),
+                    **_region_record(settings),
+                )
+            )
+    return plans
+
+
+def training_blocks(population: PlanPopulation, settings: A1Settings) -> pd.Series:
+    """Each point's square block of ``bootstrap.block_size_km``, the blocks a matched plan is drawn in.
+
+    The grid is the one the block bootstrap resamples in
+    (:func:`~yg_eo_soilnet.utils.assign_grid_ids`, laid once over every point with a position). A
+    point without a position is a block on its own; when every point fits in one square, they are
+    all one block.
+
+    Returns
+    -------
+    pandas.Series of int
+        Indexed by point id, for every point of the population.
+    """
+    from yg_eo_soilnet.utils import assign_grid_ids
+
+    placed = population.coordinates.reindex(population.ids).dropna()
+    blocks = pd.Series(0, index=placed.index, dtype=int)
+    if len(placed):
+        points = pd.DataFrame({"lat": placed["lat"].to_numpy(), "lon": placed["lon"].to_numpy()})
+        try:
+            grid_id, _ = assign_grid_ids(points, cell_size_m=settings.bootstrap.block_size_km * 1000.0)
+            blocks = pd.Series(np.asarray(grid_id, dtype=int), index=placed.index)
+        except ValueError as error:
+            if "exceeds dataset extent" not in str(error):
+                raise
+    unplaced = population.ids.difference(placed.index)
+    start = int(blocks.max()) + 1 if len(blocks) else 0
+    own = pd.Series(np.arange(start, start + len(unplaced), dtype=int), index=unplaced)
+    return pd.concat([blocks, own]).reindex(population.ids)
 
 
 def _region_record(settings: A1Settings) -> dict:
@@ -815,7 +937,12 @@ def write_plans(
         stale.unlink(missing_ok=True)
     for built in plans:
         built.plan.to_frame().to_parquet(out / f"{built.plan_id}.parquet", index=False)
-    index = pd.DataFrame([built.index_row() for built in plans], columns=list(INDEX_COLUMNS))
+    matched = any(built.training_size is not None for built in plans)
+    columns = [*INDEX_COLUMNS, *(MATCHED_INDEX_COLUMNS if matched else ())]
+    index = pd.DataFrame([built.index_row() for built in plans], columns=columns)
+    for column in ("training_size", "n_left_out"):
+        if column in index:
+            index[column] = index[column].astype("Int64")
     index["repeat"] = index["repeat"].astype("Int64")
     index.to_csv(out / INDEX_FILE, index=False)
 

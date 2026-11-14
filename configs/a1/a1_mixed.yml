@@ -1,0 +1,95 @@
+# Paper A1 - mixed-training experiment: how many local samples repair the transfer to a basin the
+# model has not seen. Same data and models as configs/a1/a1.yml, but:
+#   - only the two basins where transfer failed are held out (Oum Er Rbia, Sebou);
+#   - stage 1 is XGBoost (TabICL made each split take ~50 min);
+#   - results go to their own folder, so the main run's plans and outputs are untouched.
+# Run with:
+#   python experiments/a1/make_plans.py   --config configs/a1/a1_mixed.yml --kinds logo,mixed
+#   python experiments/a1/run_a1.py       --config configs/a1/a1_mixed.yml --kinds logo,mixed
+#   python experiments/a1/evaluate.py     --config configs/a1/a1_mixed.yml
+#   python experiments/a1/make_figures.py --config configs/a1/a1_mixed.yml
+# (no --groups: all inputs only; the logo plans give the "no local samples" point of the curves)
+
+# --- data ---------------------------------------------------------------------------------------
+# Same main configuration and data files as configs/a1/a1.yml. Loading stops if the two disagree.
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  # No time-series file: the percentiles are already columns of the static file.
+  timeseries: null
+
+# The lab column being predicted.
+target: organic_matter_g_kg
+# The soil properties stage 1 predicts for stage 2.
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+# Which covariate goes in which group.
+covariate_groups: covariate_groups.yml
+
+# The 10 major hydraulic basins (Merchich datum, reprojected to latitude/longitude).
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+# XGBoost for stage 1 here (the main run used TabICL).
+stage1:
+  estimator: XGBoost
+stage2:
+  estimator: XGBoost
+  # Tuned by inner cross-validation on the training points of each plan: 10 combinations.
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+inner_cv_folds: 5
+seeds: [42]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+# The time-series percentiles are already columns of the static file.
+timeseries_percentiles:
+  source: static
+
+# Acquisition geometry (sun zenith, radar incidence angle) is never an input.
+exclude_inputs: [S2_SZA, S1_angle]
+
+# FAO calcareousness classes.
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+# No sampling dates in the data files: the pre-flight region x year table is skipped.
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+# No validation set: both stages are fitted and tuned on the training points only.
+plans:
+  # Leave one basin out: the "no local samples" reference of the mixed curves.
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou]
+    validation_region: false
+  # A share of the held-out basin moved into training, the rest of the basin is the test set; each
+  # share drawn n_repeats times. Each mixed plan also gets its control: the moved points alone.
+  # 2 basins x 10 shares x 5 repeats = 100 mixed + 100 controls.
+  mixed:
+    fractions: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    n_repeats: 5
+
+# --- where the results go -----------------------------------------------------------------------
+# Its own folder: plans and outputs of the main run (results/a1) are not touched.
+output_dir: results/a1_mixed
+# Same MLflow experiment; the run appears as a separate parent run.
+mlflow_experiment: Paper_A1
