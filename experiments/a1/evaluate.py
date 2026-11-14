@@ -23,11 +23,17 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
 ``scores_mixed.csv``
     The ``mixed`` and ``control`` scores per region, share, model and covariate group, each repeat
     scored on its own test points and the repeats averaged.
+``scores_logo_matched.csv``
+    The matched ``logo`` plans (``plans.logo.training_size``) per region, training size, model and
+    covariate group: each draw scored on its own, then the mean and the min-max over the draws.
+    Every draw tests the whole region, so matched draws are left out of every pooled table and of
+    the per-region intervals.
 ``intervals_by_region.csv``
-    The same intervals for each held-out region of the ``logo`` plans.
+    The same intervals for each held-out region of the plain ``logo`` plans.
 ``transfer.csv``
     For ``logo`` and ``mixed`` plans, the local against the transferred score per region and
-    covariate group, and the drop between them.
+    covariate group, and the drop between them; matched draws averaged per region (kind
+    ``logo_matched``).
 ``seed_summary.csv``
     For a run of several seeds: each headline metric's value on the first seed and its mean, SD,
     min and max over the seeds.
@@ -85,6 +91,7 @@ TABLES = (
     "differences.csv",
     "transfer.csv",
     "scores_mixed.csv",
+    "scores_logo_matched.csv",
     "seed_summary.csv",
 )
 #: The held-out regions' names as they appear in metric names, beside the tables.
@@ -207,6 +214,8 @@ def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: i
     )
     transfer = evaluation.transfer_table(everything)
     mixed = evaluation.mixed_scores(everything)
+    # Matched leave-one-region-out draws: each scored on its own, then summarised per region.
+    matched = evaluation.matched_logo_scores(everything)
     paired = evaluation.mixed_differences(everything, block_km=block_km, n=n_boot, seed=seed)
     # A run of one model (stage2.models: [global]) has neither: the table keeps its columns, empty.
     kept = [table for table in (boot.differences, paired) if not table.empty]
@@ -221,8 +230,14 @@ def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: i
         "differences.csv": differences,
         "transfer.csv": transfer,
         "scores_mixed.csv": mixed,
+        "scores_logo_matched.csv": matched,
         "headline": evaluation.headline_table(
-            frame, intervals=boot.intervals, region_intervals=by_region, transfer=transfer, mixed=mixed
+            frame,
+            intervals=boot.intervals,
+            region_intervals=by_region,
+            transfer=transfer,
+            mixed=mixed,
+            matched=matched,
         ),
         "_model_differences": boot.differences,
         "_paired": paired,

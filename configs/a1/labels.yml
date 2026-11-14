@@ -24,6 +24,9 @@ kinds:
   logo: Leave one basin out
   mixed: Other basins + local samples
   control: Local samples only
+  mixed_weighted: Mixed, local samples weighted
+  mixed_indicator: Mixed, local samples flagged
+  logo_matched: Leave one basin out, training size matched
 
 groups:
   satellite: Satellite

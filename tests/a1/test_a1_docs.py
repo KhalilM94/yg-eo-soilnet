@@ -16,6 +16,8 @@ SCRIPTS = (
     "run_a1.py",
     "evaluate.py",
     "make_figures.py",
+    "compare.py",
+    "basin_relations.py",
 )
 
 

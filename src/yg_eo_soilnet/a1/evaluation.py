@@ -34,7 +34,19 @@ import numpy as np
 import pandas as pd
 
 from yg_eo_soilnet.a1.config import COMBINED_GROUP
-from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, MIXED_KINDS, RANDOM, SPATIAL_KFOLD, slug
+from yg_eo_soilnet.a1.plans import (
+    CONTROL,
+    DIVIDED_KINDS,
+    LOGO,
+    LOGO_MATCHED,
+    MIXED,
+    MIXED_KINDS,
+    RANDOM,
+    SPATIAL_KFOLD,
+    is_matched,
+    matched_training_size,
+    slug,
+)
 from yg_eo_soilnet.a1.devices import UNKNOWN_DEVICE
 from yg_eo_soilnet.a1.layout import prediction_paths
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
@@ -292,6 +304,9 @@ def spatial_blocks(df: pd.DataFrame, block_km: float = 10.0) -> pd.Series:
         moved = positions.loc[positions["point_id"].duplicated(), "point_id"].unique()[:3].tolist()
         raise ValueError(f"Some points have two positions, e.g. {moved}; point ids must name one place each.")
     points = positions.reset_index(drop=True)
+    if points.empty:
+        # Nothing to score: a run of matched leave-one-region-out plans alone has no pooled rows.
+        return pd.Series(np.zeros(0, dtype=int), index=df.index, name="block")
     if points[["lat", "lon"]].isna().any().any():
         raise ValueError("Some points have no lat/lon; the spatial blocks need every point's position.")
     try:
@@ -561,6 +576,20 @@ def holm(pvalues):
 # --- transfer --------------------------------------------------------------------------------------
 
 
+def _averaged_over_repeats(per_repeat_rows: list) -> list:
+    """Transfer rows of the repeats (or draws) of one region, share and group, averaged into one row each."""
+    if not per_repeat_rows:
+        return []
+    per_repeat = pd.DataFrame(per_repeat_rows)
+    keys = ["kind", "region", "covariate_group", "fraction", "local_source"]
+    grouped = per_repeat.groupby(keys, sort=True, dropna=False)
+    averaged = grouped.mean(numeric_only=True)
+    averaged["has_local"] = grouped["has_local"].all()
+    averaged["n_repeats"] = grouped.size()
+    averaged["rmse_drop_sd"] = grouped["rmse_drop"].std(ddof=1)
+    return averaged.reset_index().to_dict("records")
+
+
 def _drops(local: dict, transferred: dict) -> dict:
     """How much worse the transferred model is, per score: positive means worse."""
     drops = {}
@@ -622,7 +651,8 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
     Returns
     -------
     pandas.DataFrame
-        One row per region, covariate group and (for ``mixed``) share: ``kind, region,
+        One row per region, covariate group and (for ``mixed``) share - the draws of matched
+        ``logo`` plans averaged per region, under the kind ``logo_matched`` - : ``kind, region,
         covariate_group, fraction, n_repeats, n, local_source, has_local``, then
         ``<score>_local`` and ``<score>_transferred`` for each score, then the drops -
         ``rmse_drop`` and ``mae_drop`` (transferred - local), ``r2_drop``, ``rpd_drop`` and
@@ -635,20 +665,21 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
     rows = []
 
     logo = test[test["kind"] == LOGO]
-    for (_, group), part in logo.groupby(["plan_id", "covariate_group"], sort=True):
+    matched_rows = []
+    for (plan_id, group), part in logo.groupby(["plan_id", "covariate_group"], sort=True):
         transferred = part[part["model"] == transferred_model]
         if transferred.empty:
             continue
-        rows.append(
-            {
-                "kind": LOGO,
-                "region": transferred["held_out"].iloc[0],
-                "covariate_group": group,
-                "fraction": np.nan,
-                "local_source": "local model",
-                **_transfer_row(transferred, part[part["model"] == LOCAL]),
-            }
-        )
+        row = {
+            "kind": LOGO_MATCHED if matched_training_size(plan_id) is not None else LOGO,
+            "region": transferred["held_out"].iloc[0],
+            "covariate_group": group,
+            "fraction": np.nan,
+            "local_source": "local model",
+            **_transfer_row(transferred, part[part["model"] == LOCAL]),
+        }
+        (matched_rows if row["kind"] == LOGO_MATCHED else rows).append(row)
+    rows += _averaged_over_repeats(matched_rows)
 
     shared = test[test["model"] == transferred_model].assign(fraction_key=lambda frame: frame["fraction"].round(6))
     match = ["held_out", "fraction_key", "repeat", "covariate_group"]
@@ -666,14 +697,7 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
                 **_transfer_row(transferred, controls.get(key)),
             }
         )
-    if mixed_rows:
-        per_repeat = pd.DataFrame(mixed_rows)
-        keys = ["kind", "region", "covariate_group", "fraction", "local_source"]
-        averaged = per_repeat.groupby(keys, sort=True).mean(numeric_only=True)
-        averaged["has_local"] = per_repeat.groupby(keys, sort=True)["has_local"].all()
-        averaged["n_repeats"] = per_repeat.groupby(keys, sort=True).size()
-        averaged["rmse_drop_sd"] = per_repeat.groupby(keys, sort=True)["rmse_drop"].std(ddof=1)
-        rows += averaged.reset_index().to_dict("records")
+    rows += _averaged_over_repeats(mixed_rows)
 
     score_columns = [f"{score}_{side}" for score in SCORES for side in ("local", "transferred")]
     drop_columns = [f"{score}_drop" for score in SCORES if score != "bias"] + ["rmse_drop_pct", "rmse_drop_sd"]
@@ -693,14 +717,59 @@ MIXED_VS_CONTROL = "mixed_vs_control"
 
 
 def pooled_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """The rows that may be pooled into one score per kind: every kind but ``mixed``, its arms and ``control``.
+    """The rows that may be pooled into one score per kind: not ``mixed``, its arms, ``control`` or matched ``logo``.
 
     A ``mixed`` or ``control`` plan exists for every share and repeat of a held-out region, and
     each tests the region's remaining points: pooled, one point would count once per share and
     repeat (99,760 rows from 3,661 points, on the real data). Those plans are scored per region and
-    share instead (:func:`mixed_scores`, :func:`mixed_differences`).
+    share instead (:func:`mixed_scores`, :func:`mixed_differences`). The draws of a matched ``logo``
+    plan all test the whole region, so they are scored per region and draw
+    (:func:`matched_logo_scores`).
     """
-    return df[~df["kind"].isin(DIVIDED_KINDS)]
+    return df[~df["kind"].isin(DIVIDED_KINDS) & ~is_matched(df["plan_id"])]
+
+
+def matched_logo_scores(df: pd.DataFrame, *, min_n: int = MIN_GROUP_SIZE) -> pd.DataFrame:
+    """Test scores of the matched ``logo`` plans: each draw on its own, then per region, size and model.
+
+    Every draw of a region tests the same points (the whole region), so the draws are scored one at
+    a time and summarised - as :func:`mixed_scores` does per share - never pooled.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``kind`` (``logo_matched``), ``region, training_size, model, covariate_group, n_repeats``
+        (draws), ``n`` (test points), then the mean of each score over the draws, ``rmse_sd``, and
+        ``<score>_min`` / ``<score>_max`` over the draws.
+    """
+    columns = [
+        "kind",
+        "region",
+        "training_size",
+        "model",
+        "covariate_group",
+        "n_repeats",
+        "n",
+        *SCORES,
+        "rmse_sd",
+        *[f"{score}_{end}" for score in SCORES for end in ("min", "max")],
+    ]
+    test = df[(df["split"] == TEST) & (df["kind"] == LOGO) & is_matched(df["plan_id"])]
+    if test.empty:
+        return pd.DataFrame(columns=columns)
+    test = test.assign(training_size=[matched_training_size(plan_id) for plan_id in test["plan_id"]])
+    per_draw = grouped_metrics(test, ["held_out", "training_size", "plan_id", "model", "covariate_group"], min_n=min_n)
+    keys = ["held_out", "training_size", "model", "covariate_group"]
+    grouped = per_draw.groupby(keys, sort=True)
+    table = grouped[["n", *SCORES]].mean()
+    table["n_repeats"] = grouped.size()
+    table["rmse_sd"] = grouped["rmse"].std(ddof=1)
+    for score in SCORES:
+        table[f"{score}_min"] = grouped[score].min()
+        table[f"{score}_max"] = grouped[score].max()
+    table = table.reset_index().rename(columns={"held_out": "region"})
+    table["kind"] = LOGO_MATCHED
+    return table[columns]
 
 
 def mixed_scores(df: pd.DataFrame, *, min_n: int = MIN_GROUP_SIZE) -> pd.DataFrame:
@@ -833,6 +902,7 @@ def headline_table(
     region_intervals: Optional[pd.DataFrame] = None,
     transfer: Optional[pd.DataFrame] = None,
     mixed: Optional[pd.DataFrame] = None,
+    matched: Optional[pd.DataFrame] = None,
 ) -> dict[str, float]:
     """The scores of a run worth a glance in MLflow, named ``<score>__<plans>__<model>[__<group>]``.
 
@@ -848,7 +918,9 @@ def headline_table(
     (``rmse_drop__logo_<region>__<group>`` and ``rmse_drop__logo_mean__<group>``); the ``mixed``
     and ``control`` plans per region and share, averaged over the repeats and never pooled
     (``rmse__mixed_<region>_f<share>__<model>``, ``rmse__control_<region>_f<share>__<model>``,
-    every covariate, from ``mixed``); and the
+    every covariate, from ``mixed``); the matched ``logo`` plans per region, averaged over the
+    draws and never pooled (``rmse__logo_m<size>_<region>__<model>``, every covariate, from
+    ``matched``); and the
     bootstrap interval bounds of RMSE and R² (``...__lo`` / ``...__hi``) wherever ``intervals``
     (pooled: random and each block size) or ``region_intervals`` (each region) hold them. Names are
     MLflow-safe: lower-case letters, digits and underscores (:func:`~yg_eo_soilnet.a1.tracking.metric_name`).
@@ -902,7 +974,7 @@ def headline_table(
             for score in HEADLINE_SCORES:
                 add(score, scope, row.model, group_part(row.covariate_group), getattr(row, score))
 
-    logo = test[test["kind"] == LOGO]
+    logo = test[(test["kind"] == LOGO) & ~is_matched(test["plan_id"])]
     if not logo.empty:
         regions = grouped_metrics(logo, ["held_out", "model", "covariate_group"], min_n=0)
         for row in regions.itertuples():
@@ -919,6 +991,11 @@ def headline_table(
             add("rmse_drop", f"logo_{row.region}", None, row.covariate_group, row.rmse_drop)
         for group, values in drops.groupby("covariate_group")["rmse_drop"]:
             add("rmse_drop", "logo_mean", None, group, values.mean())
+
+    if matched is not None and not matched.empty:
+        for row in matched[matched["covariate_group"] == DEFAULT_GROUP].itertuples():
+            for score in HEADLINE_SCORES:
+                add(score, f"logo_m{int(row.training_size)}_{row.region}", row.model, None, getattr(row, score))
 
     if mixed is not None and not mixed.empty:
         for row in mixed[mixed["covariate_group"] == DEFAULT_GROUP].itertuples():

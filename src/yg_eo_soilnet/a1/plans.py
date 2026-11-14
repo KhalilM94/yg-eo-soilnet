@@ -105,6 +105,10 @@ INDEX_FILE = "index.csv"
 #: sets: the size asked for, and the other regions' points left out of the plan (``n_train`` is the
 #: size drawn). A folder without matched plans keeps the plain index, byte for byte.
 MATCHED_INDEX_COLUMNS = ("training_size", "n_left_out")
+#: A matched ``logo`` plan's id: ``logo_m<training size>_<region>_s<repeat>``.
+MATCHED_ID = re.compile(r"^logo_m(?P<size>\d+)_")
+#: The name matched ``logo`` plans go under in the evaluation tables (their plan kind stays ``logo``).
+LOGO_MATCHED = "logo_matched"
 #: The model family recorded in every plan's ``eligible_*`` column: A1 trains scikit-learn models.
 FAMILY = "sklearn"
 
@@ -596,6 +600,23 @@ def training_blocks(population: PlanPopulation, settings: A1Settings) -> pd.Seri
     start = int(blocks.max()) + 1 if len(blocks) else 0
     own = pd.Series(np.arange(start, start + len(unplaced), dtype=int), index=unplaced)
     return pd.concat([blocks, own]).reindex(population.ids)
+
+
+def matched_training_size(plan_id) -> Optional[int]:
+    """The training size a matched ``logo`` plan was cut to, read from its id; None for any other plan.
+
+    Examples
+    --------
+    >>> matched_training_size("logo_m3600_r06_oum_er_rbia_s0"), matched_training_size("logo_r06_oum_er_rbia")
+    (3600, None)
+    """
+    found = MATCHED_ID.match(str(plan_id))
+    return int(found.group("size")) if found else None
+
+
+def is_matched(plan_ids) -> np.ndarray:
+    """Which of these plan ids are matched ``logo`` plans (:func:`matched_logo_plans`)."""
+    return np.array([MATCHED_ID.match(str(plan_id)) is not None for plan_id in plan_ids], dtype=bool)
 
 
 def _region_record(settings: A1Settings) -> dict:
