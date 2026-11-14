@@ -66,7 +66,7 @@ def local_weight(settings: A1Settings, n_other: int, n_moved: int) -> float:
     Examples
     --------
     >>> from yg_eo_soilnet.a1.settings import A1Settings
-    >>> local_weight(A1Settings(), n_other=3000, n_moved=150)
+    >>> local_weight(A1Settings(main_config_path="main_config.yml"), n_other=3000, n_moved=150)
     20.0
     """
     configured = settings.plans.mixed.local_weight

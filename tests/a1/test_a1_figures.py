@@ -892,7 +892,10 @@ def test_a_figure_is_saved_as_png_and_pdf(tmp_path):
 
 def test_only_and_skip_choose_figures_in_order_and_refuse_unknown_names():
     assert render.select_figures(only=["fig06_obs_pred", "fig05_spatial"]) == ["fig05_spatial", "fig06_obs_pred"]
-    assert render.select_figures(skip=["fig02_map"]) == [name for name in render.FIGURE_NAMES if name != "fig02_map"]
+    # Every figure that can be asked for: the uncertainty figures too, which a run without global_q never draws.
+    assert render.select_figures(skip=["fig02_map"]) == [
+        name for name in render.ALL_FIGURE_NAMES if name != "fig02_map"
+    ]
     assert render.select_figures(only=["fig05_spatial", "fig06_obs_pred"], skip=["fig06_obs_pred"]) == ["fig05_spatial"]
     with pytest.raises(ValueError, match="fig5_transfer"):
         render.select_figures(only=["fig5_transfer"])

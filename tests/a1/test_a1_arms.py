@@ -102,7 +102,8 @@ def test_the_arms_configurations_load(name, held_out):
     settings = load_settings(str(A1_CONFIGS / name))
     assert settings.plans.mixed.arms == ("weighted", "indicator")
     assert settings.plans.mixed.local_weight == "balanced"
-    assert settings.stage2.models == ("global",)
+    # Global, and the quantile model of the prediction intervals.
+    assert settings.stage2.models == ("global", "global_q")
     assert len(settings.plans.logo.held_out) == held_out
 
 

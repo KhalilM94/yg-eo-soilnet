@@ -56,9 +56,18 @@ stage2:
     model__max_depth: [3, 4, 5, 6, 7]
     model__n_estimators: [100, 200]
     model__learning_rate: [0.05]
-  models: [global]
+  models: [global, global_q]
 inner_cv_folds: 5
 seeds: [42]
+
+# --- prediction intervals (global_q) ------------------------------------------------------------
+# global_q: one XGBoost quantile model (reg:quantileerror) at every quantile below, same inputs, grid
+# and folds as Global, tuned by pinball loss; its central intervals conformalized (CQR) on the
+# training points' out-of-fold predictions. Global stays the model of every accuracy result.
+uncertainty:
+  quantiles: [0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95]
+  levels: [0.5, 0.8, 0.9]
+  conformal: true
 
 # --- what the results are read with -------------------------------------------------------------
 min_cell_size: 30

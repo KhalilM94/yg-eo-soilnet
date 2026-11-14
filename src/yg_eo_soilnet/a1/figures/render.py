@@ -27,6 +27,7 @@ from yg_eo_soilnet.a1.figures import (
     spatial,
     stage1,
     transfer,
+    uncertainty,
 )
 from yg_eo_soilnet.a1.figures.core import (
     FigureInputs,
@@ -64,8 +65,13 @@ SUPPLEMENTARY_FIGURES = (
     "figS4_shap_features",
     "figS5_dissimilarity",
 )
-#: Every figure :func:`render_all` draws, by the file name each is saved under.
+#: The prediction-interval figures, drawn only for a run with the quantile model (``global_q``).
+UNCERTAINTY_FIGURES = uncertainty.UNCERTAINTY_FIGURES
+#: Every figure :func:`render_all` draws for every run, by the file name each is saved under.
 FIGURE_NAMES = MAIN_FIGURES + SUPPLEMENTARY_FIGURES
+#: Every figure that can be asked for (``--only``, ``--skip``): :data:`FIGURE_NAMES`, then the
+#: uncertainty figures, which only a run with ``global_q`` gets.
+ALL_FIGURE_NAMES = FIGURE_NAMES + UNCERTAINTY_FIGURES
 #: The figures' tables that are also written as LaTeX, for the paper.
 LATEX_TABLES = ("table_rpiq_by_class", "table_basins")
 #: The captions file.
@@ -98,28 +104,49 @@ def _builders(
         "figS3_class_scores": lambda: class_bias.figure_class_scores(inputs),
         "figS4_shap_features": lambda: shap.figure_shap_features(inputs, plan_id=shap_plan),
         "figS5_dissimilarity": lambda: basins.figure_dissimilarity(inputs),
+        "figU1_bands": lambda: uncertainty.figure_bands(inputs),
+        "figU2_reliability": lambda: uncertainty.figure_reliability(inputs),
+        "figU3_width": lambda: uncertainty.figure_width(inputs),
+        "figU4_mixed_coverage": lambda: uncertainty.figure_mixed_coverage(inputs),
     }
 
 
+def _drawable(inputs: FigureInputs, names: list) -> list:
+    """The figures this run can have: no uncertainty figure without ``global_q``, no U4 without mixed plans.
+
+    A figure left out here is not drawn at all - not even as a note - so a run without the quantile
+    model writes exactly the figures it wrote before the model existed.
+    """
+    if not any(name in UNCERTAINTY_FIGURES for name in names):
+        return names
+    if not uncertainty.has_quantiles(inputs):
+        return [name for name in names if name not in UNCERTAINTY_FIGURES]
+    from yg_eo_soilnet.a1.plans import DIVIDED_KINDS
+
+    if not inputs.quantile_predictions["kind"].isin(DIVIDED_KINDS).any():
+        return [name for name in names if name != "figU4_mixed_coverage"]
+    return names
+
+
 def select_figures(only: Optional[Sequence[str]] = None, skip: Optional[Sequence[str]] = None) -> list[str]:
-    """The figures to draw, in :data:`FIGURE_NAMES` order: ``only`` those (all by default), minus ``skip``.
+    """The figures to draw, in :data:`ALL_FIGURE_NAMES` order: ``only`` those (all by default), minus ``skip``.
 
     Raises
     ------
     ValueError
-        A name that is not in :data:`FIGURE_NAMES`.
+        A name that is not in :data:`ALL_FIGURE_NAMES`.
 
     Examples
     --------
     >>> select_figures(only=["fig06_obs_pred", "fig05_spatial"])
     ['fig05_spatial', 'fig06_obs_pred']
-    >>> len(select_figures(skip=["fig02_map"])) == len(FIGURE_NAMES) - 1
+    >>> len(select_figures(skip=["fig02_map"])) == len(ALL_FIGURE_NAMES) - 1
     True
     """
-    unknown = sorted(set(only or ()).union(skip or ()) - set(FIGURE_NAMES))
+    unknown = sorted(set(only or ()).union(skip or ()) - set(ALL_FIGURE_NAMES))
     if unknown:
-        raise ValueError(f"Unknown figure names {unknown}; the figures are {list(FIGURE_NAMES)}.")
-    chosen = [name for name in FIGURE_NAMES if not only or name in set(only)]
+        raise ValueError(f"Unknown figure names {unknown}; the figures are {list(ALL_FIGURE_NAMES)}.")
+    chosen = [name for name in ALL_FIGURE_NAMES if not only or name in set(only)]
     return [name for name in chosen if name not in set(skip or ())]
 
 
@@ -157,16 +184,16 @@ def render_all(
     close : bool, default False
         Close each figure once saved, to free memory when they are not going to be shown.
     only, skip : list of str, optional
-        Draw only these figures / not these (names of :data:`FIGURE_NAMES`).
+        Draw only these figures / not these (names of :data:`ALL_FIGURE_NAMES`).
 
     Returns
     -------
     dict
-        File name to figure, in :data:`FIGURE_NAMES` order. A figure that fails with an error is
+        File name to figure, in :data:`ALL_FIGURE_NAMES` order. A figure that fails with an error is
         logged with its traceback and saved as a note in its place (:func:`is_failed`); the others
         are still drawn.
     """
-    names = select_figures(only, skip)
+    names = _drawable(inputs, select_figures(only, skip))
     folder = Path(folder) if folder else inputs.run_dir / "figures"
     if n_boot is not None:
         inputs.n_boot = n_boot
@@ -228,7 +255,9 @@ def write_captions(captions: dict, path) -> Path:
     path = Path(path)
     kept = read_captions(path) if path.exists() else {}
     kept.update(captions)
-    ordered = [name for name in FIGURE_NAMES if name in kept] + [name for name in kept if name not in FIGURE_NAMES]
+    ordered = [name for name in ALL_FIGURE_NAMES if name in kept] + [
+        name for name in kept if name not in ALL_FIGURE_NAMES
+    ]
     lines = ["# Draft figure captions", "", "Written by make_figures.py from the run's tables; edit before use.", ""]
     for name in ordered:
         lines += [f"## {name}", "", kept[name].strip(), ""]

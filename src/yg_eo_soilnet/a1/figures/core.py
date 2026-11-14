@@ -131,11 +131,44 @@ class FigureInputs:
         first in :func:`~yg_eo_soilnet.a1.evaluation.seed_order`.
         """
 
+        return self._cached(
+            "predictions", lambda: evaluation.accuracy_rows(self._all_predictions).reset_index(drop=True)
+        )
+
+    @property
+    def _all_predictions(self) -> pd.DataFrame:
+        """Every prediction of the first seed, the quantile model's included."""
+
         def build():
             frame = evaluation.load_predictions(self.run_dir, first_seed=self.settings.seed)
             return frame[frame["seed"] == self.fit_seed_of(frame)].reset_index(drop=True)
 
-        return self._cached("predictions", build)
+        return self._cached("all_predictions", build)
+
+    @property
+    def quantile_predictions(self) -> pd.DataFrame:
+        """The quantile model's (``global_q``) rows of the first seed, with their intervals; empty without it.
+
+        Kept apart from :attr:`predictions`, which every accuracy figure reads: Global, the mean
+        model, carries every accuracy result.
+        """
+        frame = self._all_predictions
+        return frame[frame["model"] == "global_q"].reset_index(drop=True)
+
+    @property
+    def point_dissimilarity(self) -> pd.DataFrame:
+        """Every plan's per-point dissimilarity (``dissimilarity/`` and ``dissimilarity_designs/``); empty without."""
+        from yg_eo_soilnet.a1.runner import DESIGN_DISSIMILARITY_DIR, DISSIMILARITY_DIR
+
+        def build():
+            paths = [
+                path
+                for folder in (DISSIMILARITY_DIR, DESIGN_DISSIMILARITY_DIR)
+                for path in sorted((self.run_dir / folder).glob("*.parquet"))
+            ]
+            return pd.concat([pd.read_parquet(path) for path in paths], ignore_index=True) if paths else pd.DataFrame()
+
+        return self._cached("point_dissimilarity", build)
 
     def fit_seed_of(self, frame: pd.DataFrame) -> int:
         """The seed the figures show: the settings' first, or the first the run has."""

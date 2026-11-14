@@ -68,13 +68,14 @@ from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarit
 from yg_eo_soilnet.a1.logs import format_duration
 from yg_eo_soilnet.a1.features import build_table
 from yg_eo_soilnet.a1.layout import prediction_dir, prediction_paths, stage1_path
-from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED
+from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED, RANDOM, SPATIAL_KFOLD
 from yg_eo_soilnet.a1.settings import dev_mode_settings
 from yg_eo_soilnet.a1.stage2 import (
     DIAGNOSTIC_MODELS,
     ROLE_DIAGNOSTIC,
     ROLE_MODEL,
     GLOBAL_AUX,
+    GLOBAL_Q,
     LOCAL,
     GLOBAL,
     MODELS,
@@ -128,6 +129,11 @@ MANIFEST_FILE = "manifest.json"
 LOG_FILE = "run_a1.log"
 METRICS_FILE = "metrics.csv"
 DISSIMILARITY_DIR = "dissimilarity"
+#: The dissimilarity files of the random plan and the 10 km folds, written for figure U3 when
+#: ``stage2.models`` lists ``global_q``; never part of ``dissimilarity_summary.csv``.
+DESIGN_DISSIMILARITY_DIR = "dissimilarity_designs"
+#: ``global_q``'s conformal corrections, one file per plan and seed.
+CALIBRATION_DIR = "conformal"
 DISSIMILARITY_SUMMARY_FILE = "dissimilarity_summary.csv"
 
 
@@ -241,7 +247,7 @@ def run_plans(
         If a stage asks for the graphics card and XGBoost cannot use it
         (:func:`~yg_eo_soilnet.a1.devices.check_cuda`).
     """
-    from yg_eo_soilnet.a1.devices import check_cuda, is_cuda
+    from yg_eo_soilnet.a1.devices import check_cuda, check_cuda_quantiles, is_cuda
     from yg_eo_soilnet.a1.pipelines import stage_device
 
     logger = logger or logging.getLogger(__name__)
@@ -268,6 +274,20 @@ def run_plans(
         if is_cuda(name):
             check_cuda(name)
             logger.info(f"{stage} fits on {name}: XGBoost fitted a test model there.")
+    if GLOBAL_Q in settings.som_models:
+        # The quantile objective is checked on its own; if it cannot run on the card, global_q
+        # alone moves to the processor, and every record says so.
+        devices[GLOBAL_Q] = devices["stage2"]
+        if is_cuda(devices["stage2"]):
+            problem = check_cuda_quantiles(devices["stage2"], settings.uncertainty.quantiles)
+            if problem:
+                devices[GLOBAL_Q] = "cpu"
+                logger.warning(
+                    f"{GLOBAL_Q} cannot fit its quantile objective on {devices['stage2']} ({problem}); it fits on "
+                    "the processor, and its predictions and the manifest record cpu."
+                )
+            else:
+                logger.info(f"{GLOBAL_Q} fits on {devices['stage2']}: XGBoost fitted a quantile test model there.")
 
     plans_path = Path(plans_dir or Path(settings.output_dir) / "plans")
     index_path = plans_path / INDEX_FILE
@@ -597,10 +617,10 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     for model, group in jobs:
         if (model, group) not in todo:
             logger.info(f"  {model} / {group}: already done, {_rmse_note(out / _output_name(model, group))}")
-    dissimilarity_path = run_dir / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
+    dissimilarity_path = dissimilarity_file(run_dir, row, settings)
     # From the first seed only: how far a region lies from its training points does not depend on the seed.
-    needs_dissimilarity = first and row.kind == LOGO and not dissimilarity_path.exists()
-    if first and row.kind == LOGO and not needs_dissimilarity:
+    needs_dissimilarity = first and dissimilarity_path is not None and not dissimilarity_path.exists()
+    if first and dissimilarity_path is not None and not needs_dissimilarity:
         outcome.skipped.append(str(dissimilarity_path))
     if not todo and not needs_dissimilarity:
         return outcome
@@ -618,6 +638,7 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
         logger.info(f"  stage 1: skipped, no model of {list(models)} reads it; {auxiliary.n_folds} fold(s) cut")
     context = build_context(table, plan, auxiliary, settings, config)
     context.sample_weight = weights
+    context.quantile_device = shared.devices.get(GLOBAL_Q)
     auxiliary_columns = list(resolved.groups.get(AUXILIARY_GROUP, ())) if needs_stage1(models) else []
     global_columns = [column for column in resolved.combined if column not in resolved.groups.get(AUXILIARY_GROUP, ())]
     if adds_indicator(row.kind):
@@ -645,8 +666,13 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
             )
         else:
             result = run_group(context, list(resolved.groups[group]))
-        frame = _rows(row, seed, context, result, model, group, region, table, shared.devices, w)
+        devices = shared.devices
+        if model == GLOBAL_Q:
+            devices = {**devices, "stage2": devices.get(GLOBAL_Q, devices["stage2"])}
+        frame = _rows(row, seed, context, result, model, group, region, table, devices, w)
         path = out / _output_name(model, group)
+        if result.calibration is not None:
+            _write_calibration(run_dir, row, seed, result.calibration, logger)
         _atomic_write_parquet(frame, path)
         outcome.computed.append(str(path))
         note = _rmse_note(frame)
@@ -665,8 +691,46 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     return outcome
 
 
+def dissimilarity_file(run_dir: Path, row, settings) -> Optional[Path]:
+    """Where a plan's dissimilarity file goes, or None for a plan that gets none.
+
+    Every ``logo`` plan has one (``dissimilarity/``), read by the transfer figures and
+    ``dissimilarity_summary.csv``. With ``global_q`` in ``stage2.models``, the random plan and the
+    spatial folds of ``plans.spatial_kfold.cell_size_m`` (10 km) get one too, in
+    ``dissimilarity_designs/``, so figure U3 can relate each test point's interval width to how far
+    it lies from its training points; kept apart, they never enter the regional summary.
+    """
+    if row.kind == LOGO:
+        return Path(run_dir) / DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
+    if GLOBAL_Q not in settings.som_models:
+        return None
+    cell = settings.plans.spatial_kfold.cell_size_m
+    paper_folds = row.kind == SPATIAL_KFOLD and pd.notna(row.block_size_m) and float(row.block_size_m) == float(cell)
+    if row.kind == RANDOM or paper_folds:
+        return Path(run_dir) / DESIGN_DISSIMILARITY_DIR / f"{row.plan_id}.parquet"
+    return None
+
+
+def calibration_path(run_dir: Path, plan_id: str, seed: int) -> Path:
+    """``conformal/<plan>/seed_<s>.json``: the conformal correction of one plan and seed (``global_q``)."""
+    return Path(run_dir) / CALIBRATION_DIR / plan_id / f"seed_{int(seed)}.json"
+
+
+def _write_calibration(run_dir: Path, row, seed: int, calibration: dict, logger) -> None:
+    """Save ``global_q``'s conformal correction (Q per level) of one plan and seed, and log it."""
+    path = calibration_path(run_dir, row.plan_id, seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {"plan_id": row.plan_id, "kind": row.kind, "seed": int(seed), **calibration}
+    _write_json(path, record)
+    levels = record.get("levels_q") or {}
+    shown = ", ".join(f"{tag} % Q {entry['q']:+.2f}" for tag, entry in levels.items()) or record.get("note", "")
+    logger.info(
+        f"  {GLOBAL_Q}: {shown}; quantiles crossed at {100 * record['crossing_share_held_out']:.1f} % of held-out points"
+    )
+
+
 def _dissimilarity(row, context, table, global_columns, auxiliary_columns, result, logger) -> pd.DataFrame:
-    """How far each point of a ``logo`` plan lies from its training points, in ``global_aux``'s inputs.
+    """How far each point of a plan lies from its training points, in ``global_aux``'s inputs.
 
     The inputs are weighted by ``global_aux``'s feature importances; that model is fitted here if
     its predictions were already on disk. A run without stage 1 (``global`` alone) uses ``global``
@@ -797,7 +861,7 @@ def _rows(
     """The predictions table of one model on one plan."""
     ids = outcome.predicted.index
     coordinates = table.coordinates.reindex(ids)
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         {
             "plan_id": row.plan_id,
             "kind": row.kind,
@@ -830,6 +894,10 @@ def _rows(
         },
         columns=list(PREDICTION_COLUMNS),
     )
+    if outcome.extra is not None:
+        # global_q's quantiles and intervals, after the usual columns; no other model has them.
+        frame = pd.concat([frame, outcome.extra.reindex(ids).reset_index(drop=True)], axis=1)
+    return frame
 
 
 def _local_column(values: Optional[pd.Series], ids: pd.Index) -> np.ndarray:
@@ -1097,5 +1165,12 @@ def _log_plan(row, seed: int, run_dir: Path, devices: dict, *, first: bool = Tru
             for name in ("median_di", "share_outside", "carbonate_tvd"):
                 if name in summary and pd.notna(summary[name]):
                     metrics[name] = float(summary[name])
+        calibration = calibration_path(run_dir, row.plan_id, seed)
+        if calibration.exists():
+            # global_q: the conformal correction Q of each level, and how often its quantiles crossed.
+            record = json.loads(calibration.read_text())
+            for tag, entry in (record.get("levels_q") or {}).items():
+                metrics[f"cqr_q{tag}__{GLOBAL_Q}"] = float(entry["q"])
+            metrics[f"crossing_share__{GLOBAL_Q}"] = float(record["crossing_share_held_out"])
         if metrics:
             mlflow.log_metrics(metrics)

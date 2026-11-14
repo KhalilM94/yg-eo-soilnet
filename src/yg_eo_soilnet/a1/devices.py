@@ -71,6 +71,42 @@ def check_cuda(device: str = "cuda") -> None:
         )
 
 
+def check_cuda_quantiles(device: str = "cuda", quantiles=(0.05, 0.5, 0.95)) -> Optional[str]:
+    """Fit a tiny quantile model (``reg:quantileerror``, several quantiles at once) on ``device``.
+
+    The quantile model of the prediction intervals (``global_q``) needs this objective on the card,
+    which :func:`check_cuda`'s plain model does not show. Unlike :func:`check_cuda` it does not
+    raise: ``run_a1.py`` fits ``global_q`` on the processor instead, and records it.
+
+    Returns
+    -------
+    str or None
+        None when the quantile model fitted on ``device``; otherwise why it did not.
+    """
+    import xgboost
+
+    rng = np.random.default_rng(0)
+    X, y = rng.normal(size=(64, 3)), rng.normal(size=64)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        try:
+            model = xgboost.XGBRegressor(
+                n_estimators=2,
+                max_depth=2,
+                tree_method="hist",
+                device=device,
+                objective="reg:quantileerror",
+                quantile_alpha=[float(q) for q in quantiles],
+            )
+            model.fit(X, y)
+        except Exception as error:  # an XGBoostError, or a CUDA error under it
+            return f"it failed there: {error}"
+    fallback = [str(item.message) for item in caught if _is_fallback(str(item.message))]
+    if fallback:
+        return f"XGBoost fell back to the processor ({fallback[0].strip()})"
+    return None
+
+
 def _is_fallback(message: str) -> bool:
     """Whether an XGBoost warning says it left the graphics card for the processor."""
     lowered = message.lower()

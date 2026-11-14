@@ -163,7 +163,9 @@ def load_predictions(
         ):
             if wanted is not None:
                 frame = frame[frame[column].isin(list(wanted))]
-        frames.append(frame[list(PREDICTION_COLUMNS)])
+        # The quantile model's intervals (global_q) travel with its rows; no other file has them.
+        extra = [column for column in frame.columns if column.startswith("som_") or column == "quantiles_sorted"]
+        frames.append(frame[[*PREDICTION_COLUMNS, *extra]])
     return pd.concat(frames, ignore_index=True)
 
 
@@ -714,6 +716,15 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
 
 #: What the mixed-against-control rows of ``differences.csv`` are called in their ``kind`` column.
 MIXED_VS_CONTROL = "mixed_vs_control"
+
+
+def accuracy_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Every row but the quantile model's (``global_q``): Global, the mean model, carries every accuracy result.
+
+    ``global_q``'s median is scored with its intervals, in ``uncertainty_scores.csv``
+    (:func:`~yg_eo_soilnet.a1.uncertainty.uncertainty_scores`).
+    """
+    return df[df["model"] != "global_q"]
 
 
 def pooled_rows(df: pd.DataFrame) -> pd.DataFrame:

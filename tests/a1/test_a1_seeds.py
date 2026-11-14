@@ -451,7 +451,8 @@ def test_the_xgboost_configuration_loads():
     assert settings.seeds == (42, 7, 2026)
     assert settings.stage1.estimator == "XGBoost" and settings.stage1.init_args["device"] == "cpu"
     assert settings.stage2.init_args["device"] == "cuda"
-    assert settings.som_models == SOM_MODELS
+    # The four SOM models, and the quantile model of the prediction intervals.
+    assert settings.som_models == (*SOM_MODELS, "global_q")
     assert settings.output_dir == "results/a1_xgb"
     assert load_settings(str(A1_CONFIGS / "a1_xgb.yml")).seed == 42
 

@@ -28,6 +28,13 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
     covariate group: each draw scored on its own, then the mean and the min-max over the draws.
     Every draw tests the whole region, so matched draws are left out of every pooled table and of
     the per-region intervals.
+``uncertainty_scores.csv``
+    Only for a run with the quantile model (``global_q``): its prediction intervals per scope -
+    random pooled, spatial folds pooled per block size, plain ``logo`` per basin, the mixed kinds per
+    basin and share, matched draws per draw - and per measured carbonate class: PICP for each level,
+    raw and conformal, with 95 % block-bootstrap intervals, mean and median width, QCP per quantile,
+    the mean pinball loss, and RMSE, MAE and bias of the median. ``global_q`` is left out of every
+    other table: Global, the mean model, carries every accuracy result.
 ``intervals_by_region.csv``
     The same intervals for each held-out region of the plain ``logo`` plans.
 ``transfer.csv``
@@ -78,6 +85,8 @@ from yg_eo_soilnet.a1.plans import LOGO  # noqa: E402
 from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, PER_CLASS_MEASURED, PER_CLASS_PREDICTED  # noqa: E402
 from yg_eo_soilnet.a1.tracking import reopen_parent  # noqa: E402
+from yg_eo_soilnet.a1.uncertainty import headline_rows as uncertainty_headlines  # noqa: E402
+from yg_eo_soilnet.a1.uncertainty import uncertainty_scores  # noqa: E402
 from yg_eo_soilnet.datamodules.splitting import TEST  # noqa: E402
 
 #: The comparisons written to ``differences.csv``: each model against the plain global one.
@@ -94,6 +103,8 @@ TABLES = (
     "scores_logo_matched.csv",
     "seed_summary.csv",
 )
+#: Written only for a run with the quantile model (``global_q`` in ``stage2.models``).
+UNCERTAINTY_TABLE = "uncertainty_scores.csv"
 #: The held-out regions' names as they appear in metric names, beside the tables.
 REGION_NAMES_FILE = "region_names.json"
 
@@ -138,12 +149,27 @@ def main(argv: list[str] | None = None) -> dict[str, pd.DataFrame]:
     with contextlib.ExitStack() as stack:
         # Opened first, so a run folder whose MLflow run is gone fails before any work is done.
         tracking = None if args.no_mlflow else stack.enter_context(reopen_parent(run_dir, settings.load_config()))
-        tables = _evaluate(run_dir, block_km, seed, args.n_boot, tracking, first_seed=settings.seed)
+        tables = _evaluate(
+            run_dir,
+            block_km,
+            seed,
+            args.n_boot,
+            tracking,
+            first_seed=settings.seed,
+            min_cell_size=settings.min_cell_size,
+        )
     return tables
 
 
 def _evaluate(
-    run_dir: Path, block_km: float, seed: int, n_boot: int, tracking, *, first_seed: int | None = None
+    run_dir: Path,
+    block_km: float,
+    seed: int,
+    n_boot: int,
+    tracking,
+    *,
+    first_seed: int | None = None,
+    min_cell_size: int = 30,
 ) -> dict[str, pd.DataFrame]:
     """Write the tables, print the headline, and add both to the open MLflow run (``tracking``).
 
@@ -152,7 +178,10 @@ def _evaluate(
     everything = evaluation.load_predictions(run_dir, first_seed=first_seed)
     seeds = evaluation.seed_order(everything, first_seed)
     per_seed = {
-        fit_seed: _seed_tables(everything[everything["seed"] == fit_seed], block_km, seed, n_boot) for fit_seed in seeds
+        fit_seed: _seed_tables(
+            everything[everything["seed"] == fit_seed], block_km, seed, n_boot, min_cell_size=min_cell_size
+        )
+        for fit_seed in seeds
     }
     tables = {
         name: _stack([per_seed[fit_seed][name].assign(seed=fit_seed) for fit_seed in seeds])
@@ -164,6 +193,9 @@ def _evaluate(
         [per_seed[fit_seed]["headline"].assign(seed=fit_seed) for fit_seed in seeds], ignore_index=True
     )
     tables["seed_summary.csv"] = evaluation.seed_summary(headlines)
+    uncertain = [per_seed[fit_seed]["_uncertainty"].assign(seed=fit_seed) for fit_seed in seeds]
+    if any(not part.empty for part in uncertain):
+        tables[UNCERTAINTY_TABLE] = _stack(uncertain)
 
     out = run_dir / "evaluation"
     out.mkdir(parents=True, exist_ok=True)
@@ -179,7 +211,7 @@ def _evaluate(
     if tracking is not None:
         import mlflow
 
-        for name in (*TABLES, REGION_NAMES_FILE):
+        for name in (*TABLES, *([UNCERTAINTY_TABLE] if UNCERTAINTY_TABLE in tables else []), REGION_NAMES_FILE):
             mlflow.log_artifact(str(out / name), "evaluation")
         mlflow.log_metrics(headline)
         mlflow.set_tags({f"region__{key}": name for key, name in regions.items()})
@@ -194,8 +226,13 @@ def _stack(parts: list) -> pd.DataFrame:
     return stacked[["seed", *[column for column in stacked.columns if column != "seed"]]]
 
 
-def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: int) -> dict[str, pd.DataFrame]:
+def _seed_tables(
+    everything: pd.DataFrame, block_km: float, seed: int, n_boot: int, *, min_cell_size: int = 30
+) -> dict[str, pd.DataFrame]:
     """Every table of one seed's predictions, and its headline metrics (``headline``, a table)."""
+    # The quantile model's intervals are scored on their own; every accuracy table is Global's world.
+    intervals_of = everything
+    everything = evaluation.accuracy_rows(everything)
     # Mixed and control plans are scored per region and share (below); pooled they mean nothing.
     frame = evaluation.pooled_rows(everything)
     test = frame[frame["split"] == TEST]
@@ -213,6 +250,7 @@ def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: i
         else pd.DataFrame(columns=["kind", "held_out", "model", "metric", "estimate", "low", "high"])
     )
     transfer = evaluation.transfer_table(everything)
+    uncertainty = uncertainty_scores(intervals_of, block_km=block_km, n=n_boot, seed=seed, min_cell_size=min_cell_size)
     mixed = evaluation.mixed_scores(everything)
     # Matched leave-one-region-out draws: each scored on its own, then summarised per region.
     matched = evaluation.matched_logo_scores(everything)
@@ -231,7 +269,22 @@ def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: i
         "transfer.csv": transfer,
         "scores_mixed.csv": mixed,
         "scores_logo_matched.csv": matched,
-        "headline": evaluation.headline_table(
+        "headline": pd.concat(
+            [
+                evaluation.headline_table(
+                    frame,
+                    intervals=boot.intervals,
+                    region_intervals=by_region,
+                    transfer=transfer,
+                    mixed=mixed,
+                    matched=matched,
+                ),
+                pd.DataFrame(uncertainty_headlines(uncertainty)),
+            ],
+            ignore_index=True,
+        )
+        if not uncertainty.empty
+        else evaluation.headline_table(
             frame,
             intervals=boot.intervals,
             region_intervals=by_region,
@@ -241,6 +294,7 @@ def _seed_tables(everything: pd.DataFrame, block_km: float, seed: int, n_boot: i
         ),
         "_model_differences": boot.differences,
         "_paired": paired,
+        "_uncertainty": uncertainty,
     }
 
 
@@ -280,7 +334,8 @@ def _print_summary(primary, tables, seeds, block_km, n_boot, out, tracking, n_he
         spread = spread[spread["name"].str.startswith("rmse__") & (spread["covariate_group"] == "")]
         summary(f"Test RMSE over the {len(seeds)} seeds {seeds} (mean, SD, min, max):")
         summary(spread[["scope", "model", "first", "mean", "sd", "min", "max"]].round(3).to_string(index=False))
-    summary(f"Tables in {out}/: {', '.join(TABLES)}")
+    written = [*TABLES, *([UNCERTAINTY_TABLE] if UNCERTAINTY_TABLE in tables else [])]
+    summary(f"Tables in {out}/: {', '.join(written)}")
     if tracking is not None:
         summary(
             f"Added to MLflow run {tracking.info.run_id}: the tables (evaluation/) and {n_headline} headline metrics."

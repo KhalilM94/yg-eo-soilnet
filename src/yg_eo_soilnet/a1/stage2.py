@@ -53,6 +53,9 @@ GLOBAL_AUX = "global_aux"
 PER_CLASS_MEASURED = "per_class_measured"
 PER_CLASS_PREDICTED = "per_class_predicted"
 LOCAL = "local"
+#: The quantile model of the prediction intervals, fitted only when ``stage2.models`` lists it
+#: (:mod:`yg_eo_soilnet.a1.uncertainty`).
+GLOBAL_Q = "global_q"
 #: The models every plan gets, unless ``stage2.models`` lists fewer.
 MODELS = (GLOBAL, GLOBAL_AUX, PER_CLASS_MEASURED, PER_CLASS_PREDICTED)
 #: The models that read stage 1's predicted CaCO3 and CEC (the per-class models through their
@@ -96,6 +99,9 @@ class Stage2Context:
     cache : dict
         Model results already computed for this plan, so ``global_aux`` is fitted once even when the
         per-class models fall back to it.
+    quantile_device : str or None
+        Where ``global_q`` fits (``cuda``, or ``cpu`` when the quantile objective fell back there);
+        the stage-2 device when None.
     sample_weight : pandas.Series or None
         The weight of each training point in every fit (a ``mixed_weighted`` plan,
         :mod:`yg_eo_soilnet.a1.arms`); None fits every point with the same weight.
@@ -112,6 +118,7 @@ class Stage2Context:
     config: object
     cache: dict = field(default_factory=dict)
     sample_weight: Optional[pd.Series] = None
+    quantile_device: Optional[str] = None
 
     @property
     def train_ids(self) -> pd.Index:
@@ -145,6 +152,11 @@ class ModelResult:
         The fitted pipeline, for a model fitted once on every training point (``global``,
         ``global_aux``, a covariate group); None for the per-class and local models. The
         dissimilarity index reads its feature importances.
+    extra : pandas.DataFrame or None
+        For ``global_q``: the quantile, interval and ``quantiles_sorted`` columns of each held-out
+        point, written beside the usual ones.
+    calibration : dict or None
+        For ``global_q``: the conformal correction ``Q`` of each level and what it rests on.
     """
 
     predicted: pd.Series
@@ -153,6 +165,8 @@ class ModelResult:
     role: str = ROLE_MODEL
     fitted: object = field(default=None, compare=False, repr=False)
     local_fold: Optional[pd.Series] = field(default=None, compare=False, repr=False)
+    extra: Optional[pd.DataFrame] = field(default=None, compare=False, repr=False)
+    calibration: Optional[dict] = field(default=None, compare=False, repr=False)
     local_block: Optional[pd.Series] = field(default=None, compare=False, repr=False)
 
     @property
@@ -197,6 +211,7 @@ def fit_tuned(
     y: pd.Series,
     folds: pd.Series,
     sample_weight: Optional[pd.Series] = None,
+    scoring=None,
 ):
     """Fit ``pipeline`` on these rows, its settings chosen by cross-validation over ``folds``.
 
@@ -216,6 +231,8 @@ def fit_tuned(
     sample_weight : pandas.Series, optional
         A weight per point id, given to every fit: the final one and each fit of the search. The
         search still scores each validation fold by its unweighted RMSE.
+    scoring : callable, optional
+        ``scoring(estimator, X, y)``, higher is better; the negative RMSE by default.
 
     Returns
     -------
@@ -232,7 +249,7 @@ def fit_tuned(
             clone(pipeline),
             param_grid=dict(grid),
             cv=pairs,
-            scoring=_neg_rmse_on_cpu,
+            scoring=scoring or _neg_rmse_on_cpu,
             refit=True,
             n_jobs=1,
         )
@@ -282,6 +299,8 @@ def run_model(
 
     if model == GLOBAL:
         result = _single_model(context, list(global_columns))
+    elif model == GLOBAL_Q:
+        result = _quantile_model(context, list(global_columns))
     elif model == GLOBAL_AUX:
         result = _single_model(context, aux_features)
     elif model in (PER_CLASS_MEASURED, PER_CLASS_PREDICTED):
@@ -568,6 +587,144 @@ def _per_class(
             predicted.loc[class_held] = predict_on_cpu(fitted, context.X.loc[class_held, columns])
             used_fallback.loc[class_held] = False
     return ModelResult(predicted=predicted, fallback=used_fallback, tuned_params=params, role=role)
+
+
+def quantile_stage(settings: A1Settings, device: Optional[str] = None):
+    """Stage 2's estimator turned into the one quantile model: ``reg:quantileerror`` at every quantile."""
+    from dataclasses import replace
+
+    init_args = {
+        **dict(settings.stage2.init_args),
+        "objective": "reg:quantileerror",
+        "quantile_alpha": [float(q) for q in settings.uncertainty.quantiles],
+    }
+    if device is not None:
+        init_args["device"] = device
+    return replace(settings.stage2, init_args=init_args)
+
+
+def predict_quantiles(fitted, X: pd.DataFrame) -> np.ndarray:
+    """A quantile model's predictions on the processor: one row per point, one column per quantile."""
+    from yg_eo_soilnet.a1.pipelines import to_cpu
+
+    return np.asarray(to_cpu(fitted).predict(X), dtype=float).reshape(len(X), -1)
+
+
+def _neg_pinball_on_cpu(estimator, X, y, *, quantiles) -> float:
+    """The quantile model's search score: minus the mean pinball loss over the quantiles."""
+    from yg_eo_soilnet.a1.uncertainty import pinball_loss
+
+    return -pinball_loss(np.asarray(y, dtype=float), predict_quantiles(estimator, X), quantiles)
+
+
+def out_of_fold_quantiles(
+    pipeline, params: Mapping, X: pd.DataFrame, y: pd.Series, folds: pd.Series, sample_weight=None
+) -> Optional[pd.DataFrame]:
+    """Each training point's quantiles from a model fitted on the other folds, with the tuned settings.
+
+    The folds are the plan's own (random folds, blocks or basins, as for stage 1), so a point is
+    never predicted by a model that saw its fold. None with fewer than two usable folds.
+    """
+    pairs = _fold_pairs(folds.reindex(X.index))
+    if len(pairs) < 2:
+        return None
+    chosen = {name: value for name, value in params.items() if name != "tuned"}
+    values = np.full((len(X), 0), np.nan)
+    for fit_positions, held_positions in pairs:
+        model = clone(pipeline).set_params(**chosen)
+        model.fit(X.iloc[fit_positions], y.iloc[fit_positions], **fit_kwargs(sample_weight, X.index[fit_positions]))
+        predicted = predict_quantiles(model, X.iloc[held_positions])
+        if values.shape[1] == 0:
+            values = np.full((len(X), predicted.shape[1]), np.nan)
+        values[held_positions] = predicted
+    frame = pd.DataFrame(values, index=X.index)
+    return frame.dropna()
+
+
+def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
+    """``global_q``: every quantile in one model, tuned by pinball loss, and its intervals conformalized.
+
+    The search uses Global's grid and folds, scored by the mean pinball loss over the quantiles. Each
+    point's quantiles are sorted (``quantiles_sorted`` marks those that crossed). With
+    ``uncertainty.conformal``, each central interval is corrected by ``Q`` from the training points'
+    out-of-fold quantiles (:func:`~yg_eo_soilnet.a1.uncertainty.calibrate`). A log-transformed SOM is
+    fitted in log space and each quantile back-transformed, which is exact: the transform keeps
+    their order. The median (0.5) is the ``predicted`` column.
+    """
+    from dataclasses import replace
+    from functools import partial
+
+    from yg_eo_soilnet.a1 import uncertainty as uq
+
+    settings = context.settings
+    options = settings.uncertainty
+    quantiles = list(options.quantiles)
+    device = context.quantile_device
+    built_with = replace(settings, device=device) if device is not None else settings
+    pipeline, grid = build_stage_pipeline(
+        built_with,
+        context.config,
+        columns,
+        context.categorical,
+        stage=quantile_stage(settings, device),
+        target=settings.target,
+    )
+    train, held = context.train_ids, context.held_out_ids
+    X_train, y_train = context.X.loc[train, columns], context.y.loc[train]
+    fitted, params = fit_tuned(
+        pipeline,
+        grid,
+        X_train,
+        y_train,
+        context.folds,
+        scoring=partial(_neg_pinball_on_cpu, quantiles=quantiles),
+        **_weights(context),
+    )
+    values, crossed = uq.sort_quantiles(predict_quantiles(fitted, context.X.loc[held, columns]))
+
+    calibrations, info = (
+        None,
+        {
+            "quantiles": quantiles,
+            "levels": list(options.levels),
+            "conformal": bool(options.conformal),
+            "crossing_share_held_out": float(crossed.mean()) if len(crossed) else 0.0,
+            "device": device,
+        },
+    )
+    if options.conformal:
+        oof = out_of_fold_quantiles(pipeline, params, X_train, y_train, context.folds, context.sample_weight)
+        if oof is None or oof.empty:
+            info["note"] = "fewer than two folds: no calibration point, raw intervals only"
+        else:
+            calibration_values, calibration_crossed = uq.sort_quantiles(oof.to_numpy())
+            y_calibration = context.y.loc[oof.index].to_numpy(dtype=float)
+            calibrations = {}
+            for level in options.levels:
+                low_q, high_q = uq.level_bounds(level)
+                calibrations[level] = uq.calibrate(
+                    y_calibration,
+                    calibration_values[:, uq.quantile_index(quantiles, low_q)],
+                    calibration_values[:, uq.quantile_index(quantiles, high_q)],
+                    level,
+                )
+            info["n_calibration"] = int(len(oof))
+            info["crossing_share_calibration"] = float(calibration_crossed.mean())
+            info["levels_q"] = {
+                uq.level_tag(level): {"q": c.q, "raw_coverage_calibration": c.raw_coverage}
+                for level, c in calibrations.items()
+            }
+    extra = pd.DataFrame(uq.interval_columns(quantiles, values, options.levels, calibrations), index=held)
+    extra[uq.SORTED_COLUMN] = crossed
+    median = pd.Series(values[:, uq.quantile_index(quantiles, 0.5)], index=held)
+    return ModelResult(
+        predicted=median,
+        fallback=pd.Series(False, index=held),
+        tuned_params=params,
+        fitted=fitted,
+        extra=extra,
+        calibration=info,
+    )
 
 
 def _weights(context: Stage2Context) -> dict:

@@ -50,6 +50,7 @@ from yg_eo_soilnet.a1.figures.core import (
 )
 from yg_eo_soilnet.a1.figures.labels import pretty_name, pretty_split
 from yg_eo_soilnet.a1.figures.render import (
+    ALL_FIGURE_NAMES,
     FIGURE_NAMES,
     MAIN_FIGURES,
     SUPPLEMENTARY_FIGURES,
@@ -60,6 +61,7 @@ from yg_eo_soilnet.a1.figures.render import (
 
 __all__ = [
     "BAREST_BAND",
+    "ALL_FIGURE_NAMES",
     "FIGURE_NAMES",
     "MAIN_FIGURES",
     "S2_WAVELENGTHS",

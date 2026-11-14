@@ -31,6 +31,8 @@ __all__ = [
     "FAO_CARBONATE_LABELS",
     "DEVICES",
     "SOM_MODELS",
+    "OPTIONAL_SOM_MODELS",
+    "ALL_SOM_MODELS",
     "STAGE1_ESTIMATORS",
     "A1Settings",
     "AuxiliarySettings",
@@ -42,6 +44,7 @@ __all__ = [
     "PercentileSettings",
     "PlanSettings",
     "PreflightSettings",
+    "UncertaintySettings",
     "RandomPlanSettings",
     "RegionSettings",
     "SampleYearSettings",
@@ -61,6 +64,11 @@ REGION_SOURCES = (REGIONS_FROM_COLUMN, REGIONS_FROM_POLYGONS)
 STAGE1_ESTIMATORS = ("TabICL", "XGBoost")
 #: The SOM models ``stage2.models`` may list (:data:`yg_eo_soilnet.a1.stage2.MODELS`), in their order.
 SOM_MODELS = ("global", "global_aux", "per_class_measured", "per_class_predicted")
+#: The SOM models ``stage2.models`` may add, fitted only when listed: ``global_q``, the quantile
+#: model of the prediction intervals (:mod:`yg_eo_soilnet.a1.uncertainty`).
+OPTIONAL_SOM_MODELS = ("global_q",)
+#: Every model ``stage2.models`` may list, in the order they are fitted.
+ALL_SOM_MODELS = SOM_MODELS + OPTIONAL_SOM_MODELS
 #: The processors ``run_a1.py --device`` accepts.
 DEVICES = ("cpu", "cuda")
 
@@ -142,6 +150,27 @@ class StageSettings:
     init_args: Mapping[str, Any] = field(default_factory=dict)
     params: Optional[Mapping[str, Any]] = None
     models: Optional[tuple[str, ...]] = None
+
+
+@dataclass(frozen=True)
+class UncertaintySettings:
+    """The prediction intervals of the ``global_q`` model (read only when ``stage2.models`` lists it).
+
+    Attributes
+    ----------
+    quantiles : tuple of float
+        The quantiles of SOM the one quantile model predicts; must include 0.5 (the median) and both
+        bounds of every level.
+    levels : tuple of float
+        The nominal coverages of the central intervals: 0.8 is the 10th to the 90th percentile.
+    conformal : bool, default True
+        Also write the conformalized intervals (CQR), calibrated on the training points'
+        out-of-fold predictions.
+    """
+
+    quantiles: tuple[float, ...] = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
+    levels: tuple[float, ...] = (0.5, 0.8, 0.9)
+    conformal: bool = True
 
 
 @dataclass(frozen=True)
@@ -428,7 +457,7 @@ class A1Settings:
         geometry (``S2_SZA``, the sun angle; ``S1_angle``, the radar incidence angle), which
         describes the satellite rather than the soil. A prefix also catches the computed
         ``ts_<variable>_p<percentile>`` names.
-    percentiles, auxiliary, bootstrap, carbonate, regions, sample_year, preflight, plans
+    percentiles, auxiliary, bootstrap, carbonate, regions, sample_year, preflight, plans, uncertainty
         The settings of each part; see their own classes.
     source_path : str or None
         The file these settings were read from.
@@ -462,6 +491,7 @@ class A1Settings:
     sample_year: SampleYearSettings = field(default_factory=SampleYearSettings)
     preflight: PreflightSettings = field(default_factory=PreflightSettings)
     plans: PlanSettings = field(default_factory=PlanSettings)
+    uncertainty: UncertaintySettings = field(default_factory=UncertaintySettings)
     source_path: Optional[str] = None
     fit_seed: Optional[int] = None
     device: Optional[str] = None
@@ -494,7 +524,7 @@ class A1Settings:
     def som_models(self) -> tuple[str, ...]:
         """The SOM models to fit: ``stage2.models``, in :data:`SOM_MODELS` order; all of them by default."""
         chosen = self.stage2.models
-        return SOM_MODELS if chosen is None else tuple(model for model in SOM_MODELS if model in chosen)
+        return SOM_MODELS if chosen is None else tuple(model for model in ALL_SOM_MODELS if model in chosen)
 
     def for_seed(self, seed: int) -> "A1Settings":
         """These settings with the model fits seeded by ``seed``, one of :attr:`seeds`.
@@ -658,6 +688,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "preflight",
         "plans",
         "exclude_inputs",
+        "uncertainty",
     }
     _refuse_unknown(raw, known, "the A1 settings")
     main_config = raw.get("main_config")
@@ -685,6 +716,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "sample_year": _section(raw, "sample_year", SampleYearSettings, _optional_strings),
         "preflight": _section(raw, "preflight", PreflightSettings, _preflight_kwargs),
         "plans": _plan_settings(raw.get("plans") or {}),
+        "uncertainty": _section(raw, "uncertainty", UncertaintySettings, _uncertainty_kwargs),
         "source_path": source_path,
     }
     for name in ("stage1", "stage2"):
@@ -794,6 +826,19 @@ def _percentile_kwargs(values: Mapping) -> dict:
 def _auxiliary_kwargs(values: Mapping) -> dict:
     """The auxiliary section's settings, converted to their types."""
     return {"targets": _strings(values["targets"], "auxiliary.targets")} if "targets" in values else {}
+
+
+def _uncertainty_kwargs(values: Mapping) -> dict:
+    """The uncertainty section's settings: lists of numbers, and a real true or false."""
+    kwargs: dict[str, Any] = {}
+    for key in ("quantiles", "levels"):
+        if values.get(key) is not None:
+            kwargs[key] = tuple(float(value) for value in _strings(values[key], f"uncertainty.{key}"))
+    if values.get("conformal") is not None:
+        if not isinstance(values["conformal"], bool):
+            raise ValueError(f"uncertainty.conformal must be true or false; got {values['conformal']!r}")
+        kwargs["conformal"] = values["conformal"]
+    return kwargs
 
 
 def _bootstrap_kwargs(values: Mapping) -> dict:
@@ -936,9 +981,17 @@ def _validate(settings: A1Settings) -> None:
     if settings.stage1.models is not None:
         raise ValueError("stage1.models: only stage2 lists the SOM models to fit.")
     if settings.stage2.models is not None:
-        unknown = [model for model in settings.stage2.models if model not in SOM_MODELS]
+        unknown = [model for model in settings.stage2.models if model not in ALL_SOM_MODELS]
         if unknown or not settings.stage2.models:
-            raise ValueError(f"stage2.models must list some of {list(SOM_MODELS)}; got {list(settings.stage2.models)}")
+            raise ValueError(
+                f"stage2.models must list some of {list(ALL_SOM_MODELS)}; got {list(settings.stage2.models)}"
+            )
+        if "global_q" in settings.stage2.models and settings.stage2.estimator != "XGBoost":
+            raise ValueError(
+                f"stage2.models lists global_q, XGBoost's quantile model; stage2.estimator is "
+                f"{settings.stage2.estimator!r}. Use XGBoost in stage 2, or leave global_q out."
+            )
+    _validate_uncertainty(settings.uncertainty)
     if settings.device is not None and settings.device not in DEVICES:
         raise ValueError(f"device must be one of {list(DEVICES)}; got {settings.device!r}")
     if settings.n_jobs is not None and settings.n_jobs < 1:
@@ -983,6 +1036,27 @@ def _validate(settings: A1Settings) -> None:
         raise ValueError(f"preflight.overfit_r2_gap must not be negative; got {settings.preflight.overfit_r2_gap}")
 
     _validate_plans(settings.plans)
+
+
+def _validate_uncertainty(uncertainty: UncertaintySettings) -> None:
+    """Refuse quantiles that cannot bound the asked intervals, or have no median."""
+    quantiles, levels = uncertainty.quantiles, uncertainty.levels
+    if not quantiles or any(not 0.0 < q < 1.0 for q in quantiles):
+        raise ValueError(f"uncertainty.quantiles must lie strictly between 0 and 1; got {list(quantiles)}")
+    if len(set(quantiles)) != len(quantiles) or list(quantiles) != sorted(quantiles):
+        raise ValueError(f"uncertainty.quantiles must be increasing, without repeats; got {list(quantiles)}")
+    if not any(math.isclose(q, 0.5) for q in quantiles):
+        raise ValueError(f"uncertainty.quantiles must include 0.5, the median; got {list(quantiles)}")
+    for level in levels:
+        if not 0.0 < level < 1.0:
+            raise ValueError(f"uncertainty.levels must lie strictly between 0 and 1; got {list(levels)}")
+        bounds = (round((1.0 - level) / 2.0, 6), round((1.0 + level) / 2.0, 6))
+        missing = [bound for bound in bounds if not any(math.isclose(q, bound, abs_tol=1e-9) for q in quantiles)]
+        if missing:
+            raise ValueError(
+                f"uncertainty.levels: the {level:g} interval needs the quantiles {list(bounds)}; "
+                f"uncertainty.quantiles has no {missing}"
+            )
 
 
 def _validate_plans(plans: PlanSettings) -> None:
