@@ -1,0 +1,112 @@
+# Paper A1, gap 1: do local samples help more when they weigh more, or when the model knows which
+# basin a point is from? Same basins, shares, repeats and draws as configs/a1/a1_mixed.yml (seed 42),
+# so every plan here has the same points as a plan of results/a1_mixed. All four arms are fitted
+# HERE, on the graphics card, so they differ only in their training data:
+#   logo             no local points (reference)
+#   mixed            plain pooling
+#   control          the moved points alone
+#   mixed_weighted   pooling, each moved point weighted so that the moved points and the other
+#                    basins carry the same total weight (spiking with extra weighting)
+#   mixed_indicator  pooling, plus an input column: 1 for points of the held-out basin, 0 otherwise
+# results/a1_mixed (fitted on the processor) is not reused for the comparison: XGBoost on the
+# graphics card gives slightly different trees. It serves as a CPU-vs-GPU agreement check.
+# Only the Global model is fitted (it needs no stage 1, so stage 1 is skipped).
+#
+# Run with (pixi run -e dev ...):
+#   python experiments/a1/make_plans.py --config configs/a1/a1_mixed_arms.yml --kinds logo,mixed
+#   python experiments/a1/check_plans.py results/a1_mixed/plans results/a1_mixed_arms/plans   # same draws?
+#   python experiments/a1/run_a1.py --config configs/a1/a1_mixed_arms.yml \
+#       --kinds logo,mixed,control,mixed_weighted,mixed_indicator --workers 3
+#   python experiments/a1/evaluate.py --config configs/a1/a1_mixed_arms.yml
+#   # agreement check, plain mixed and control: GPU (here) vs CPU (results/a1_mixed)
+#   python experiments/a1/compare.py --runs results/a1_mixed/runs/default results/a1_mixed_arms/runs/default \
+#       --allow-mixed-devices --kinds mixed,control --out results/a1_check_gpu_cpu
+#   # the comparison of the arms
+#   python experiments/a1/compare.py --runs results/a1_mixed_arms/runs/default --out results/a1_compare_mixed
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+# Same stage-1 values as the mixed run (unused here: Global needs no stage 1).
+stage1:
+  estimator: XGBoost
+  # Stage 1 stays on the processor: a few untuned fits per plan, and the same as the stage 1 of
+  # results/a1_mixed. Switch to cuda only if the GPU check of Prompt 1 shows that
+  # multi_output_tree (both targets in one model) runs on the graphics card.
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  # Stage 2 (the tuned SOM models, where the run time goes) on the graphics card. Needs the CUDA
+  # build of XGBoost: run with `pixi run -e dev` or `-e core-gpu`, not `-e core`.
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  models: [global]
+inner_cv_folds: 5
+# One seed: the variation comes from the 5 repeated draws of the moved points.
+seeds: [42]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+plans:
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou]
+    validation_region: false
+  mixed:
+    # Unchanged from configs/a1/a1_mixed.yml: these decide the draws.
+    fractions: [0.05, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    n_repeats: 5
+    # The extra arms; each is written as its own plan kind with the same points as the plain plan.
+    arms: [weighted, indicator]
+    # weighted arm: "balanced" = each moved point weighs (points from the other basins) / (moved
+    # points), so both sets carry the same total weight; a number sets the weight directly.
+    local_weight: balanced
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_mixed_arms
+mlflow_experiment: Paper_A1

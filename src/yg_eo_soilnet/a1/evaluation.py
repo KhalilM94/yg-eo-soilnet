@@ -34,7 +34,7 @@ import numpy as np
 import pandas as pd
 
 from yg_eo_soilnet.a1.config import COMBINED_GROUP
-from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, RANDOM, SPATIAL_KFOLD, slug
+from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, MIXED_KINDS, RANDOM, SPATIAL_KFOLD, slug
 from yg_eo_soilnet.a1.devices import UNKNOWN_DEVICE
 from yg_eo_soilnet.a1.layout import prediction_paths
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
@@ -122,6 +122,9 @@ def load_predictions(
         for column in ("device_stage1", "device_stage2"):
             if column not in frame.columns:
                 frame[column] = UNKNOWN_DEVICE
+        if "local_weight" not in frame.columns:
+            # Written before the weighted arm existed: no point was weighted.
+            frame["local_weight"] = np.nan
         missing = [column for column in PREDICTION_COLUMNS if column not in frame.columns]
         if missing:
             raise ValueError(
@@ -135,6 +138,7 @@ def load_predictions(
                 "block_size_m": float,
                 "local_fold": float,
                 "local_block": float,
+                "local_weight": float,
                 "held_out": object,
                 "seed": "int64",
             }
@@ -689,7 +693,7 @@ MIXED_VS_CONTROL = "mixed_vs_control"
 
 
 def pooled_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """The rows that may be pooled into one score per kind: every kind but ``mixed`` and ``control``.
+    """The rows that may be pooled into one score per kind: every kind but ``mixed``, its arms and ``control``.
 
     A ``mixed`` or ``control`` plan exists for every share and repeat of a held-out region, and
     each tests the region's remaining points: pooled, one point would count once per share and
@@ -700,7 +704,7 @@ def pooled_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def mixed_scores(df: pd.DataFrame, *, min_n: int = MIN_GROUP_SIZE) -> pd.DataFrame:
-    """Test scores of the ``mixed`` and ``control`` plans per region, share, model and covariate group.
+    """Test scores of the ``mixed``, arm and ``control`` plans per region, share, model and covariate group.
 
     Each repeat is scored on its own test points, then the repeats of a share are averaged, as
     :func:`transfer_table` does.
@@ -729,16 +733,21 @@ def mixed_scores(df: pd.DataFrame, *, min_n: int = MIN_GROUP_SIZE) -> pd.DataFra
 def mixed_differences(df: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000, seed: int = 42) -> pd.DataFrame:
     """Mixed minus control per region, share and model, paired on the test points they share.
 
+    Each arm of the mixed experiment present (``mixed_weighted``, ``mixed_indicator``) is compared
+    with ``control`` the same way, as its own comparison (``kind`` ``<arm>_vs_control``).
+
     Within a repeat, a ``mixed`` plan and its ``control`` plan test the same points of the region, so
     their difference is a paired comparison: both are scored on each bootstrap resample of the
     blocks, and the repeats of a share are resampled together (a point counts once per repeat). The
-    p-value tests "no difference"; ``p_holm`` corrects it across the shares of one region, model and
-    score - the family a reader of one fig09 panel takes in at once. Every covariate (``combined``).
+    p-value tests "no difference"; ``p_holm`` corrects it across the shares of one region, model,
+    score and comparison - the family a reader of one fig09 panel takes in at once. Every covariate
+    (``combined``).
 
     Returns
     -------
     pandas.DataFrame
-        ``kind`` (``mixed_vs_control``), ``region, fraction, model, a`` (``mixed``), ``b``
+        ``kind`` (``mixed_vs_control``, or ``<arm>_vs_control``), ``region, fraction, model, a``
+        (``mixed`` or the arm), ``b``
         (``control``), ``metric, estimate`` (score(mixed) - score(control)), ``low, high, p_value,
         p_holm, n, n_blocks, n_valid_draws, n_unpaired, small``.
     """
@@ -779,14 +788,16 @@ def mixed_differences(df: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000
         block_km=block_km,
         n=n,
         seed=seed,
-        compare=[(MIXED, CONTROL)],
+        compare=[(kind, CONTROL) for kind in MIXED_KINDS if kind in set(test["kind"])],
         compare_on="kind",
     )
     differences = result.differences.rename(columns={"held_out": "region"})
     if differences.empty:
         return pd.DataFrame(columns=columns)
-    differences["p_holm"] = differences.groupby(["region", "model", "metric"], sort=False)["p_value"].transform(holm)
-    return differences.assign(kind=MIXED_VS_CONTROL)[columns].sort_values(["region", "model", "metric", "fraction"])
+    family = ["region", "model", "metric", "a"]
+    differences["p_holm"] = differences.groupby(family, sort=False)["p_value"].transform(holm)
+    differences["kind"] = differences["a"].astype(str) + "_vs_" + differences["b"].astype(str)
+    return differences[columns].sort_values(["region", "model", "metric", "kind", "fraction"])
 
 
 # --- headline metrics, for MLflow ---------------------------------------------------------------

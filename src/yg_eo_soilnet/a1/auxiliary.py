@@ -33,16 +33,18 @@ from sklearn.base import clone
 from sklearn.model_selection import GroupKFold, KFold
 
 from yg_eo_soilnet.a1.config import stage1_prediction_column
+from yg_eo_soilnet.a1.arms import fit_kwargs
 from yg_eo_soilnet.a1.features import A1Table
 from yg_eo_soilnet.a1.pipelines import build_stage_pipeline, predict_on_cpu
+from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED_KINDS, RANDOM, SPATIAL_KFOLD
 from yg_eo_soilnet.a1.settings import A1Settings
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, VAL, SplitPlan
 
 #: Plan kinds whose folds keep the plan's clusters (blocks, regions) whole.
-GROUPED_KINDS = ("spatial_kfold", "logo", "mixed")
+GROUPED_KINDS = (SPATIAL_KFOLD, LOGO, *MIXED_KINDS)
 #: Plan kinds whose folds are random: the baseline, and a control, whose training points all sit
 #: in one region and so cannot be grouped by region.
-UNGROUPED_KINDS = ("random", "control")
+UNGROUPED_KINDS = (RANDOM, CONTROL)
 
 KFOLD = "kfold"
 GROUP_KFOLD = "groupkfold"
@@ -218,6 +220,7 @@ def predict_auxiliary(
     *,
     kind: Optional[str] = None,
     estimator_factory: Optional[Callable[[str], object]] = None,
+    sample_weight: Optional[pd.Series] = None,
     logger: Optional[logging.Logger] = None,
 ) -> AuxiliaryPredictions:
     """Predict every auxiliary property for every point of one split, each from a fit that never saw it.
@@ -237,6 +240,9 @@ def predict_auxiliary(
     estimator_factory : callable, optional
         ``factory(property) -> estimator``; :func:`build_stage1_pipeline` unless given. A test passes
         an estimator that records what it was fitted on.
+    sample_weight : pandas.Series, optional
+        A weight per training point id, given to every fit (out of fold and final): a
+        ``mixed_weighted`` plan (:mod:`yg_eo_soilnet.a1.arms`). A point without one weighs 1.
     logger : logging.Logger, optional
 
     Returns
@@ -287,8 +293,9 @@ def predict_auxiliary(
             predictions[column], predicted_by[target] = values, source
             continue
 
+        weights = None if sample_weight is None else sample_weight.reindex(measured_ids).fillna(1.0)
         out_of_fold = _out_of_fold(
-            estimator_factory(target), X.loc[measured_ids], table.frame.loc[measured_ids, target], folds
+            estimator_factory(target), X.loc[measured_ids], table.frame.loc[measured_ids, target], folds, weights
         )
         if out_of_fold is None:
             logger.warning(
@@ -303,7 +310,7 @@ def predict_auxiliary(
         to_predict = held_out_ids.append(unmeasured_ids)
         if len(to_predict):
             final = clone(estimator_factory(target))
-            final.fit(X.loc[measured_ids], table.frame.loc[measured_ids, target])
+            final.fit(X.loc[measured_ids], table.frame.loc[measured_ids, target], **fit_kwargs(weights, measured_ids))
             values.loc[to_predict] = predict_on_cpu(final, X.loc[to_predict])
             source.loc[to_predict] = FULL_TRAIN
         predictions[column], predicted_by[target] = values, source
@@ -322,7 +329,9 @@ def predict_auxiliary(
     )
 
 
-def _out_of_fold(estimator, X: pd.DataFrame, y: pd.Series, folds: pd.Series) -> Optional[np.ndarray]:
+def _out_of_fold(
+    estimator, X: pd.DataFrame, y: pd.Series, folds: pd.Series, weights: Optional[pd.Series] = None
+) -> Optional[np.ndarray]:
     """Out-of-fold predictions for the rows of ``X``, through the given folds; None when impossible.
 
     One fit per fold, on the other folds, so the fit that predicted each point is exactly the one
@@ -343,7 +352,7 @@ def _out_of_fold(estimator, X: pd.DataFrame, y: pd.Series, folds: pd.Series) -> 
     # cross_val_predict's loop, with each fit moved to the processor before it predicts (to_cpu).
     predicted = np.full(len(X), np.nan)
     for kept, held in pairs:
-        fitted = clone(estimator).fit(X.iloc[kept], y.iloc[kept])
+        fitted = clone(estimator).fit(X.iloc[kept], y.iloc[kept], **fit_kwargs(weights, X.index[kept]))
         predicted[held] = predict_on_cpu(fitted, X.iloc[held])
     return predicted
 

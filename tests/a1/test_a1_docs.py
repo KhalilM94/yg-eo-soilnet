@@ -8,7 +8,15 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 PAGE = ROOT / "docs" / "a1.md"
-SCRIPTS = ("make_demo_data.py", "preflight.py", "make_plans.py", "run_a1.py", "evaluate.py", "make_figures.py")
+SCRIPTS = (
+    "make_demo_data.py",
+    "preflight.py",
+    "make_plans.py",
+    "check_plans.py",
+    "run_a1.py",
+    "evaluate.py",
+    "make_figures.py",
+)
 
 
 def _option_flags():

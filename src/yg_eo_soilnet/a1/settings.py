@@ -14,9 +14,10 @@ configuration and the data.
 from __future__ import annotations
 
 import logging
+import math
 import os
 from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 
 import yaml
 
@@ -313,6 +314,12 @@ class LogoPlanSettings:
     validation_region: bool = False
 
 
+#: The extra arms of the mixed experiment (``plans.mixed.arms``).
+MIXED_ARMS = ("weighted", "indicator")
+#: ``plans.mixed.local_weight`` that balances the moved points against the other regions.
+BALANCED = "balanced"
+
+
 @dataclass(frozen=True)
 class MixedPlanSettings:
     """The mixed-transfer splits: a share of the held-out region moved into training.
@@ -323,10 +330,22 @@ class MixedPlanSettings:
         The shares of the region's points moved into training, strictly between 0 and 1.
     n_repeats : int
         How many different draws of each share; repeat ``r`` is drawn with seed ``seed + r``.
+    arms : tuple of str, default ()
+        Extra ways of training on the same points as each ``mixed`` plan, each written as its own
+        plan kind (:data:`MIXED_ARMS`): ``weighted`` (``mixed_weighted``: the moved points weigh
+        ``local_weight`` each in the fits) and ``indicator`` (``mixed_indicator``: an input column
+        says which points are from the held-out region). Their plans add no random draw, so the
+        plain ``mixed`` and ``control`` plans are the same with or without them.
+    local_weight : str or float, default "balanced"
+        The weight of each moved point in the ``weighted`` arm (every other point weighs 1):
+        ``"balanced"`` gives (training points from the other regions) / (moved points), so both
+        sets carry the same total weight; a positive number sets it directly.
     """
 
     fractions: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
     n_repeats: int = 5
+    arms: tuple[str, ...] = ()
+    local_weight: Union[str, float] = BALANCED
 
 
 @dataclass(frozen=True)
@@ -851,6 +870,13 @@ def _mixed_kwargs(values: Mapping) -> dict:
         kwargs["fractions"] = tuple(float(p) for p in _strings(values["fractions"], "plans.mixed.fractions"))
     if "n_repeats" in values:
         kwargs["n_repeats"] = int(values["n_repeats"])
+    if "arms" in values:
+        kwargs["arms"] = tuple(_strings(values["arms"] or [], "plans.mixed.arms"))
+    if "local_weight" in values:
+        weight = values["local_weight"]
+        if isinstance(weight, bool) or not isinstance(weight, (str, int, float)):
+            raise ValueError(f'plans.mixed.local_weight must be "{BALANCED}" or a positive number; got {weight!r}')
+        kwargs["local_weight"] = weight if isinstance(weight, str) else float(weight)
     return kwargs
 
 
@@ -999,6 +1025,16 @@ def _validate_plans(plans: PlanSettings) -> None:
         raise ValueError(f"plans.mixed.fractions repeats a value: {list(mixed.fractions)}")
     if mixed.n_repeats < 1:
         raise ValueError(f"plans.mixed.n_repeats must be at least 1; got {mixed.n_repeats}")
+    unknown = [arm for arm in mixed.arms if arm not in MIXED_ARMS]
+    if unknown:
+        raise ValueError(f"plans.mixed.arms has unknown arm(s) {unknown}; expected some of {list(MIXED_ARMS)}")
+    if len(set(mixed.arms)) != len(mixed.arms):
+        raise ValueError(f"plans.mixed.arms repeats an arm: {list(mixed.arms)}")
+    weight = mixed.local_weight
+    if isinstance(weight, str) and weight != BALANCED:
+        raise ValueError(f'plans.mixed.local_weight must be "{BALANCED}" or a positive number; got {weight!r}')
+    if not isinstance(weight, str) and not (math.isfinite(weight) and weight > 0):
+        raise ValueError(f"plans.mixed.local_weight must be positive; got {weight}")
 
 
 def _validate_regions(regions: RegionSettings) -> None:

@@ -61,6 +61,7 @@ import yaml
 import numpy as np
 import pandas as pd
 
+from yg_eo_soilnet.a1.arms import INDICATOR_COLUMN, adds_indicator, indicator, weights_for
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions, folds_only, predict_auxiliary
 from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
@@ -85,7 +86,7 @@ from yg_eo_soilnet.a1.stage2 import (
     run_local,
     run_model,
 )
-from yg_eo_soilnet.datamodules.splitting import TEST, SplitPlan
+from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 from yg_eo_soilnet.metrics import regression_metrics
 
 #: The columns of every predictions file, in order.
@@ -115,6 +116,7 @@ PREDICTION_COLUMNS = (
     "tuned_params",
     "device_stage1",
     "device_stage2",
+    "local_weight",
 )
 #: The columns format 5 added; a format-4 file (one seed, devices not recorded) is read without them.
 SEED_DEVICE_COLUMNS = ("seed", "device_stage1", "device_stage2")
@@ -603,14 +605,25 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     if not todo and not needs_dissimilarity:
         return outcome
 
+    # The weighted arm: its moved points weigh w in every fit, stage 1's included.
+    fitted_ids = plan.point_ids_for(TRAIN)
+    fitted_ids = fitted_ids[table.frame[settings.target].reindex(fitted_ids).notna().to_numpy()]
+    weights, w = weights_for(row.kind, plan, settings, fitted_ids)
+    if weights is not None:
+        logger.info(f"  weighted arm: each of {int((weights != 1.0).sum())} moved point(s) weighs {w:.3g}")
     if needs_stage1(models):
-        auxiliary = _stage1(row, seed, plan, table, settings, config, run_dir, logger)
+        auxiliary = _stage1(row, seed, plan, table, settings, config, run_dir, logger, sample_weight=weights)
     else:
         auxiliary = folds_only(plan, settings, kind=row.kind, logger=logger)
         logger.info(f"  stage 1: skipped, no model of {list(models)} reads it; {auxiliary.n_folds} fold(s) cut")
     context = build_context(table, plan, auxiliary, settings, config)
+    context.sample_weight = weights
     auxiliary_columns = list(resolved.groups.get(AUXILIARY_GROUP, ())) if needs_stage1(models) else []
     global_columns = [column for column in resolved.combined if column not in resolved.groups.get(AUXILIARY_GROUP, ())]
+    if adds_indicator(row.kind):
+        # The indicator arm: one more input, read only by the models on every covariate.
+        context.X[INDICATOR_COLUMN] = indicator(plan).reindex(context.X.index)
+        global_columns.append(INDICATOR_COLUMN)
     region = table.frame[table.region_column] if table.region_column else None
     scores: dict = {}
 
@@ -632,7 +645,7 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
             )
         else:
             result = run_group(context, list(resolved.groups[group]))
-        frame = _rows(row, seed, context, result, model, group, region, table, shared.devices)
+        frame = _rows(row, seed, context, result, model, group, region, table, shared.devices, w)
         path = out / _output_name(model, group)
         _atomic_write_parquet(frame, path)
         outcome.computed.append(str(path))
@@ -697,7 +710,7 @@ def _dissimilarity(row, context, table, global_columns, auxiliary_columns, resul
     return frame
 
 
-def _stage1(row, seed, plan, table, settings, config, run_dir, logger) -> AuxiliaryPredictions:
+def _stage1(row, seed, plan, table, settings, config, run_dir, logger, *, sample_weight=None) -> AuxiliaryPredictions:
     """The plan's stage-1 predictions for one seed: read back when saved, otherwise computed and saved."""
     path = stage1_path(run_dir, row.plan_id, seed)
     if path.exists():
@@ -707,7 +720,9 @@ def _stage1(row, seed, plan, table, settings, config, run_dir, logger) -> Auxili
         )
         return auxiliary
     started = time.monotonic()
-    auxiliary = predict_auxiliary(table, plan, settings, config, kind=row.kind, logger=logger)
+    auxiliary = predict_auxiliary(
+        table, plan, settings, config, kind=row.kind, sample_weight=sample_weight, logger=logger
+    )
     # The point ids are the frame's index; written as a column, so they survive the file.
     _atomic_write_parquet(auxiliary.to_frame().reset_index().assign(seed=int(seed)), path)
     logger.info(
@@ -776,7 +791,9 @@ def _auxiliary_from_frame(frame: pd.DataFrame, settings) -> AuxiliaryPredictions
     )
 
 
-def _rows(row, seed, context, outcome: ModelResult, model, group, region, table, devices) -> pd.DataFrame:
+def _rows(
+    row, seed, context, outcome: ModelResult, model, group, region, table, devices, local_weight=np.nan
+) -> pd.DataFrame:
     """The predictions table of one model on one plan."""
     ids = outcome.predicted.index
     coordinates = table.coordinates.reindex(ids)
@@ -808,6 +825,8 @@ def _rows(row, seed, context, outcome: ModelResult, model, group, region, table,
             "tuned_params": outcome.tuned_params_json,
             "device_stage1": devices["stage1"],
             "device_stage2": devices["stage2"],
+            # The weight of each moved training point (mixed_weighted); empty for every other kind.
+            "local_weight": np.full(len(ids), float(local_weight)),
         },
         columns=list(PREDICTION_COLUMNS),
     )

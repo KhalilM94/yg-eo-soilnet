@@ -38,6 +38,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.model_selection import GridSearchCV
 
+from yg_eo_soilnet.a1.arms import fit_kwargs
 from yg_eo_soilnet.a1.auxiliary import AuxiliaryPredictions
 from yg_eo_soilnet.a1.config import stage1_prediction_column
 from yg_eo_soilnet.a1.features import A1Table
@@ -95,6 +96,9 @@ class Stage2Context:
     cache : dict
         Model results already computed for this plan, so ``global_aux`` is fitted once even when the
         per-class models fall back to it.
+    sample_weight : pandas.Series or None
+        The weight of each training point in every fit (a ``mixed_weighted`` plan,
+        :mod:`yg_eo_soilnet.a1.arms`); None fits every point with the same weight.
     """
 
     X: pd.DataFrame
@@ -107,6 +111,7 @@ class Stage2Context:
     settings: A1Settings
     config: object
     cache: dict = field(default_factory=dict)
+    sample_weight: Optional[pd.Series] = None
 
     @property
     def train_ids(self) -> pd.Index:
@@ -185,7 +190,14 @@ def build_context(
     )
 
 
-def fit_tuned(pipeline, grid: Mapping[str, list], X: pd.DataFrame, y: pd.Series, folds: pd.Series):
+def fit_tuned(
+    pipeline,
+    grid: Mapping[str, list],
+    X: pd.DataFrame,
+    y: pd.Series,
+    folds: pd.Series,
+    sample_weight: Optional[pd.Series] = None,
+):
     """Fit ``pipeline`` on these rows, its settings chosen by cross-validation over ``folds``.
 
     The search uses only the rows given - the training points - through the folds stage 1 used, so
@@ -201,6 +213,9 @@ def fit_tuned(pipeline, grid: Mapping[str, list], X: pd.DataFrame, y: pd.Series,
         The rows to fit on, indexed by point id.
     folds : pandas.Series
         A fold per point id; points of ``X`` not in it are never held out.
+    sample_weight : pandas.Series, optional
+        A weight per point id, given to every fit: the final one and each fit of the search. The
+        search still scores each validation fold by its unweighted RMSE.
 
     Returns
     -------
@@ -221,9 +236,10 @@ def fit_tuned(pipeline, grid: Mapping[str, list], X: pd.DataFrame, y: pd.Series,
             refit=True,
             n_jobs=1,
         )
-        search.fit(X, y)
+        # The weights are cut with the rows for each fit; the scorer never sees them.
+        search.fit(X, y, **fit_kwargs(sample_weight, X.index))
         return search.best_estimator_, {**search.best_params_, "tuned": True}
-    model = clone(pipeline).fit(X, y)
+    model = clone(pipeline).fit(X, y, **fit_kwargs(sample_weight, X.index))
     return model, {**{name: values[0] for name, values in grid.items()}, "tuned": False}
 
 
@@ -502,7 +518,9 @@ def _single_model(context: Stage2Context, columns: list[str]) -> ModelResult:
         settings, context.config, columns, context.categorical, stage=settings.stage2, target=settings.target
     )
     train, held = context.train_ids, context.held_out_ids
-    fitted, params = fit_tuned(pipeline, grid, context.X.loc[train, columns], context.y.loc[train], context.folds)
+    fitted, params = fit_tuned(
+        pipeline, grid, context.X.loc[train, columns], context.y.loc[train], context.folds, **_weights(context)
+    )
     predicted = pd.Series(predict_on_cpu(fitted, context.X.loc[held, columns]), index=held)
     return ModelResult(predicted=predicted, fallback=pd.Series(False, index=held), tuned_params=params, fitted=fitted)
 
@@ -538,13 +556,23 @@ def _per_class(
             settings, context.config, columns, context.categorical, stage=settings.stage2, target=settings.target
         )
         fitted, chosen = fit_tuned(
-            pipeline, grid, context.X.loc[class_train, columns], context.y.loc[class_train], context.folds
+            pipeline,
+            grid,
+            context.X.loc[class_train, columns],
+            context.y.loc[class_train],
+            context.folds,
+            **_weights(context),
         )
         params[str(label)] = {**chosen, "n_train": int(len(class_train))}
         if len(class_held):
             predicted.loc[class_held] = predict_on_cpu(fitted, context.X.loc[class_held, columns])
             used_fallback.loc[class_held] = False
     return ModelResult(predicted=predicted, fallback=used_fallback, tuned_params=params, role=role)
+
+
+def _weights(context: Stage2Context) -> dict:
+    """``{"sample_weight": ...}`` when the plan weighs its points; ``{}`` otherwise."""
+    return {} if context.sample_weight is None else {"sample_weight": context.sample_weight}
 
 
 def _fold_pairs(fold_of: pd.Series) -> list[tuple[np.ndarray, np.ndarray]]:

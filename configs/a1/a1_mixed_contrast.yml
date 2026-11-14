@@ -1,0 +1,96 @@
+# Paper A1, gap 2: the same mixed experiment in the basins where transfer did NOT fail (Tensift,
+# Loukkous, Bouregreg), as the contrast to Oum Er Rbia and Sebou. Check first, in results/a1_xgb,
+# that transfer still holds for these three with XGBoost in stage 1; change held_out if not.
+# Every arm is run here (plain, control, weighted, indicator), Global model only.
+# Loukkous (about 290 points) and Bouregreg (about 300) are small: shares stop at 0.7 so at least
+# about 85 test points remain; at 0.1 about 30 points are moved.
+#
+# Run with:
+#   python experiments/a1/make_plans.py --config configs/a1/a1_mixed_contrast.yml --kinds logo,mixed
+#   python experiments/a1/run_a1.py     --config configs/a1/a1_mixed_contrast.yml \
+#       --kinds logo,mixed,control,mixed_weighted,mixed_indicator --workers 3
+#   python experiments/a1/evaluate.py     --config configs/a1/a1_mixed_contrast.yml
+#   python experiments/a1/make_figures.py --config configs/a1/a1_mixed_contrast.yml --only fig09_mixed
+#   python experiments/a1/compare.py --runs results/a1_mixed_arms/runs/default \
+#       results/a1_mixed_contrast/runs/default --out results/a1_compare_mixed
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+stage1:
+  estimator: XGBoost
+  # Stage 1 stays on the processor: a few untuned fits per plan, and the same as the stage 1 of
+  # results/a1_mixed. Switch to cuda only if the GPU check of Prompt 1 shows that
+  # multi_output_tree (both targets in one model) runs on the graphics card.
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  # Stage 2 (the tuned SOM models, where the run time goes) on the graphics card. Needs the CUDA
+  # build of XGBoost: run with `pixi run -e dev` or `-e core-gpu`, not `-e core`.
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  models: [global]
+inner_cv_folds: 5
+seeds: [42]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+plans:
+  logo:
+    min_points: 100
+    held_out: [Tensift, Loukkous, Bouregreg]
+    validation_region: false
+  mixed:
+    fractions: [0.1, 0.2, 0.3, 0.5, 0.7]
+    n_repeats: 5
+    arms: [weighted, indicator]
+    local_weight: balanced
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_mixed_contrast
+mlflow_experiment: Paper_A1

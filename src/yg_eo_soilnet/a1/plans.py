@@ -20,6 +20,12 @@ same fixed split and lets anyone check which points a score came from. Five kind
     The same moved points as the matching ``mixed`` plan, alone - only local data, nothing from
     elsewhere - scored on the same test points. The difference between the two is what the other
     regions add.
+``mixed_weighted`` and ``mixed_indicator`` (the arms, ``plans.mixed.arms``)
+    Exactly the points of the matching ``mixed`` plan, trained differently: the moved points weigh
+    more in the fits (``plans.mixed.local_weight``), or an input column says which points are from
+    the held-out region. Their files differ from the ``mixed`` plan's only in the kind they record;
+    they add no random draw, so the ``mixed`` and ``control`` plans are the same with or without
+    them (``experiments/a1/check_plans.py`` compares two plan folders).
 
 A region with fewer than ``plans.logo.min_points`` points (100) is never held out and never used
 for validation: its score would rest on too few points. ``plans.logo.held_out`` narrows the regions
@@ -58,10 +64,20 @@ SPATIAL_KFOLD = "spatial_kfold"
 LOGO = "logo"
 MIXED = "mixed"
 CONTROL = "control"
-#: The kinds that can be asked for; asking for ``mixed`` writes the ``control`` plans with it.
+MIXED_WEIGHTED = "mixed_weighted"
+MIXED_INDICATOR = "mixed_indicator"
+#: The kinds that can be asked for; asking for ``mixed`` writes the ``control`` plans with it, and
+#: the arms of ``plans.mixed.arms``.
 KINDS = (RANDOM, SPATIAL_KFOLD, LOGO, MIXED)
+#: Each arm of ``plans.mixed.arms``: its plan kind, and the prefix of its plan ids
+#: (``mixed_w_<rest of the mixed plan's id>``).
+ARMS = {"weighted": (MIXED_WEIGHTED, "mixed_w_"), "indicator": (MIXED_INDICATOR, "mixed_i_")}
+#: The plan kinds of the arms.
+ARM_KINDS = tuple(kind for kind, _ in ARMS.values())
+#: The kinds trained on a mixed plan's points: the plain one and its arms.
+MIXED_KINDS = (MIXED, *ARM_KINDS)
 #: The kinds whose held-out region is divided between training and test on purpose.
-DIVIDED_KINDS = (MIXED, CONTROL)
+DIVIDED_KINDS = (*MIXED_KINDS, CONTROL)
 
 #: The columns of ``index.csv``, in order.
 INDEX_COLUMNS = (
@@ -497,7 +513,8 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
     Returns
     -------
     list of BuiltPlan
-        For every region, share and repeat, a ``mixed`` plan then its ``control``.
+        For every region, share and repeat, a ``mixed`` plan, its ``control``, then one plan per arm
+        of ``plans.mixed.arms`` with the ``mixed`` plan's assignments (no further draw).
     """
     _require_regions(population, MIXED)
     options = settings.plans.mixed
@@ -533,7 +550,26 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
                     control_assignments, CONTROL, settings, clusters=population.region_ids, population=population
                 )
                 plans.append(BuiltPlan(plan_id=f"control_{suffix}", kind=CONTROL, plan=control, **common))
+
+                for arm in options.arms:
+                    kind, prefix = ARMS[arm]
+                    plan = _plan(assignments, kind, settings, clusters=population.region_ids, population=population)
+                    plans.append(BuiltPlan(plan_id=f"{prefix}{suffix}", kind=kind, plan=plan, **common))
     return plans
+
+
+def plain_mixed_id(plan_id: str) -> str:
+    """The id of the ``mixed`` plan an arm's plan shares its points with (itself for any other id).
+
+    Examples
+    --------
+    >>> plain_mixed_id("mixed_w_r06_oum_er_rbia_p05_s0")
+    'mixed_r06_oum_er_rbia_p05_s0'
+    """
+    for _, prefix in ARMS.values():
+        if plan_id.startswith(prefix):
+            return "mixed_" + plan_id[len(prefix) :]
+    return plan_id
 
 
 # --- the checks ---------------------------------------------------------------------------
@@ -606,6 +642,20 @@ def validate_pair(mixed: BuiltPlan, control: BuiltPlan) -> None:
         raise PlanError(f"{control.plan_id}: its training points are not the points {mixed.plan_id} moved")
     if set(control.plan.point_ids_for(TEST)) != set(mixed.plan.point_ids_for(TEST)):
         raise PlanError(f"{control.plan_id}: its test points differ from {mixed.plan_id}'s")
+
+
+def validate_arm(mixed: BuiltPlan, arm: BuiltPlan) -> None:
+    """Check an arm's plan has exactly the points of its ``mixed`` plan, in the same splits.
+
+    Raises
+    ------
+    PlanError
+        If any point is in another split, or the moved points differ.
+    """
+    if not arm.plan.assignments.sort_index().equals(mixed.plan.assignments.sort_index()):
+        raise PlanError(f"{arm.plan_id}: its splits are not exactly those of {mixed.plan_id}")
+    if arm.moved != mixed.moved:
+        raise PlanError(f"{arm.plan_id}: its moved points are not those of {mixed.plan_id}")
 
 
 def _validate_divided(built: BuiltPlan) -> None:
@@ -717,6 +767,8 @@ def build_plans(
     for built in plans:
         if built.kind == CONTROL:
             validate_pair(by_id["mixed_" + built.plan_id[len("control_") :]], built)
+        if built.kind in ARM_KINDS:
+            validate_arm(by_id[plain_mixed_id(built.plan_id)], built)
     return plans, skipped
 
 
@@ -741,7 +793,8 @@ def write_plans(
     out_dir : str, optional
         Where to write; ``<output_dir>/plans`` unless given.
     kinds : iterable of str
-        Which kinds to make (:data:`KINDS`); ``mixed`` brings its ``control`` plans with it.
+        Which kinds to make (:data:`KINDS`); ``mixed`` brings its ``control`` plans with it, and the
+        arms of ``plans.mixed.arms``.
     config : Config, optional
         The main configuration; read from the settings unless given.
     logger : logging.Logger, optional
@@ -778,6 +831,62 @@ def write_plans(
         held_out=[names[region] for region in population.held_out],
         in_training=sorted(names[region] for region in names if region not in population.held_out),
     )
+
+
+# --- comparing two folders ---------------------------------------------------------------------
+
+
+def compare_plan_folders(folder_a, folder_b) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """Compare the plans two folders share: their files byte for byte, and their test points.
+
+    Two configurations that should draw the same plans (one with the mixed arms, one without; a
+    copy with another model) are checked this way before their scores are compared plan by plan.
+
+    Parameters
+    ----------
+    folder_a, folder_b : path
+        Two plan folders written by ``make_plans.py`` (``<output_dir>/plans``).
+
+    Returns
+    -------
+    table : pandas.DataFrame
+        One row per plan id in both: ``plan_id, kind, same_file, same_test_points, n_test_a,
+        n_test_b, sha256_a, sha256_b`` (the first 12 hex digits).
+    only_a, only_b : list of str
+        The plan ids in one folder only.
+    """
+    import hashlib
+
+    files = {}
+    for side, folder in (("a", Path(folder_a)), ("b", Path(folder_b))):
+        if not (folder / INDEX_FILE).exists():
+            raise FileNotFoundError(f"No {INDEX_FILE} in {folder}; write its plans with make_plans.py first.")
+        index = pd.read_csv(folder / INDEX_FILE)
+        files[side] = {row.plan_id: (folder / f"{row.plan_id}.parquet", row.kind) for row in index.itertuples()}
+    shared = sorted(set(files["a"]) & set(files["b"]))
+    rows = []
+    for plan_id in shared:
+        (path_a, kind), (path_b, _) = files["a"][plan_id], files["b"][plan_id]
+        digest_a = hashlib.sha256(path_a.read_bytes()).hexdigest()
+        digest_b = hashlib.sha256(path_b.read_bytes()).hexdigest()
+        test_a = set(SplitPlan.from_frame(pd.read_parquet(path_a)).point_ids_for(TEST))
+        test_b = set(SplitPlan.from_frame(pd.read_parquet(path_b)).point_ids_for(TEST))
+        rows.append(
+            {
+                "plan_id": plan_id,
+                "kind": kind,
+                "same_file": digest_a == digest_b,
+                "same_test_points": test_a == test_b,
+                "n_test_a": len(test_a),
+                "n_test_b": len(test_b),
+                "sha256_a": digest_a[:12],
+                "sha256_b": digest_b[:12],
+            }
+        )
+    columns = ["plan_id", "kind", "same_file", "same_test_points", "n_test_a", "n_test_b", "sha256_a", "sha256_b"]
+    only_a = sorted(set(files["a"]) - set(files["b"]))
+    only_b = sorted(set(files["b"]) - set(files["a"]))
+    return pd.DataFrame(rows, columns=columns), only_a, only_b
 
 
 # --- helpers ------------------------------------------------------------------------------
