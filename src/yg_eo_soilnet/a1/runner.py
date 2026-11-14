@@ -639,6 +639,10 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     context = build_context(table, plan, auxiliary, settings, config)
     context.sample_weight = weights
     context.quantile_device = shared.devices.get(GLOBAL_Q)
+    if (GLOBAL_Q, COMBINED_GROUP) in todo and (GLOBAL, COMBINED_GROUP) not in todo:
+        # A resumed run: Global is on disk, and global_q reuses the settings its search chose.
+        saved = pd.read_parquet(out / _output_name(GLOBAL, COMBINED_GROUP), columns=["tuned_params"])
+        context.global_settings = json.loads(saved["tuned_params"].iloc[0])
     auxiliary_columns = list(resolved.groups.get(AUXILIARY_GROUP, ())) if needs_stage1(models) else []
     global_columns = [column for column in resolved.combined if column not in resolved.groups.get(AUXILIARY_GROUP, ())]
     if adds_indicator(row.kind):
@@ -1172,5 +1176,12 @@ def _log_plan(row, seed: int, run_dir: Path, devices: dict, *, first: bool = Tru
             for tag, entry in (record.get("levels_q") or {}).items():
                 metrics[f"cqr_q{tag}__{GLOBAL_Q}"] = float(entry["q"])
             metrics[f"crossing_share__{GLOBAL_Q}"] = float(record["crossing_share_held_out"])
+            # Its settings are Global's, chosen by Global's search in this plan, seed and arm.
+            mlflow.log_params(
+                {
+                    f"{GLOBAL_Q}_settings_from": record.get("settings_from", ""),
+                    **{f"{GLOBAL_Q}__{name}": value for name, value in (record.get("settings") or {}).items()},
+                }
+            )
         if metrics:
             mlflow.log_metrics(metrics)

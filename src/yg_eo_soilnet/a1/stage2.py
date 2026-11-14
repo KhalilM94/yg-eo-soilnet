@@ -99,6 +99,9 @@ class Stage2Context:
     cache : dict
         Model results already computed for this plan, so ``global_aux`` is fitted once even when the
         per-class models fall back to it.
+    global_settings : dict or None
+        Global's chosen settings read back from its predictions file, for ``global_q`` on a resumed
+        run where Global itself is not fitted again.
     quantile_device : str or None
         Where ``global_q`` fits (``cuda``, or ``cpu`` when the quantile objective fell back there);
         the stage-2 device when None.
@@ -119,6 +122,7 @@ class Stage2Context:
     cache: dict = field(default_factory=dict)
     sample_weight: Optional[pd.Series] = None
     quantile_device: Optional[str] = None
+    global_settings: Optional[dict] = None
 
     @property
     def train_ids(self) -> pd.Index:
@@ -211,7 +215,6 @@ def fit_tuned(
     y: pd.Series,
     folds: pd.Series,
     sample_weight: Optional[pd.Series] = None,
-    scoring=None,
 ):
     """Fit ``pipeline`` on these rows, its settings chosen by cross-validation over ``folds``.
 
@@ -231,8 +234,6 @@ def fit_tuned(
     sample_weight : pandas.Series, optional
         A weight per point id, given to every fit: the final one and each fit of the search. The
         search still scores each validation fold by its unweighted RMSE.
-    scoring : callable, optional
-        ``scoring(estimator, X, y)``, higher is better; the negative RMSE by default.
 
     Returns
     -------
@@ -249,7 +250,7 @@ def fit_tuned(
             clone(pipeline),
             param_grid=dict(grid),
             cv=pairs,
-            scoring=scoring or _neg_rmse_on_cpu,
+            scoring=_neg_rmse_on_cpu,
             refit=True,
             n_jobs=1,
         )
@@ -590,13 +591,19 @@ def _per_class(
 
 
 def quantile_stage(settings: A1Settings, device: Optional[str] = None):
-    """Stage 2's estimator turned into the one quantile model: ``reg:quantileerror`` at every quantile."""
+    """Stage 2's estimator turned into the one quantile model: ``reg:quantileerror`` at every quantile.
+
+    One tree per quantile (``multi_strategy: one_output_per_tree``), whatever the model list's XGBoost
+    entry sets: its ``multi_output_tree`` (one tree for both stage-1 targets) would make every
+    quantile share each tree's splits.
+    """
     from dataclasses import replace
 
     init_args = {
         **dict(settings.stage2.init_args),
         "objective": "reg:quantileerror",
         "quantile_alpha": [float(q) for q in settings.uncertainty.quantiles],
+        "multi_strategy": "one_output_per_tree",
     }
     if device is not None:
         init_args["device"] = device
@@ -608,13 +615,6 @@ def predict_quantiles(fitted, X: pd.DataFrame) -> np.ndarray:
     from yg_eo_soilnet.a1.pipelines import to_cpu
 
     return np.asarray(to_cpu(fitted).predict(X), dtype=float).reshape(len(X), -1)
-
-
-def _neg_pinball_on_cpu(estimator, X, y, *, quantiles) -> float:
-    """The quantile model's search score: minus the mean pinball loss over the quantiles."""
-    from yg_eo_soilnet.a1.uncertainty import pinball_loss
-
-    return -pinball_loss(np.asarray(y, dtype=float), predict_quantiles(estimator, X), quantiles)
 
 
 def out_of_fold_quantiles(
@@ -641,10 +641,31 @@ def out_of_fold_quantiles(
     return frame.dropna()
 
 
-def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
-    """``global_q``: every quantile in one model, tuned by pinball loss, and its intervals conformalized.
+def global_settings(context: Stage2Context) -> dict:
+    """The settings Global's search chose in this plan, seed and arm, for ``global_q`` to reuse.
 
-    The search uses Global's grid and folds, scored by the mean pinball loss over the quantiles. Each
+    From Global's result when it was fitted in this process (it always comes first), otherwise from
+    its predictions file (:attr:`Stage2Context.global_settings`, set by the runner on a resumed run).
+
+    Raises
+    ------
+    RuntimeError
+        If neither is there: ``global_q`` has no settings of its own.
+    """
+    if GLOBAL in context.cache:
+        chosen = context.cache[GLOBAL].tuned_params
+    elif context.global_settings is not None:
+        chosen = context.global_settings
+    else:
+        raise RuntimeError(f"{GLOBAL_Q} reuses the settings of {GLOBAL}, which was not fitted in this plan.")
+    return {name: value for name, value in chosen.items() if name != "tuned"}
+
+
+def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
+    """``global_q``: every quantile in one model, on Global's tuned settings, and its intervals conformalized.
+
+    ``global_q`` is not searched: it takes the settings Global's search chose in the same plan, seed
+    and arm (:func:`global_settings`) - the hyperparameters of the tuned mean model. Each
     point's quantiles are sorted (``quantiles_sorted`` marks those that crossed). With
     ``uncertainty.conformal``, each central interval is corrected by ``Q`` from the training points'
     out-of-fold quantiles (:func:`~yg_eo_soilnet.a1.uncertainty.calibrate`). A log-transformed SOM is
@@ -652,7 +673,6 @@ def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
     their order. The median (0.5) is the ``predicted`` column.
     """
     from dataclasses import replace
-    from functools import partial
 
     from yg_eo_soilnet.a1 import uncertainty as uq
 
@@ -661,7 +681,7 @@ def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
     quantiles = list(options.quantiles)
     device = context.quantile_device
     built_with = replace(settings, device=device) if device is not None else settings
-    pipeline, grid = build_stage_pipeline(
+    pipeline, _ = build_stage_pipeline(
         built_with,
         context.config,
         columns,
@@ -671,15 +691,9 @@ def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
     )
     train, held = context.train_ids, context.held_out_ids
     X_train, y_train = context.X.loc[train, columns], context.y.loc[train]
-    fitted, params = fit_tuned(
-        pipeline,
-        grid,
-        X_train,
-        y_train,
-        context.folds,
-        scoring=partial(_neg_pinball_on_cpu, quantiles=quantiles),
-        **_weights(context),
-    )
+    chosen = global_settings(context)
+    fitted = clone(pipeline).set_params(**chosen).fit(X_train, y_train, **fit_kwargs(context.sample_weight, train))
+    params = {**chosen, "tuned": False, "settings_from": GLOBAL}
     values, crossed = uq.sort_quantiles(predict_quantiles(fitted, context.X.loc[held, columns]))
 
     calibrations, info = (
@@ -690,10 +704,12 @@ def _quantile_model(context: Stage2Context, columns: list[str]) -> ModelResult:
             "conformal": bool(options.conformal),
             "crossing_share_held_out": float(crossed.mean()) if len(crossed) else 0.0,
             "device": device,
+            "settings_from": GLOBAL,
+            "settings": chosen,
         },
     )
     if options.conformal:
-        oof = out_of_fold_quantiles(pipeline, params, X_train, y_train, context.folds, context.sample_weight)
+        oof = out_of_fold_quantiles(pipeline, chosen, X_train, y_train, context.folds, context.sample_weight)
         if oof is None or oof.empty:
             info["note"] = "fewer than two folds: no calibration point, raw intervals only"
         else:

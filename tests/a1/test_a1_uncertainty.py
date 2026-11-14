@@ -138,6 +138,19 @@ def test_global_q_needs_xgboost_in_stage_2(a1_settings):
         a1_settings(stage2={"estimator": "RandomForest", "models": ["global", "global_q"]})
 
 
+def test_global_q_without_global_is_refused(a1_settings):
+    with pytest.raises(ValueError, match="without global"):
+        a1_settings(stage2={"estimator": "XGBoost", "models": ["global_aux", "global_q"]})
+
+
+def test_global_q_grows_one_tree_per_quantile_whatever_the_model_list_says(a1_settings):
+    from yg_eo_soilnet.a1.stage2 import quantile_stage
+
+    init_args = quantile_stage(a1_settings()).init_args
+    assert init_args["multi_strategy"] == "one_output_per_tree"
+    assert init_args["objective"] == "reg:quantileerror" and init_args["quantile_alpha"] == QUANTILES
+
+
 def test_the_round_3_configurations_list_global_q():
     assert "global_q" in load_settings(str(A1_CONFIGS / "a1_xgb.yml")).som_models
     for name in ("a1_mixed_arms.yml", "a1_mixed_contrast.yml"):
@@ -275,6 +288,46 @@ def test_the_quantile_model_writes_its_columns_and_q_per_plan_and_seed(runs):
         np.testing.assert_allclose(part["som_hi80_cqr"], part["som_hi80"] + q80)
     other = load_predictions(runs["with_q"])
     assert other.loc[other["model"] != uq.GLOBAL_Q, "som_q50"].isna().all()
+
+
+def test_global_q_takes_the_settings_globals_search_chose_in_each_plan(runs):
+    frame = load_predictions(runs["with_q"])
+    first = frame.drop_duplicates(["plan_id", "model"]).set_index(["plan_id", "model"])["tuned_params"]
+    for plan_id in frame.loc[frame["model"] == uq.GLOBAL_Q, "plan_id"].unique():
+        chosen = json.loads(first[(plan_id, "global")])
+        quantile = json.loads(first[(plan_id, uq.GLOBAL_Q)])
+        expected = {name: value for name, value in chosen.items() if name != "tuned"}
+        assert quantile == {**expected, "tuned": False, "settings_from": "global"}, plan_id
+        record = json.loads((runs["with_q"] / CALIBRATION_DIR / plan_id / "seed_42.json").read_text())
+        assert record["settings_from"] == "global" and record["settings"] == expected
+
+
+def test_global_q_is_never_searched(builder, tmp_path, monkeypatch):
+    from yg_eo_soilnet.a1 import stage2 as stage2_module
+
+    searched = []
+    original = stage2_module.fit_tuned
+
+    def recording(pipeline, grid, X, y, folds, sample_weight=None):
+        searched.append(pipeline.get_params().get("model__objective"))
+        return original(pipeline, grid, X, y, folds, sample_weight=sample_weight)
+
+    monkeypatch.setattr(stage2_module, "fit_tuned", recording)
+    _run(builder, tmp_path / "searched", models=["global", "global_q"], kinds=(RANDOM,))
+    assert searched and "reg:quantileerror" not in searched
+
+
+def test_a_resumed_run_reads_globals_settings_from_its_file(builder, tmp_path):
+    run_dir, path = _run(builder, tmp_path / "resume", models=["global", "global_q"], kinds=(RANDOM,))
+    target = run_dir / "predictions" / "random" / "seed_42" / "global_q__combined.parquet"
+    before = pd.read_parquet(target)
+    target.unlink()
+    (run_dir / CALIBRATION_DIR / "random" / "seed_42.json").unlink()
+    result = run_plans(load_a1_config(str(path)), kinds=[RANDOM], tracking=False)
+    assert str(target) in result.computed
+    assert not any("global__combined" in name for name in result.computed), "Global was fitted again"
+    after = pd.read_parquet(target)
+    pd.testing.assert_frame_equal(before, after)
 
 
 def test_dissimilarity_is_computed_for_random_and_the_10_km_folds_only(runs):

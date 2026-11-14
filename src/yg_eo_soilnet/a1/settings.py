@@ -986,6 +986,11 @@ def _validate(settings: A1Settings) -> None:
             raise ValueError(
                 f"stage2.models must list some of {list(ALL_SOM_MODELS)}; got {list(settings.stage2.models)}"
             )
+        if "global_q" in settings.stage2.models and "global" not in settings.stage2.models:
+            raise ValueError(
+                "stage2.models lists global_q without global: the quantile model takes the settings Global's "
+                "search chooses in each plan, so Global must be fitted too. Add global to stage2.models."
+            )
         if "global_q" in settings.stage2.models and settings.stage2.estimator != "XGBoost":
             raise ValueError(
                 f"stage2.models lists global_q, XGBoost's quantile model; stage2.estimator is "
