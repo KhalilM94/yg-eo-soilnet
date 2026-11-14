@@ -241,8 +241,9 @@ def point_scores(part: pd.DataFrame, quantiles: Sequence[float], levels: Sequenc
     """Every uncertainty score of some test points: rows ``method, level, quantile, metric, value``.
 
     PICP (the share of measured SOM inside the interval) and the mean and median width (PIW) per
-    level and method; QCP (the share of measured SOM below it) per quantile; the mean pinball loss;
-    RMSE, MAE and bias of the median (``predicted``).
+    level and method; QCP (the share of measured SOM below it) per quantile; the share of points
+    whose quantiles crossed and were sorted; the mean pinball loss; RMSE, MAE and bias of the median
+    (``predicted``).
     """
     y = part["observed"].to_numpy(dtype=float)
     rows = []
@@ -267,6 +268,18 @@ def point_scores(part: pd.DataFrame, quantiles: Sequence[float], levels: Sequenc
                 "quantile": q,
                 "metric": "qcp",
                 "value": float(np.mean(y <= values[:, position])),
+            }
+        )
+    if SORTED_COLUMN in part:
+        # The share of points whose quantiles crossed and were sorted.
+        crossed = part[SORTED_COLUMN].astype(bool).to_numpy()
+        rows.append(
+            {
+                "method": RAW,
+                "level": np.nan,
+                "quantile": np.nan,
+                "metric": "crossing_share",
+                "value": float(crossed.mean()),
             }
         )
     median = part["predicted"].to_numpy(dtype=float)

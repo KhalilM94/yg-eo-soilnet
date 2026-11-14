@@ -427,11 +427,14 @@ def test_picp_piw_and_qcp_equal_a_hand_computation_for_one_plan(runs, tables):
     tau = np.array(QUANTILES)[None, :]
     assert value("pinball")["value"] == pytest.approx(np.maximum(tau * gap, (tau - 1) * gap).mean())
     assert value("rmse_median")["value"] == pytest.approx(np.sqrt(((test["predicted"] - y) ** 2).mean()))
+    assert value("crossing_share")["value"] == pytest.approx(test[uq.SORTED_COLUMN].astype(bool).mean())
 
 
 def test_the_scores_follow_the_pooling_rules(tables):
     scores = tables["uncertainty_scores.csv"]
     scopes = set(scores["scope"])
+    crossing = scores[(scores["metric"] == "crossing_share") & (scores["class"] == "all")]
+    assert {"random", "spatial_kfold_10000m", "logo_North-East"} <= set(crossing["scope"])
     assert {"random", "spatial_kfold_10000m", "spatial_kfold_25000m", "logo_North-East"} <= scopes
     assert {"mixed_North-East_f0.2", "control_North-East_f0.5"} <= scopes
     mixed = scores[(scores["scope"] == "mixed_North-East_f0.2") & (scores["class"] == "all")]
