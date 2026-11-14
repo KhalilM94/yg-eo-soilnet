@@ -1,3 +1,7 @@
+# Sensitivity check only, not a paper configuration: max_bin 64 instead of XGBoost's default
+# 256, 10 plans (repeat s0), CPU. Compared with results/a1_mixed in the max_bin robustness table
+# (results/a1_compare_maxbin/maxbin_robustness.csv; docs/a1.md, "Sensitivity checks").
+#
 # Paper A1 - the mixed-training experiment of configs/a1/a1_mixed.yml, faster: XGBoost bins each
 # input into 64 values instead of 256 (max_bin) when it looks for splits, in both stages. Nothing
 # else changes - data, plans (identical files), grid, folds, seed - so the two runs compare plan by
