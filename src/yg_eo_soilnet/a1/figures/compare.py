@@ -123,6 +123,15 @@ def figure_mixed_arms(arms: pd.DataFrame, paired: pd.DataFrame, status: pd.DataF
             )
         if texts:
             parts.append(ps.minus(f"{basin}: " + "; ".join(texts)))
+    sources = sorted({run for run in shown["local_run"].dropna().astype(str) if run})
+    local_text = (
+        "Dashed: the local model of the whole basin - fitted on the basin's own points only, each point predicted "
+        "out of fold by a model that never saw its 10 km block - scored on the same remaining test points as the "
+        "curves, not on the whole basin; it does not depend on the share moved, so it moves only with the test "
+        f"points (from {', '.join(sources)})."
+        if sources
+        else "No compared run has the local model (it is fitted with global_aux), so there is no dashed line."
+    )
     rule = (
         "A basin's title says 'transfer fails' when, in the main run (results/a1_xgb, plain leave-one-basin-out, "
         f"{pretty_name(model)} model, every input), the transferred minus the local RMSE is above 0 with its 95 % "
@@ -135,7 +144,7 @@ def figure_mixed_arms(arms: pd.DataFrame, paired: pd.DataFrame, status: pd.DataF
         "against the number of its points moved into training, for the moved points alone (control), the other "
         "basins plus the moved points (mixed), the same with the moved points weighted up (weighted) or flagged by "
         "an input (indicator); mean over repeats, band min-max. Dotted: the model with no local points, on the same "
-        "test points; dashed: the local model, when a run has it. Lower row: each arm minus control on the same "
+        "test points. " + local_text + " Lower row: each arm minus control on the same "
         "test points, mean over repeats, with a 95 % interval from resampling 10 km blocks of the test points of "
         "every repeat. " + rule + (" " + "; ".join(parts) + "." if parts else "")
     )

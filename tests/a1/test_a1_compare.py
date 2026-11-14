@@ -281,6 +281,14 @@ def test_the_main_runs_transfer_losses_classify_the_basins(mixed_comparison):
     assert "transfer fails" in caption and "Holm" in caption
 
 
+def test_the_caption_says_what_the_local_line_is_and_where_it_comes_from(mixed_comparison, runs, tmp_path):
+    caption = mixed_comparison.captions["figC1_mixed_arms"]
+    assert "local model of the whole basin" in caption
+    assert "same remaining test points" in caption and "(from a1_xgb)" in caption
+    alone = compare_runs([runs["arms"]], tmp_path, n_boot=N_BOOT, tracking=False)
+    assert "no dashed line" in alone.captions["figC1_mixed_arms"]
+
+
 def test_without_the_main_run_the_titles_give_the_basin_only(runs, tmp_path):
     result = compare_runs([runs["arms"]], tmp_path, n_boot=N_BOOT, tracking=False)
     assert result.tables["transfer_status"].empty
