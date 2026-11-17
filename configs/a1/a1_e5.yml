@@ -1,0 +1,123 @@
+# Paper A1, E5: what each covariate group adds, which time-series summary to use, and a hook for new
+# covariates. Global only (stage 2 on the graphics card, the E1 grid), no stage 1, on E1's designs
+# (random, 10 km block folds, the five held-out basins) and seeds. Same data, covariates and plans
+# as configs/a1/a1_xgb.yml; writes to results/a1_e5. See docs/a1.md, "E5".
+#
+# Run with:
+#   python experiments/a1/make_plans.py  --config configs/a1/a1_e5.yml --kinds random,spatial_kfold,logo
+#   python experiments/a1/check_plans.py results/a1_xgb/plans results/a1_e5/plans   # the same plans as E1
+#   python experiments/a1/run_e5.py      --config configs/a1/a1_e5.yml --part A --workers 2
+#   python experiments/a1/run_e5.py      --config configs/a1/a1_e5.yml --part B --workers 2
+#   python experiments/a1/evaluate_e5.py --config configs/a1/a1_e5.yml
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+# Global only: the question is about inputs. No stage 1 (no model reads its predictions).
+stage1:
+  estimator: XGBoost
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  models: [global]
+inner_cv_folds: 5
+seeds: [42, 7, 2026]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+# The sampling date, from the lab table (one date per point): R3 keeps that calendar year only.
+sample_year:
+  column: date
+  file: Morocco_soil_analysis_filtered_uuid_roadsafe_6ksample_validated.csv
+
+# --- split plans (as in E1) ---------------------------------------------------------------------
+plans:
+  random:
+    test_size: 0.15
+    val_size: 0
+  spatial_kfold:
+    method: grid
+    n_clusters: 50
+    cell_size_m: 10000
+    cell_sizes_m: [5000, 10000, 25000, 50000]
+    n_folds: 5
+    val_size: 0
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou, Tensift, Loukkous, Bouregreg]
+    validation_region: false
+
+# --- E5 -----------------------------------------------------------------------------------------
+e5:
+  # The monthly composites (2017-01 to 2025-12), under data.root: the file the static percentiles
+  # were computed from (reproduced exactly; see docs/a1.md).
+  timeseries_file: Morocco_Soil_Predictors_2017_2025_TS_with_indices_V_310826.csv
+  timeseries_id_column: uuid
+  timeseries_time_column: observation_date
+  # Part B. R0 (the static percentiles) is the reference, fitted as `all` in Part A.
+  representations: [R1, R2, R3, R4, R6]
+  # R5 (PCA of the monthly B11/B12 medians, fitted on each plan's training points): off.
+  r5_pca:
+    enabled: false
+    n_components: 5
+  # R6: a bare-month filter on monthly composites (a weaker version of the scene-level rule of
+  # Dvorakova et al. 2023): NDVI and NBR2 from the composite's own bands.
+  bare_soil:
+    ndvi_max: 0.25
+    nbr2_max: 0.05
+    min_months: 3
+  quarter_min_readings: 2
+  harmonic_min_readings: 12
+  # Part A: every variant (null), or a list of ids.
+  variants: null
+  # Part C: a CSV keyed by the point id (embeddings, an NBR2 composite, ...); null until there is one.
+  extra_covariates:
+    - path: null
+      group: embeddings
+      id_column: uuid
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_e5
+mlflow_experiment: Paper_A1

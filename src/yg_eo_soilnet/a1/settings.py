@@ -492,6 +492,9 @@ class A1Settings:
     preflight: PreflightSettings = field(default_factory=PreflightSettings)
     plans: PlanSettings = field(default_factory=PlanSettings)
     uncertainty: UncertaintySettings = field(default_factory=UncertaintySettings)
+    #: The E5 block (input variants, time-series representations, external covariates), as written;
+    #: read and checked by :func:`yg_eo_soilnet.a1.e5.e5_settings`. Empty for every other experiment.
+    e5: Mapping = field(default_factory=dict)
     source_path: Optional[str] = None
     fit_seed: Optional[int] = None
     device: Optional[str] = None
@@ -689,6 +692,7 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         "plans",
         "exclude_inputs",
         "uncertainty",
+        "e5",
     }
     _refuse_unknown(raw, known, "the A1 settings")
     main_config = raw.get("main_config")
@@ -732,6 +736,10 @@ def settings_from_mapping(raw: Mapping[str, Any], *, base_dir: str = ".", source
         kwargs["seeds"] = tuple(int(seed) for seed in _strings(raw["seeds"], "seeds"))
     if "exclude_inputs" in raw:
         kwargs["exclude_inputs"] = _strings(raw["exclude_inputs"] or (), "exclude_inputs")
+    if raw.get("e5") is not None:
+        if not isinstance(raw["e5"], Mapping):
+            raise ValueError(f"e5 must be a mapping (see yg_eo_soilnet.a1.e5); got {raw['e5']!r}")
+        kwargs["e5"] = dict(raw["e5"])
     settings = A1Settings(**kwargs)
     _warn_about_validation(settings)
     return settings

@@ -20,6 +20,8 @@ SCRIPTS = (
     "basin_relations.py",
     "basin_cells.py",
     "bias_correction.py",
+    "run_e5.py",
+    "evaluate_e5.py",
 )
 
 

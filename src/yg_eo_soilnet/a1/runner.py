@@ -91,6 +91,8 @@ from yg_eo_soilnet.a1.stage2 import (
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 from yg_eo_soilnet.metrics import regression_metrics
 
+#: The folder of a run with input variants (E5) where each variant's column list is written.
+VARIANTS_DIR = "variants"
 #: The columns of every predictions file, in order.
 PREDICTION_COLUMNS = (
     "plan_id",
@@ -186,6 +188,10 @@ def run_plans(
     device: Optional[str] = None,
     log_file: Optional[Path] = None,
     logger: Optional[logging.Logger] = None,
+    table_hook=None,
+    variants=None,
+    parent_prefix: str = "A1",
+    tags: Optional[dict] = None,
 ) -> RunResult:
     """Run every plan of the index (or of the kinds asked for) for every seed, skipping what is already done.
 
@@ -231,6 +237,18 @@ def run_plans(
         Where the progress lines go: one when each plan starts and ends (with an estimate of the
         time left), one for stage 1 and one for each model and covariate group. With several
         workers, one line per finished plan and seed.
+    table_hook : callable, optional
+        ``table -> table``: adds input columns (E5's coordinates, time-series representations and
+        external covariates) after the covariate groups are resolved, so no group claims them.
+    variants : callable, optional
+        ``(table, resolved groups) -> {id: Variant}``: fit Global once per variant - a named list
+        of input columns (:class:`Variant`) - instead of the usual models. Each variant's columns
+        are written to ``variants/<id>.txt`` in the run folder and their hash kept in the manifest,
+        which refuses a later run where a variant of the same id has other columns.
+    parent_prefix : str, default "A1"
+        The name of a new MLflow parent run: ``<prefix>_<run name>_<time stamp>``.
+    tags : dict, optional
+        Added to every MLflow sub-run (E5: ``experiment``).
 
     Returns
     -------
@@ -324,13 +342,28 @@ def run_plans(
 
     table = build_table(settings, config, logger)
     resolved = a1.resolve_groups(table, logger=logger)
+    if table_hook is not None:
+        table = table_hook(table)
+    chosen_variants = variants(table, resolved) if variants is not None else {}
+    if chosen_variants:
+        _check_variants(manifest, chosen_variants, run_dir, restart=restart, logger=logger)
+        _write_json(run_dir / MANIFEST_FILE, manifest)
     result = RunResult(run_dir=run_dir)
     if groups and GLOBAL_AUX not in settings.som_models:
         result.notes.append(f"--groups fits {GLOBAL_AUX} and local per group; {GLOBAL_AUX} is not in stage2.models.")
 
     parent = (
         _start_parent(
-            a1, config, run_name, kinds, groups, dev_mode, manifest=manifest, run_dir=run_dir, devices=devices
+            a1,
+            config,
+            run_name,
+            kinds,
+            groups,
+            dev_mode,
+            manifest=manifest,
+            run_dir=run_dir,
+            devices=devices,
+            prefix=parent_prefix,
         )
         if tracking
         else None
@@ -344,7 +377,14 @@ def run_plans(
         f"in {run_dir}"
     )
     shared = _Shared(
-        a1=a1, plans_path=plans_path, run_dir=run_dir, groups=groups, devices=devices, table=table, resolved=resolved
+        a1=a1,
+        plans_path=plans_path,
+        run_dir=run_dir,
+        groups=groups,
+        devices=devices,
+        table=table,
+        resolved=resolved,
+        variants=chosen_variants,
     )
     started_run = time.monotonic()
     durations: list[float] = []
@@ -369,7 +409,15 @@ def run_plans(
         manifest["plans"][outcome.plan_id] = _file_hash(plans_path / f"{outcome.plan_id}.parquet")
         _write_json(run_dir / MANIFEST_FILE, manifest)
         if tracking and outcome.did_work:
-            _log_plan(row, outcome.seed, run_dir, devices, first=outcome.seed == settings.seed)
+            _log_plan(
+                row,
+                outcome.seed,
+                run_dir,
+                devices,
+                first=outcome.seed == settings.seed,
+                by_variant=bool(chosen_variants),
+                tags=tags,
+            )
 
     try:
         if workers == 1:
@@ -480,6 +528,7 @@ class _Shared:
     devices: dict
     table: object
     resolved: object
+    variants: dict = field(default_factory=dict)
     config: object = None
 
     def load(self):
@@ -617,13 +666,16 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     with_aux = GLOBAL_AUX in models
 
     jobs = [(model, COMBINED_GROUP) for model in models]
-    if row.kind == LOGO and with_aux:
+    if shared.variants:
+        # E5: Global once per input variant, and nothing else.
+        jobs = [(GLOBAL, name) for name in shared.variants]
+    elif row.kind == LOGO and with_aux:
         # The reference of the transfer loss, on every covariate: always, not only with --groups.
         jobs.append((LOCAL, COMBINED_GROUP))
-    if row.kind == LOGO and GLOBAL in models:
+    if row.kind == LOGO and GLOBAL in models and not shared.variants:
         # Global's own reference: the same inputs as Global (no predicted CaCO3/CEC), fitted in the basin.
         jobs.append((LOCAL_GLOBAL, COMBINED_GROUP))
-    if shared.groups and with_aux:
+    if shared.groups and with_aux and not shared.variants:
         jobs += [(GLOBAL_AUX, name) for name in resolved.groups]
         if row.kind == LOGO:
             jobs += [(LOCAL, name) for name in resolved.groups]
@@ -634,7 +686,9 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
             logger.info(f"  {model} / {group}: already done, {_rmse_note(out / _output_name(model, group))}")
     dissimilarity_path = dissimilarity_file(run_dir, row, settings)
     # From the first seed only: how far a region lies from its training points does not depend on the seed.
-    needs_dissimilarity = first and dissimilarity_path is not None and not dissimilarity_path.exists()
+    needs_dissimilarity = (
+        first and dissimilarity_path is not None and not dissimilarity_path.exists() and not shared.variants
+    )
     if first and dissimilarity_path is not None and not needs_dissimilarity:
         outcome.skipped.append(str(dissimilarity_path))
     if not todo and not needs_dissimilarity:
@@ -669,7 +723,15 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
 
     for model, group in todo:
         started = time.monotonic()
-        if model in (LOCAL, LOCAL_GLOBAL):
+        if model == GLOBAL and group in shared.variants:
+            variant = shared.variants[group]
+            columns = list(variant.columns)
+            if variant.pca is not None:
+                extra = variant.pca.transform(context, table)
+                context.X = pd.concat([context.X.drop(columns=list(extra.columns), errors="ignore"), extra], axis=1)
+                columns += list(extra.columns)
+            result = run_group(context, columns)
+        elif model in (LOCAL, LOCAL_GLOBAL):
             if model == LOCAL_GLOBAL:
                 columns = list(global_columns)
             else:
@@ -1026,6 +1088,48 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, 
     return manifest
 
 
+@dataclass(frozen=True)
+class Variant:
+    """One E5 input variant: Global fitted on exactly these columns.
+
+    Attributes
+    ----------
+    columns : tuple of str
+        The input columns, in order.
+    pca : object, optional
+        A plan-dependent extra (E5's R5): ``transform(context, table)`` returns columns fitted on
+        the plan's training points alone, added to the inputs.
+    """
+
+    columns: tuple
+    pca: object = None
+
+    @property
+    def fingerprint(self) -> str:
+        """The SHA-256 of the column list (and the extra's description), as the manifest keeps it."""
+        text = "\n".join(self.columns) + ("\n#pca " + repr(self.pca) if self.pca is not None else "")
+        return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _check_variants(manifest: dict, variants: dict, run_dir: Path, *, restart: bool, logger) -> None:
+    """Record each variant's columns (``variants/<id>.txt``, the manifest); refuse a variant whose columns changed."""
+    recorded = manifest.setdefault("variants", {})
+    changed = [name for name, variant in variants.items() if name in recorded and recorded[name] != variant.fingerprint]
+    if changed and not restart:
+        raise RunMismatch(
+            f"Variant(s) {changed} of {run_dir} were fitted with other input columns (variants/<id>.txt). Their "
+            "files would mix two column lists. Use another run name, or restart to clear the folder."
+        )
+    folder = run_dir / VARIANTS_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    for name, variant in variants.items():
+        (folder / f"{name}.txt").write_text("\n".join(variant.columns) + "\n", encoding="utf-8")
+        recorded[name] = variant.fingerprint
+    logger.info(
+        f"{len(variants)} input variant(s): {', '.join(f'{n} ({len(v.columns)})' for n, v in variants.items())}"
+    )
+
+
 def _clear_run_folder(run_dir: Path) -> None:
     """Delete everything in the run folder but its log, which the running process is writing to."""
     for entry in run_dir.iterdir():
@@ -1107,6 +1211,7 @@ def _start_parent(
     manifest: Optional[dict] = None,
     run_dir: Optional[Path] = None,
     devices: Optional[dict] = None,
+    prefix: str = "A1",
 ):
     """Open the run folder's parent MLflow run, with its provenance - the same one on every resume.
 
@@ -1131,7 +1236,7 @@ def _start_parent(
         run = mlflow.start_run(run_id=existing)
     else:
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        run = mlflow.start_run(run_name=f"A1_{run_name}_{stamp}")
+        run = mlflow.start_run(run_name=f"{prefix}_{run_name}_{stamp}")
     if manifest is not None and run_dir is not None:
         record_parent(run_dir, manifest, run)
     roles = {
@@ -1168,14 +1273,38 @@ def _start_parent(
     return run
 
 
-def _log_plan(row, seed: int, run_dir: Path, devices: dict, *, first: bool = True) -> None:
-    """One sub-run per plan and seed, with every model's scores on the test points (and validation, if any)."""
+def _log_plan(
+    row,
+    seed: int,
+    run_dir: Path,
+    devices: dict,
+    *,
+    first: bool = True,
+    by_variant: bool = False,
+    tags: Optional[dict] = None,
+) -> None:
+    """One sub-run per plan and seed, with every model's scores on the test points (and validation, if any).
+
+    With ``by_variant`` (E5), one sub-run per variant, plan and seed instead, tagged ``variant``.
+    """
     import mlflow
 
     from yg_eo_soilnet.tracking import start_child_run
 
     held_out = "" if pd.isna(row.held_out) else str(row.held_out)
-    tags = {"plan_id": row.plan_id, "kind": row.kind, "held_out": held_out, "seed": str(seed)}
+    base = {"plan_id": row.plan_id, "kind": row.kind, "held_out": held_out, "seed": str(seed), **(tags or {})}
+    if by_variant:
+        for path in sorted(prediction_dir(run_dir, row.plan_id, seed).glob("*.parquet")):
+            frame = pd.read_parquet(path)
+            variant = str(frame["covariate_group"].iloc[0])
+            with start_child_run(f"{row.plan_id}__seed_{seed}__{variant}", tags={**base, "variant": variant}):
+                mlflow.log_params({"seed": int(seed), "variant": variant})
+                metrics = {}
+                for (split,), part in frame.groupby(["split"]):
+                    metrics.update(regression_metrics(part["observed"], part["predicted"], split=split))
+                mlflow.log_metrics(metrics)
+        return
+    tags = base
     with start_child_run(f"{row.plan_id}__seed_{seed}", tags=tags):
         mlflow.log_params({"seed": int(seed), **{f"device_{stage}": name for stage, name in devices.items()}})
         metrics = {}
