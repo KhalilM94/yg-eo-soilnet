@@ -18,6 +18,8 @@ SCRIPTS = (
     "make_figures.py",
     "compare.py",
     "basin_relations.py",
+    "basin_cells.py",
+    "bias_correction.py",
 )
 
 

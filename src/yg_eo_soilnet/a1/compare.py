@@ -177,8 +177,12 @@ class RunFolder:
         return float(self.index.loc[plan_id, "n_train"]) if plan_id in self.index.index else np.nan
 
 
-def read_run(run_dir, *, model: str = GLOBAL, kinds: Optional[Sequence[str]] = None) -> RunFolder:
+def read_run(
+    run_dir, *, model: str = GLOBAL, kinds: Optional[Sequence[str]] = None, local: Optional[str] = None
+) -> RunFolder:
     """Read one run folder: its manifest, plan index and the test predictions compared.
+
+    The predictions of ``model`` and of its local model (:func:`local_of`), and of ``local`` too when given.
 
     Raises
     ------
@@ -205,7 +209,7 @@ def read_run(run_dir, *, model: str = GLOBAL, kinds: Optional[Sequence[str]] = N
         (frame["seed"] == first)
         & (frame["split"] == TEST)
         & (frame["covariate_group"] == COMBINED_GROUP)
-        & frame["model"].isin([model, local_of(model)])
+        & frame["model"].isin([model, local_of(model), *([local] if local else [])])
     )
     if kinds:
         keep &= frame["kind"].isin(list(kinds))
@@ -565,12 +569,19 @@ def logo_matched(unmatched: pd.DataFrame, draws: pd.DataFrame, *, with_devices: 
 
 
 def transfer_status(
-    run: Optional[RunFolder], *, model: str = GLOBAL, block_km: float = 10.0, n: int = 1000, seed: int = 42
+    run: Optional[RunFolder],
+    *,
+    model: str = GLOBAL,
+    block_km: float = 10.0,
+    n: int = 1000,
+    seed: int = 42,
+    local: Optional[str] = None,
 ) -> pd.DataFrame:
     """``transfer_status.csv``: per basin, transferred minus local RMSE on every input, and whether transfer fails.
 
     The plain ``logo`` plans of ``run``: ``model`` (transferred, trained on the other basins)
-    against the local model on the same inputs (:func:`local_of`; the basin's own points, out of fold), paired on the basin's points,
+    against the local model on the same inputs (:func:`local_of`, or ``local`` when given; the basin's own
+    points, out of fold), paired on the basin's points,
     with a block-bootstrap interval and p-value; Holm across the basins. A basin's transfer fails
     when the difference is above 0, its interval lies above 0 and ``p_holm`` < 0.05.
     """
@@ -590,7 +601,7 @@ def transfer_status(
     if run is None:
         return pd.DataFrame(columns=columns)
     frame = run.predictions[(run.predictions["kind"] == LOGO) & ~is_matched(run.predictions["plan_id"])]
-    local = local_of(model)
+    local = local or local_of(model)
     if frame.empty or local not in set(frame["model"]) or model not in set(frame["model"]):
         logger.warning(f"{run.name} has no plain logo plans with both the {model} and the {local} model.")
         return pd.DataFrame(columns=columns)
