@@ -17,7 +17,7 @@ import pandas as pd
 from matplotlib.transforms import Bbox
 
 from yg_eo_soilnet import plot_style as ps
-from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
+from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL, LOCAL_GLOBAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
 
 MM = 1 / 25.4
 #: A one-column figure, inches.
@@ -32,9 +32,16 @@ SOM_UNIT = "g kg⁻¹"
 #: The three models of the main-text figures, in legend order.
 MAIN_MODELS = (GLOBAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED)
 #: Every model, in legend order: the main ones, then the supplementary and within-basin ones.
-MODEL_ORDER = (*MAIN_MODELS, GLOBAL_AUX, LOCAL)
+MODEL_ORDER = (*MAIN_MODELS, GLOBAL_AUX, LOCAL_GLOBAL, LOCAL)
 #: One marker per model, so no model is told apart by colour alone.
-MODEL_MARKERS = {GLOBAL: "o", PER_CLASS_MEASURED: "s", PER_CLASS_PREDICTED: "^", GLOBAL_AUX: "D", LOCAL: "v"}
+MODEL_MARKERS = {
+    GLOBAL: "o",
+    PER_CLASS_MEASURED: "s",
+    PER_CLASS_PREDICTED: "^",
+    GLOBAL_AUX: "D",
+    LOCAL_GLOBAL: "v",
+    LOCAL: "<",
+}
 
 #: Font sizes at print size: nothing below :data:`MIN_FONT`.
 RC = {
@@ -98,16 +105,33 @@ def better_label(name: str, direction: Optional[str], unit: Optional[str] = None
     return f"{text}, {direction} is better" if direction else text
 
 
-def direction_axis(axis, *, above: str, below: str, zero: str, labels: bool = True) -> None:
+def direction_axis(axis, *, above: str, below: str, zero: str, labels: bool = True, inside: bool = False) -> None:
     """A zero line, and words for zero and either side of it in the right margin, level with zero.
 
     The words never sit on a whisker, a point or the line itself. With ``labels=False`` (every panel
-    of a row but the last) only the line is drawn.
+    of a row but the last) only the line is drawn. With ``inside=True`` the two side words go in the
+    panel's upper and lower left corners instead, so they take no room beside the panel (a panel
+    with another one to its right).
     """
     from matplotlib.transforms import blended_transform_factory, offset_copy
 
     axis.axhline(0, color=ps.INK_2, lw=0.8, zorder=1)
     if not labels:
+        return
+    if inside:
+        for text, y, va in ((f"↑ {above}", 0.98, "top"), (f"↓ {below}", 0.02, "bottom")):
+            axis.text(
+                0.02,
+                y,
+                text,
+                transform=axis.transAxes,
+                ha="left",
+                va=va,
+                fontsize=7,
+                color=ps.INK_2,
+                zorder=5,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.8, "pad": 1.0},
+            )
         return
     margin = blended_transform_factory(axis.transAxes, axis.transData)
     for text, dy, va in ((f"↑ {above}", 7, "bottom"), (zero, 0, "center"), (f"↓ {below}", -7, "top")):
@@ -125,17 +149,18 @@ def direction_axis(axis, *, above: str, below: str, zero: str, labels: bool = Tr
             )
 
 
-def bias_axis(axis, *, orientation: str = "y", unit: str = SOM_UNIT, labels: bool = True) -> None:
+def bias_axis(axis, *, orientation: str = "y", unit: str = SOM_UNIT, labels: bool = True, inside: bool = False) -> None:
     """Mark zero as "no bias" and name the two sides of a bias axis (predicted minus measured).
 
-    The words sit in the right margin, level with zero (:func:`direction_axis`).
+    The words sit in the right margin, level with zero, or in the panel's left corners with
+    ``inside=True`` (:func:`direction_axis`).
     """
     if orientation != "y":
         axis.axvline(0, color=ps.INK_2, lw=0.8, zorder=1)
         axis.set_xlabel(f"Bias ({unit}), predicted − measured")
         return
     axis.set_ylabel(f"Bias ({unit}), predicted − measured")
-    direction_axis(axis, above="over-predicts", below="under-predicts", zero="no bias", labels=labels)
+    direction_axis(axis, above="over-predicts", below="under-predicts", zero="no bias", labels=labels, inside=inside)
 
 
 def caption_line(figure, text: str) -> None:

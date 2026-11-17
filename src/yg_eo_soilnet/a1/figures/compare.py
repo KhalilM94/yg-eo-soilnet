@@ -30,13 +30,13 @@ from yg_eo_soilnet.a1.figures.style import (
     styled,
 )
 from yg_eo_soilnet.a1.plans import CONTROL, MIXED, MIXED_INDICATOR, MIXED_WEIGHTED
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL_GLOBAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
 
 #: The most basins figure C1 shows, one column each.
 MAX_BASINS = 5
 #: Colour and marker of each mixed kind: control as the local model, mixed as the global one.
 KIND_STYLE = {
-    CONTROL: (model_color(LOCAL), "v"),
+    CONTROL: (model_color(LOCAL_GLOBAL), "v"),
     MIXED: (model_color(GLOBAL), "D"),
     MIXED_WEIGHTED: (model_color(PER_CLASS_MEASURED), "s"),
     MIXED_INDICATOR: (model_color(PER_CLASS_PREDICTED), "^"),
@@ -125,16 +125,18 @@ def figure_mixed_arms(arms: pd.DataFrame, paired: pd.DataFrame, status: pd.DataF
             parts.append(ps.minus(f"{basin}: " + "; ".join(texts)))
     sources = sorted({run for run in shown["local_run"].dropna().astype(str) if run})
     local_text = (
-        "Dashed: the local model of the whole basin - fitted on the basin's own points only, each point predicted "
+        "Dashed: the local model of the whole basin on the same inputs as the curves' model (for Global: every "
+        "covariate, no predicted CaCO₃/CEC) - fitted on the basin's own points only, each point predicted "
         "out of fold by a model that never saw its 10 km block - scored on the same remaining test points as the "
         "curves, not on the whole basin; it does not depend on the share moved, so it moves only with the test "
         f"points (from {', '.join(sources)})."
         if sources
-        else "No compared run has the local model (it is fitted with global_aux), so there is no dashed line."
+        else "No compared run has the local model on these inputs, so there is no dashed line."
     )
     rule = (
         "A basin's title says 'transfer fails' when, in the main run (results/a1_xgb, plain leave-one-basin-out, "
-        f"{pretty_name(model)} model, every input), the transferred minus the local RMSE is above 0 with its 95 % "
+        f"{pretty_name(model)} model, every input, against the local model on the same inputs), the transferred "
+        "minus the local RMSE is above 0 with its 95 % "
         "block-bootstrap interval above 0 and a Holm-corrected p-value (across basins) below 0.05."
         if status is not None and not status.empty
         else "The main run (results/a1_xgb) is not among the compared runs, so the titles give the basin only."
@@ -178,7 +180,7 @@ def draw_mixed_arms(summary: pd.DataFrame, paired: pd.DataFrame, status: pd.Data
             upper.fill_between(line["moved"], line["low"], line["high"], color=color, alpha=0.15, lw=0)
             upper.plot(line["moved"], line["mean"], color=color, marker=marker, ms=3.2, lw=1.2, mec="white", mew=0.4)
             drawn.add(kind)
-        for kind, style, color in (("logo", ":", ps.INK_2), ("local", "--", model_color(LOCAL))):
+        for kind, style, color in (("logo", ":", ps.INK_2), ("local", "--", model_color(LOCAL_GLOBAL))):
             line = part[part["kind"] == kind].sort_values("moved")
             if not line.empty:
                 upper.plot(line["moved"], line["mean"], color=color, ls=style, lw=1.0)
@@ -220,7 +222,16 @@ def draw_mixed_arms(summary: pd.DataFrame, paired: pd.DataFrame, status: pd.Data
     if "logo" in drawn:
         handles.append(Line2D([], [], color=ps.INK_2, ls=":", lw=1.0, label="No local points"))
     if "local" in drawn:
-        handles.append(Line2D([], [], color=model_color(LOCAL), ls="--", lw=1.0, label=pretty_name(LOCAL)))
+        handles.append(
+            Line2D(
+                [],
+                [],
+                color=model_color(LOCAL_GLOBAL),
+                ls="--",
+                lw=1.0,
+                label=pretty_name(LOCAL_GLOBAL) + ", same inputs",
+            )
+        )
     figure.legend(handles=handles, loc="outside upper center", ncol=min(len(handles), 6), frameon=False)
     caption_line(
         figure, f"{pretty_name(model)} model. Bands: min-max over repeats. Bars: 95 % block-bootstrap intervals."

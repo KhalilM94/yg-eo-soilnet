@@ -36,7 +36,7 @@ from yg_eo_soilnet.a1.figures.style import (
 )
 from yg_eo_soilnet.a1.plans import CONTROL, DIVIDED_KINDS, LOGO, MIXED, MIXED_INDICATOR, MIXED_WEIGHTED, RANDOM
 from yg_eo_soilnet.a1.plans import SPATIAL_KFOLD, is_matched
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL_GLOBAL, PER_CLASS_MEASURED, PER_CLASS_PREDICTED
 from yg_eo_soilnet.datamodules.splitting import TEST
 
 #: The uncertainty figures, drawn only for a run with ``global_q``.
@@ -48,7 +48,7 @@ OUTSIDE_COLOR = "#b2182b"  # red; also told apart by its marker
 BAND_COLOR = model_color(GLOBAL)
 METHOD_MARKERS = {uq.RAW: "o", uq.CQR: "s"}
 KIND_STYLE = {
-    CONTROL: (model_color(LOCAL), "v"),
+    CONTROL: (model_color(LOCAL_GLOBAL), "v"),
     MIXED: (model_color(GLOBAL), "D"),
     MIXED_WEIGHTED: (model_color(PER_CLASS_MEASURED), "s"),
     MIXED_INDICATOR: (model_color(PER_CLASS_PREDICTED), "^"),
@@ -101,6 +101,22 @@ def _coverage(part: pd.DataFrame, level: float, method: str, n_boot: int, seed: 
 
 
 # --- U1 -----------------------------------------------------------------------------------------------
+
+#: Above this many points a U1 panel draws its points smaller and fainter, so the band shows through.
+CROWDED = 3000
+
+
+def marker_style(n: int) -> tuple[float, float]:
+    """Marker size (points²) and opacity of the inside points of a U1 panel with ``n`` points.
+
+    >>> marker_style(300), marker_style(2000), marker_style(5806)
+    ((7.0, 0.8), (3.0, 0.7), (1.2, 0.35))
+    """
+    if n > CROWDED:
+        return 1.2, 0.35
+    if n > 1000:
+        return 3.0, 0.7
+    return 7.0, 0.8
 
 
 def figure_bands(inputs: FigureInputs):
@@ -174,14 +190,23 @@ def draw_bands(data: pd.DataFrame, summary: pd.DataFrame):
     for position, name in enumerate(names):
         axis = axes[position // columns, position % columns]
         part = data[data["design"] == name]
-        size = 3 if len(part) > 1000 else 7
+        size, alpha = marker_style(len(part))
+        crowded = len(part) > CROWDED
         axis.fill_between(part["rank"], part["band_low"], part["band_high"], color=BAND_COLOR, alpha=0.2, lw=0)
-        axis.plot(part["rank"], part["predicted"], color=BAND_COLOR, lw=1.0)
         inside, outside = part[part["inside"]], part[~part["inside"]]
-        axis.scatter(inside["rank"], inside["observed"], s=size, color=INSIDE_COLOR, lw=0, alpha=0.8, zorder=3)
+        axis.scatter(inside["rank"], inside["observed"], s=size, color=INSIDE_COLOR, lw=0, alpha=alpha, zorder=3)
         axis.scatter(
-            outside["rank"], outside["observed"], s=size * 1.6, color=OUTSIDE_COLOR, marker="x", lw=0.6, zorder=4
+            outside["rank"],
+            outside["observed"],
+            s=size * (2.5 if crowded else 1.6),
+            color=OUTSIDE_COLOR,
+            marker="x",
+            lw=0.4 if crowded else 0.6,
+            alpha=0.6 if crowded else 1.0,
+            zorder=4,
         )
+        # The median over the points, so a crowded panel cannot hide it.
+        axis.plot(part["rank"], part["predicted"], color=BAND_COLOR, lw=1.0, zorder=5)
         row = summary.set_index("design").loc[name]
         # The panel letter leads the title: a separate letter would sit on its first line.
         axis.set_title(
@@ -202,7 +227,15 @@ def draw_bands(data: pd.DataFrame, summary: pd.DataFrame):
         Line2D([], [], color=OUTSIDE_COLOR, marker="x", ls="none", ms=3.5, label="Measured, outside"),
     ]
     figure.legend(handles=handles, loc="outside upper center", ncol=4, frameon=False)
-    caption_line(figure, "Same SOM limits in every panel (0.5th to 99.5th percentile of every value drawn).")
+    caption_line(
+        figure,
+        "Same SOM limits in every panel (0.5th to 99.5th percentile of every value drawn)."
+        + (
+            f" Panels of more than {CROWDED:,} points: smaller, fainter markers."
+            if (summary["n"] > CROWDED).any()
+            else ""
+        ),
+    )
     return figure
 
 
@@ -343,15 +376,64 @@ def figure_width(inputs: FigureInputs):
         if len(part) >= 3:
             rho = part[["di", "width"]].rank().corr().iloc[0, 1]
             parts.append(f"{name}: Spearman ρ(width, DI) = {rho:.2f}")
+    limits = di_limits(data)
+    beyond = int(limits["n_beyond"].sum())
     caption = (
         "Figure U3. Does the band widen where the model extrapolates? (a) Width of each test point's 80 % interval "
         "against its dissimilarity index (DI: distance to the nearest training point in the model's weighted "
         "inputs, over the mean distance between training points), orange inside the band, red outside; the DI is "
-        "computed for the random plan, the 10 km folds and each held-out basin. (b) PICP 80 % and mean width per "
+        "computed for the random plan, the 10 km folds and each held-out basin, one panel per held-out basin on the "
+        f"second row. Each panel's DI axis ends at the {DI_CLIP_PERCENTILE:g}th percentile of its points' DI "
+        f"({beyond} point(s) beyond it in all, not shown; the correlations below use every point). "
+        "(b) PICP 80 % and mean width per "
         f"measured carbonate class (classes with at least {inputs.settings.min_cell_size} test points). "
         + ("; ".join(parts) + "." if parts else "No dissimilarity file was found for these plans.")
     )
-    return attach(figure, {"figU3_width": data, "figU3_width_by_class": by_class}, ps.minus(caption))
+    return attach(
+        figure,
+        {"figU3_width": data, "figU3_width_by_class": by_class, "figU3_di_limits": limits},
+        ps.minus(caption),
+    )
+
+
+#: Panel a of U3 shows each panel's dissimilarity index up to this percentile; the rest lie beyond the axis.
+DI_CLIP_PERCENTILE = 99.0
+#: Panels per row of U3's panel a.
+WIDTH_PANELS = 5
+
+
+def width_rows(names: list) -> list[tuple[str, list[tuple[str, str]]]]:
+    """U3 panel a's rows: ``(row label, [(design, panel title), ...])``, the held-out basins on rows of their own.
+
+    >>> width_rows(["Random", "10 km blocks", "Leave one basin out: A", "Leave one basin out: B"])
+    [('', [('Random', 'Random'), ('10 km blocks', '10 km blocks')]), ('Leave one basin out', [('Leave one basin out: A', 'A'), ('Leave one basin out: B', 'B')])]
+    """
+    rows, current = [], {}
+    for name in names:
+        label, _, basin = name.rpartition(": ")
+        current.setdefault(label, []).append((name, basin or name))
+    for label, panels in current.items():
+        for start in range(0, len(panels), WIDTH_PANELS):
+            rows.append((label, panels[start : start + WIDTH_PANELS]))
+    return rows
+
+
+def short_design(name: str) -> str:
+    """A design's name under a bar: the basin alone, "10 km" for the 10 km blocks.
+
+    >>> short_design("Leave one basin out: Oum Er Rbia"), short_design("10 km blocks"), short_design("Random")
+    ('Oum Er Rbia', '10 km', 'Random')
+    """
+    return name.rpartition(": ")[2].removesuffix(" blocks")
+
+
+def di_limits(data: pd.DataFrame, percentile: float = DI_CLIP_PERCENTILE) -> pd.DataFrame:
+    """Per design: the DI axis limit (its ``percentile``) and how many points lie beyond it."""
+    rows = []
+    for name, part in data.dropna(subset=["di"]).groupby("design", sort=False):
+        limit = float(np.percentile(part["di"], percentile))
+        rows.append({"design": name, "di_limit": limit, "n_beyond": int((part["di"] > limit).sum())})
+    return pd.DataFrame(rows, columns=["design", "di_limit", "n_beyond"])
 
 
 @styled
@@ -360,23 +442,40 @@ def draw_width(data: pd.DataFrame, by_class: pd.DataFrame, *, labels: list):
     import matplotlib.pyplot as plt
 
     names = list(dict.fromkeys(data["design"]))
-    columns = min(5, len(names))
-    figure = plt.figure(figsize=(WIDTH_2COL, 4.6), layout="constrained")
-    top, bottom = figure.subfigures(2, 1, height_ratios=[1.0, 0.9])
-    axes = top.subplots(1, columns, squeeze=False, sharey=True)[0]
-    for position, name in enumerate(names[:columns]):
-        axis = axes[position]
-        part = data[data["design"] == name]
-        for inside, color, marker in ((True, INSIDE_COLOR, "o"), (False, OUTSIDE_COLOR, "x")):
-            chosen = part[part["inside"] == inside]
-            axis.scatter(
-                chosen["di"], chosen["width"], s=5, color=color, marker=marker, lw=0.5 if not inside else 0, alpha=0.7
-            )
-        axis.set_title(name, fontsize=7)
-        axis.set_xlabel("Dissimilarity index")
-        if position == 0:
-            axis.set_ylabel(f"80 % width ({SOM_UNIT})")
-        letter(axis, "a" if position == 0 else "")
+    rows = width_rows(names)
+    columns = max(len(panels) for _, panels in rows)
+    limits = di_limits(data).set_index("design")
+    figure = plt.figure(figsize=(WIDTH_2COL, 1.75 * len(rows) + 2.6), layout="constrained")
+    top, bottom = figure.subfigures(2, 1, height_ratios=[1.75 * len(rows), 2.4])
+    axes = top.subplots(len(rows), columns, squeeze=False, sharey=True)
+    for row, (label, panels) in enumerate(rows):
+        for column in range(columns):
+            axis = axes[row, column]
+            if column >= len(panels):
+                axis.set_visible(False)
+                continue
+            name, title = panels[column]
+            part = data[data["design"] == name]
+            for inside, color, marker in ((True, INSIDE_COLOR, "o"), (False, OUTSIDE_COLOR, "x")):
+                chosen = part[part["inside"] == inside]
+                axis.scatter(
+                    chosen["di"],
+                    chosen["width"],
+                    s=5,
+                    color=color,
+                    marker=marker,
+                    lw=0.5 if not inside else 0,
+                    alpha=0.7,
+                )
+            if name in limits.index:
+                low = float(part["di"].min())
+                high = float(limits.loc[name, "di_limit"])
+                axis.set_xlim(low - 0.03 * (high - low), high + 0.03 * (high - low))
+            axis.set_title(title, fontsize=7)
+            axis.set_xlabel("Dissimilarity index")  # every panel: each has its own DI range
+            if column == 0:
+                axis.set_ylabel((f"{label}\n" if label else "") + f"80 % width ({SOM_UNIT})")
+        letter(axes[row, 0], "a" if row == 0 else "")
     left, right = bottom.subplots(1, 2)
     width = 0.8 / max(1, len(labels))
     for position, label in enumerate(labels):
@@ -386,8 +485,15 @@ def draw_width(data: pd.DataFrame, by_class: pd.DataFrame, *, labels: list):
         right.bar(x, part["width_mean"], width=width, color=class_color(label))
     left.axhline(BAND_LEVEL, color=ps.INK_2, lw=0.8, ls="--")
     for axis, ylabel in ((left, "PICP 80 %"), (right, f"Mean 80 % width ({SOM_UNIT})")):
-        # A held-out basin's design is named by the basin alone under the bars; the panels above say the rest.
-        axis.set_xticks(np.arange(len(names)), [name.split(": ")[-1] for name in names], fontsize=7)
+        # Short names under the bars (the basin alone, "10 km"); the panels above say the rest.
+        axis.set_xticks(
+            np.arange(len(names)),
+            [short_design(name) for name in names],
+            fontsize=7,
+            rotation=30,
+            ha="right",
+            rotation_mode="anchor",
+        )
         axis.set_ylabel(ylabel)
     left.set_ylim(0, 1.02)
     letter(left, "b")

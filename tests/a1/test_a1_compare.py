@@ -29,6 +29,7 @@ from yg_eo_soilnet.a1.devices import DeviceMismatch
 from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED, MIXED_INDICATOR, MIXED_WEIGHTED, write_plans
 from yg_eo_soilnet.a1.runner import MANIFEST_FILE, run_plans
 from yg_eo_soilnet.a1.settings import load_settings
+from yg_eo_soilnet.a1.stage2 import LOCAL_GLOBAL
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 
 A1_CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "a1"
@@ -219,7 +220,8 @@ def test_every_kind_is_scored_on_the_shared_test_points(mixed_comparison, runs):
     assert len(arms) == 2 * 2  # two shares, two repeats
     for column in ("rmse_logo", "rmse_control", "rmse_mixed", "rmse_mixed_weighted", "rmse_mixed_indicator"):
         assert arms[column].notna().all(), column
-    assert arms["rmse_local"].notna().all() and (arms["local_run"] == "a1_xgb").all()
+    # The arms run fits Global on its logo plan, so it has the local model on Global's inputs itself.
+    assert arms["rmse_local"].notna().all() and (arms["local_run"] == "a1_arms").all()
     assert (arms["logo_run"] == "a1_arms").all()
     predictions = evaluation.load_predictions(runs["arms"])
     row = arms.iloc[0]
@@ -284,8 +286,13 @@ def test_the_main_runs_transfer_losses_classify_the_basins(mixed_comparison):
 def test_the_caption_says_what_the_local_line_is_and_where_it_comes_from(mixed_comparison, runs, tmp_path):
     caption = mixed_comparison.captions["figC1_mixed_arms"]
     assert "local model of the whole basin" in caption
-    assert "same remaining test points" in caption and "(from a1_xgb)" in caption
-    alone = compare_runs([runs["arms"]], tmp_path, n_boot=N_BOOT, tracking=False)
+    assert "same remaining test points" in caption and "(from a1_arms)" in caption
+    assert "same inputs as the curves' model" in caption
+    # A run with no local model on Global's inputs anywhere (here: the arms run with its files removed).
+    bare = _copy_run(runs["arms"], "a1_arms_bare")
+    for path in bare.glob(f"predictions/*/seed_*/{LOCAL_GLOBAL}__*.parquet"):
+        path.unlink()
+    alone = compare_runs([bare], tmp_path, n_boot=N_BOOT, tracking=False)
     assert "no dashed line" in alone.captions["figC1_mixed_arms"]
 
 

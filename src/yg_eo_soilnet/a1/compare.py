@@ -67,7 +67,7 @@ from yg_eo_soilnet.a1.plans import (
     is_matched,
     matched_training_size,
 )
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_OF
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 
 logger = logging.getLogger(__name__)
@@ -205,7 +205,7 @@ def read_run(run_dir, *, model: str = GLOBAL, kinds: Optional[Sequence[str]] = N
         (frame["seed"] == first)
         & (frame["split"] == TEST)
         & (frame["covariate_group"] == COMBINED_GROUP)
-        & frame["model"].isin([model, LOCAL])
+        & frame["model"].isin([model, local_of(model)])
     )
     if kinds:
         keep &= frame["kind"].isin(list(kinds))
@@ -293,6 +293,11 @@ def check_mixed_pairing(runs: Sequence[RunFolder]) -> None:
                     )
 
 
+def local_of(model: str) -> str:
+    """The local model with ``model``'s inputs: ``local_global`` for Global, ``local`` otherwise."""
+    return LOCAL_OF.get(model, LOCAL)
+
+
 def _reference(runs: Sequence[RunFolder], basin: str, model: str, prefer: RunFolder):
     """The run (``prefer`` first) whose plain logo plan of ``basin`` has predictions of ``model``."""
     for run in [prefer, *[other for other in runs if other is not prefer]]:
@@ -330,7 +335,7 @@ def mixed_arms(runs: Sequence[RunFolder], *, model: str = GLOBAL, with_devices: 
                 row[f"rmse_{kind}"] = (
                     _rmse(predictions[predictions["plan_id"] == plan.iloc[0]]) if len(plan) else np.nan
                 )
-            for name, wanted in (("logo", model), ("local", LOCAL)):
+            for name, wanted in (("logo", model), ("local", local_of(model))):
                 source, reference = _reference(runs, basin, wanted, run)
                 row[f"rmse_{name}"] = (
                     _rmse(reference[reference["point_id"].isin(points)]) if reference is not None else np.nan
@@ -565,7 +570,7 @@ def transfer_status(
     """``transfer_status.csv``: per basin, transferred minus local RMSE on every input, and whether transfer fails.
 
     The plain ``logo`` plans of ``run``: ``model`` (transferred, trained on the other basins)
-    against the local model (the basin's own points, out of fold), paired on the basin's points,
+    against the local model on the same inputs (:func:`local_of`; the basin's own points, out of fold), paired on the basin's points,
     with a block-bootstrap interval and p-value; Holm across the basins. A basin's transfer fails
     when the difference is above 0, its interval lies above 0 and ``p_holm`` < 0.05.
     """
@@ -585,11 +590,12 @@ def transfer_status(
     if run is None:
         return pd.DataFrame(columns=columns)
     frame = run.predictions[(run.predictions["kind"] == LOGO) & ~is_matched(run.predictions["plan_id"])]
-    if frame.empty or LOCAL not in set(frame["model"]) or model not in set(frame["model"]):
-        logger.warning(f"{run.name} has no plain logo plans with both the {model} and the local model.")
+    local = local_of(model)
+    if frame.empty or local not in set(frame["model"]) or model not in set(frame["model"]):
+        logger.warning(f"{run.name} has no plain logo plans with both the {model} and the {local} model.")
         return pd.DataFrame(columns=columns)
     result = evaluation.block_bootstrap(
-        frame, ["held_out", "model"], block_km=block_km, n=n, seed=seed, compare=[(model, LOCAL)], compare_on="model"
+        frame, ["held_out", "model"], block_km=block_km, n=n, seed=seed, compare=[(model, local)], compare_on="model"
     )
     found = result.differences[result.differences["metric"] == "rmse"].copy()
     found["p_holm"] = evaluation.holm(found["p_value"].to_numpy())
@@ -601,7 +607,7 @@ def transfer_status(
                 "run": run.name,
                 "basin": row.held_out,
                 "rmse_transferred": _rmse(part[part["model"] == model]),
-                "rmse_local": _rmse(part[part["model"] == LOCAL]),
+                "rmse_local": _rmse(part[part["model"] == local]),
                 "difference": row.estimate,
                 "low": row.low,
                 "high": row.high,

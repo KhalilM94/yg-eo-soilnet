@@ -9,6 +9,9 @@ import pandas as pd
 import pytest
 
 from yg_eo_soilnet.a1.evaluation import (
+    INPUTS_EVERY,
+    INPUTS_WITH_PREDICTED,
+    INTERVAL_SCORES,
     SCORES,
     _draws,
     _scores,
@@ -154,7 +157,7 @@ def test_identical_models_differ_by_exactly_zero_with_a_p_value_of_one():
     for row in result.differences.dropna(subset=["low"]).itertuples():
         assert row.low <= 0 <= row.high
         assert row.low == 0 and row.high == 0 and row.p_value == 1
-    assert set(result.differences.dropna(subset=["low"])["metric"]) == set(SCORES)
+    assert set(result.differences.dropna(subset=["low"])["metric"]) == set(INTERVAL_SCORES)
 
 
 def test_a_perfect_model_has_an_rmse_interval_of_zero():
@@ -319,7 +322,9 @@ def test_a_logo_drop_is_the_known_gap_between_transferred_and_local():
             _rows(points, points["observed"], model=GLOBAL_AUX, plan_id="logo_A", kind=LOGO, held_out="A", split=VAL),
         ]
     )
-    table = transfer_table(frame).set_index(["region", "covariate_group"])
+    # The global_aux / local pair (Global has no local_global here, so its own rows are left aside).
+    table = transfer_table(frame)
+    table = table[table["inputs"] != INPUTS_EVERY].set_index(["region", "covariate_group"])
     assert len(table) == 3
     a = table.loc[("A", "combined")]
     assert a["rmse_local"] == pytest.approx(1.0) and a["rmse_transferred"] == pytest.approx(4.0)
@@ -333,7 +338,7 @@ def test_a_logo_drop_is_the_known_gap_between_transferred_and_local():
 def test_a_region_without_a_local_score_keeps_its_row_with_nan_locals():
     points = _points(30)
     table = transfer_table(pd.concat(_logo_rows(points, "A", local_sd=None, transferred_sd=3.0)))
-    row = table.iloc[0]
+    row = table[table["inputs"] == INPUTS_WITH_PREDICTED].iloc[0]
     assert not row["has_local"] and np.isnan(row["rmse_local"]) and np.isnan(row["rmse_drop"])
     assert row["rmse_transferred"] == pytest.approx(3.0) and row["n"] == 30
 

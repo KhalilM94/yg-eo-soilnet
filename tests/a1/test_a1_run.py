@@ -34,6 +34,7 @@ from yg_eo_soilnet.a1.stage2 import (
     GLOBAL,
     GLOBAL_AUX,
     LOCAL,
+    LOCAL_GLOBAL,
     MODELS,
     PER_CLASS_MEASURED,
     PER_CLASS_PREDICTED,
@@ -168,15 +169,42 @@ def test_logo_plans_get_local_scores_inside_the_held_out_region_only(demo_run):
     assert LOCAL not in set(_predictions(demo_run, "random")["model"])
 
 
-def test_the_local_model_on_every_covariate_is_fitted_without_groups(a1_settings_in, tmp_path, mlflow_store):
+def test_the_local_model_on_every_covariate_is_fitted_without_groups(
+    a1_settings_in, tmp_path, mlflow_store, monkeypatch
+):
+    from yg_eo_soilnet.a1 import runner as runner_module
+
+    inputs, original = [], runner_module.run_local
+
+    def spying(context, columns, local):
+        inputs.append((list(columns), local))
+        return original(context, columns, local)
+
+    monkeypatch.setattr(runner_module, "run_local", spying)
     with mlflow_store(tmp_path / "mlruns") as uri:
         path = _fast_settings_file(a1_settings_in(tmp_path), tmp_path / "out", uri)
         a1 = load_a1_config(str(path))
         write_plans(a1.settings, str(tmp_path / "out" / "plans"), kinds=[LOGO])
         result = run_plans(a1, groups=False, tracking=False, run_name="plain")
 
-    local = [Path(path).name for path in result.computed if Path(path).name.startswith(f"{LOCAL}__")]
-    assert local and set(local) == {f"{LOCAL}__{COMBINED_GROUP}.parquet"}  # no per-group local without --groups
+    names = {Path(path).name for path in result.computed}
+    local = {name for name in names if name.startswith(f"{LOCAL}__")}
+    assert local == {f"{LOCAL}__{COMBINED_GROUP}.parquet"}  # no per-group local without --groups
+    assert f"{LOCAL_GLOBAL}__{COMBINED_GROUP}.parquet" in names  # Global's own reference, always
+    # local reads the predicted CaCO3/CEC, as global_aux does; local_global reads Global's inputs only.
+    predicted = [columns for columns, _ in inputs if any(c.startswith("a1_pred_") for c in columns)]
+    plain = [columns for columns, _ in inputs if not any(c.startswith("a1_pred_") for c in columns)]
+    assert predicted and plain and len(predicted) == len(plain)
+    assert all(set(p) - set(q) == {c for c in p if c.startswith("a1_pred_")} for p, q in zip(predicted, plain))
+    # Both local models of a plan use the same outer folds: the second reuses the first's.
+    assert all(inputs[i][1] is inputs[i + 1][1] for i in range(0, len(inputs), 2))
+
+    from yg_eo_soilnet.a1.evaluation import load_predictions
+
+    frame = load_predictions(result.run_dir)
+    both = frame[frame["model"].isin([LOCAL, LOCAL_GLOBAL])]
+    folds = both.pivot_table(index=["plan_id", "point_id"], columns="model", values="local_fold")
+    assert not folds.empty and (folds[LOCAL] == folds[LOCAL_GLOBAL]).all()
 
 
 def test_a_region_too_small_for_a_local_score_is_skipped_and_said(a1_settings_in, tmp_path, mlflow_store):
@@ -430,8 +458,8 @@ def test_the_full_demo_run_from_the_command_line(a1_settings_in, tmp_path, mlflo
     assert elapsed < 600
     assert rmse[PER_CLASS_MEASURED] < rmse[GLOBAL]
     # Every model of the 3 plans (random, two held-out regions), and per logo plan a dissimilarity table and the
-    # local model on every covariate (fitted without --groups too).
-    assert len(result.computed) == 3 * len(MODELS) + 2 + 2
+    # two local models on every covariate, local and local_global (fitted without --groups too).
+    assert len(result.computed) == 3 * len(MODELS) + 2 + 2 * 2
 
 
 def test_stage_1_read_back_from_its_file_gives_the_same_predictions(demo_run):
@@ -504,7 +532,7 @@ def test_the_evaluation_reads_a_real_run_end_to_end(demo_run):
     test = frame[(frame["split"] == TEST) & (frame["covariate_group"] == COMBINED_GROUP)]
 
     scores = evaluation.grouped_metrics(test, ["kind", "model"])
-    assert set(scores["model"]) == {*MODELS, LOCAL} and scores["rmse"].gt(0).all()
+    assert set(scores["model"]) == {*MODELS, LOCAL, LOCAL_GLOBAL} and scores["rmse"].gt(0).all()
 
     boot = evaluation.block_bootstrap(test, ["kind", "model"], n=50, compare=[(PER_CLASS_MEASURED, GLOBAL)])
     rmse = boot.intervals[boot.intervals["metric"] == "rmse"].dropna(subset=["low"])
@@ -514,7 +542,8 @@ def test_the_evaluation_reads_a_real_run_end_to_end(demo_run):
 
     transfer = evaluation.transfer_table(frame)
     logo_plans = frame.loc[frame["kind"] == LOGO, "plan_id"].nunique()
-    assert len(transfer) == logo_plans * (1 + len(demo_run["a1"].groups.names))
+    # Per logo plan: Global against local_global, global_aux against local, and each group alone.
+    assert len(transfer) == logo_plans * (2 + len(demo_run["a1"].groups.names))
     assert transfer["has_local"].all() and transfer["rmse_drop"].notna().all()
 
 
@@ -688,8 +717,8 @@ def test_an_index_from_an_older_make_plans_is_refused_with_how_to_fix_it(demo_ru
 
 def test_local_rows_carry_their_outer_fold_and_block_and_no_other_row_does(demo_run):
     frame = _predictions(demo_run)
-    local = frame[frame["model"] == LOCAL]
-    others = frame[frame["model"] != LOCAL]
+    local = frame[frame["model"].isin([LOCAL, LOCAL_GLOBAL])]
+    others = frame[~frame["model"].isin([LOCAL, LOCAL_GLOBAL])]
     assert not local.empty and local["local_fold"].notna().all() and local["local_block"].notna().all()
     assert others["local_fold"].isna().all() and others["local_block"].isna().all()
     # Every covariate group's local model uses the same folds: stage 1 is fitted once per region and fold.

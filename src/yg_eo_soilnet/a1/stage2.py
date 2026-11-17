@@ -53,6 +53,13 @@ GLOBAL_AUX = "global_aux"
 PER_CLASS_MEASURED = "per_class_measured"
 PER_CLASS_PREDICTED = "per_class_predicted"
 LOCAL = "local"
+#: The local model on Global's inputs - every covariate, no predicted CaCO3/CEC - fitted inside a
+#: held-out basin as :data:`LOCAL` is (same outer folds), so Global's transfer loss compares like with like.
+LOCAL_GLOBAL = "local_global"
+#: The local models, each the in-basin counterpart of one transferred model.
+LOCAL_MODELS = (LOCAL, LOCAL_GLOBAL)
+#: The local model with the same inputs as each transferred model.
+LOCAL_OF = {GLOBAL: LOCAL_GLOBAL, GLOBAL_AUX: LOCAL}
 #: The quantile model of the prediction intervals, fitted only when ``stage2.models`` lists it
 #: (:mod:`yg_eo_soilnet.a1.uncertainty`).
 GLOBAL_Q = "global_q"
@@ -355,12 +362,16 @@ class LocalFolds:
         Each measured point's outer fold.
     reason : str or None
         Why there is no ``local`` score, when there is none; ``folds`` is then empty.
+    with_stage1 : bool
+        Whether each fold's context holds its own stage-1 predictions (``local`` needs them;
+        ``local_global`` does not, and its folds skip stage 1).
     """
 
     folds: list = field(default_factory=list)
     block: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     outer_fold: pd.Series = field(default_factory=lambda: pd.Series(dtype=float))
     reason: Optional[str] = None
+    with_stage1: bool = True
 
 
 def local_folds(
@@ -369,6 +380,7 @@ def local_folds(
     table: A1Table,
     *,
     estimator_factory=None,
+    with_stage1: bool = True,
     logger: Optional[logging.Logger] = None,
 ) -> LocalFolds:
     """Cut one held-out region into spatial-block folds and give each its own, local, stage 1.
@@ -386,7 +398,10 @@ def local_folds(
        The logo plan's own stage 1, fitted on the other regions, is not used.
 
     The result is kept in ``context.cache`` and reused by every covariate group, so each region's
-    stage 1 is fitted once per fold.
+    stage 1 is fitted once per fold. With ``with_stage1=False`` (``local_global``, which reads no
+    stage-1 prediction) step 2 only cuts each fold's tuning folds, the folds stage 1 would have
+    used; the outer folds are the same, being cut before. A cached result without stage 1 is
+    rebuilt when a later call needs it.
 
     Parameters
     ----------
@@ -399,6 +414,8 @@ def local_folds(
     estimator_factory : callable, optional
         Passed to :func:`~yg_eo_soilnet.a1.auxiliary.predict_auxiliary` (tests use it to watch what
         each stage-1 fit sees).
+    with_stage1 : bool, default True
+        Fit each fold's own stage 1; False skips it.
     logger : logging.Logger, optional
 
     Returns
@@ -409,12 +426,13 @@ def local_folds(
     """
     from sklearn.model_selection import GroupKFold
 
-    from yg_eo_soilnet.a1.auxiliary import predict_auxiliary
+    from yg_eo_soilnet.a1.auxiliary import folds_only, predict_auxiliary
     from yg_eo_soilnet.a1.evaluation import spatial_blocks
     from yg_eo_soilnet.a1.plans import SPATIAL_KFOLD
 
-    if LOCAL_CACHE_KEY in context.cache:
-        return context.cache[LOCAL_CACHE_KEY]
+    cached = context.cache.get(LOCAL_CACHE_KEY)
+    if cached is not None and (cached.with_stage1 or not with_stage1):
+        return cached
     logger = logger or logging.getLogger(__name__)
     settings = context.settings
     block_km = settings.bootstrap.block_size_km
@@ -468,23 +486,27 @@ def local_folds(
                     eligibility={"sklearn": frozenset(measured)},
                     clusters=block.astype(int),
                 )
-                auxiliary = predict_auxiliary(
-                    table,
-                    subplan,
-                    settings,
-                    context.config,
-                    kind=SPATIAL_KFOLD,
-                    estimator_factory=estimator_factory,
-                    logger=logger,
+                auxiliary = (
+                    predict_auxiliary(
+                        table,
+                        subplan,
+                        settings,
+                        context.config,
+                        kind=SPATIAL_KFOLD,
+                        estimator_factory=estimator_factory,
+                        logger=logger,
+                    )
+                    if with_stage1
+                    else folds_only(subplan, settings, kind=SPATIAL_KFOLD, logger=logger)
                 )
                 folds.append((fold, build_context(table, subplan, auxiliary, settings, context.config)))
                 n_test = int((outer == fold).sum())
                 logger.info(
                     f"  local {region_name} fold {fold + 1}/{n_folds}: {len(measured) - n_test:,} train / {n_test:,} "
                     f"test ({block[outer == fold].nunique()} of {n_blocks} blocks), stage 1 "
-                    f"{format_duration(time.monotonic() - started)}"
+                    + (format_duration(time.monotonic() - started) if with_stage1 else "skipped (not read)")
                 )
-            local = LocalFolds(folds=folds, block=block, outer_fold=outer)
+            local = LocalFolds(folds=folds, block=block, outer_fold=outer, with_stage1=with_stage1)
     context.cache[LOCAL_CACHE_KEY] = local
     return local
 

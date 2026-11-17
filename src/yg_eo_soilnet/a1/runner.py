@@ -77,6 +77,7 @@ from yg_eo_soilnet.a1.stage2 import (
     GLOBAL_AUX,
     GLOBAL_Q,
     LOCAL,
+    LOCAL_GLOBAL,
     GLOBAL,
     MODELS,
     ModelResult,
@@ -619,6 +620,9 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     if row.kind == LOGO and with_aux:
         # The reference of the transfer loss, on every covariate: always, not only with --groups.
         jobs.append((LOCAL, COMBINED_GROUP))
+    if row.kind == LOGO and GLOBAL in models:
+        # Global's own reference: the same inputs as Global (no predicted CaCO3/CEC), fitted in the basin.
+        jobs.append((LOCAL_GLOBAL, COMBINED_GROUP))
     if shared.groups and with_aux:
         jobs += [(GLOBAL_AUX, name) for name in resolved.groups]
         if row.kind == LOGO:
@@ -665,9 +669,13 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
 
     for model, group in todo:
         started = time.monotonic()
-        if model == LOCAL:
-            columns = list(resolved.combined) if group == COMBINED_GROUP else list(resolved.groups[group])
-            local = local_folds(context, plan.point_ids_for(TEST), table, logger=logger)
+        if model in (LOCAL, LOCAL_GLOBAL):
+            if model == LOCAL_GLOBAL:
+                columns = list(global_columns)
+            else:
+                columns = list(resolved.combined) if group == COMBINED_GROUP else list(resolved.groups[group])
+            # local_global reads no stage-1 prediction: its folds skip stage 1 unless local's are cached.
+            local = local_folds(context, plan.point_ids_for(TEST), table, with_stage1=model == LOCAL, logger=logger)
             result = run_local(context, columns, local)
             if result is None:
                 note = f"{row.plan_id}: no local score - {local.reason}"
@@ -1126,7 +1134,10 @@ def _start_parent(
         run = mlflow.start_run(run_name=f"A1_{run_name}_{stamp}")
     if manifest is not None and run_dir is not None:
         record_parent(run_dir, manifest, run)
-    roles = {model: (ROLE_DIAGNOSTIC if model in DIAGNOSTIC_MODELS else ROLE_MODEL) for model in (*MODELS, LOCAL)}
+    roles = {
+        model: (ROLE_DIAGNOSTIC if model in DIAGNOSTIC_MODELS else ROLE_MODEL)
+        for model in (*MODELS, LOCAL, LOCAL_GLOBAL)
+    }
     mlflow.set_tags(
         {
             **run_owner_tags(),

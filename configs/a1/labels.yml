@@ -14,7 +14,8 @@ models:
   global_aux: Global + predicted CaCO₃/CEC
   per_class_measured: Per class, measured CaCO₃ (upper bound)
   per_class_predicted: Per class, predicted CaCO₃
-  local: Local (basin's own points)
+  local_global: Local (basin's own points)
+  local: Local + predicted CaCO₃/CEC (basin's own points)
   global_q: Global, quantile model
 
 # Split kinds. {km} is replaced by the block size in kilometres.

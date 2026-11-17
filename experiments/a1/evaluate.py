@@ -36,11 +36,18 @@ Reads only the per-point prediction files ``run_a1.py`` wrote (see
     the mean pinball loss, and RMSE, MAE and bias of the median. ``global_q`` is left out of every
     other table: Global, the mean model, carries every accuracy result.
 ``intervals_by_region.csv``
-    The same intervals for each held-out region of the plain ``logo`` plans.
+    The same intervals for each held-out region of the plain ``logo`` plans. Both interval tables
+    also hold ``rmse_debiased``, sqrt(RMSE² - bias²).
 ``transfer.csv``
     For ``logo`` and ``mixed`` plans, the local against the transferred score per region and
     covariate group, and the drop between them; matched draws averaged per region (kind
-    ``logo_matched``).
+    ``logo_matched``). The ``inputs`` column names the pairing: ``every covariate`` (Global against
+    the local model on the same inputs, ``local_global`` - the rows every figure reports), ``with
+    predicted CaCO3/CEC`` (``global_aux`` against ``local``), and ``covariate group alone``.
+``basin_errors.csv``
+    Per held-out basin of the plain ``logo`` plans: Global's transferred RMSE, bias and debiased
+    RMSE, sqrt(RMSE² - bias²), and the local RMSE (``local_global``), each with its 95 %
+    block-bootstrap interval (supplementary table S6).
 ``seed_summary.csv``
     For a run of several seeds: each headline metric's value on the first seed and its mean, SD,
     min and max over the seeds.
@@ -99,6 +106,7 @@ TABLES = (
     "intervals_by_region.csv",
     "differences.csv",
     "transfer.csv",
+    "basin_errors.csv",
     "scores_mixed.csv",
     "scores_logo_matched.csv",
     "seed_summary.csv",
@@ -267,6 +275,7 @@ def _seed_tables(
         "intervals_by_region.csv": by_region,
         "differences.csv": differences,
         "transfer.csv": transfer,
+        "basin_errors.csv": evaluation.basin_error_table(by_region),
         "scores_mixed.csv": mixed,
         "scores_logo_matched.csv": matched,
         "headline": pd.concat(

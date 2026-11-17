@@ -32,13 +32,13 @@ from yg_eo_soilnet.a1.figures.style import (
     styled,
 )
 from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED
-from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_GLOBAL, LOCAL_OF
 from yg_eo_soilnet.datamodules.splitting import TEST
 from yg_eo_soilnet.metrics import regression_metrics
 
 #: Line colours of figure 9: mixed in the global model's colour, control in the local one's.
 MIXED_COLOR = model_color(GLOBAL)
-CONTROL_COLOR = model_color(LOCAL)
+CONTROL_COLOR = model_color(LOCAL_GLOBAL)
 
 
 # --- figure 8 ---------------------------------------------------------------------------------------
@@ -82,10 +82,11 @@ def _no_transfer_message(inputs: FigureInputs) -> str:
     """Why figure 8 cannot be drawn, true for this run."""
     if LOGO not in set(inputs.predictions["kind"]):
         return "This run has no leave-one-basin-out plans: run run_a1.py with --kinds logo."
-    if LOCAL not in set(inputs.predictions["model"]):
+    if LOCAL_GLOBAL not in set(inputs.predictions["model"]):
         return (
-            "No local model in this run: its leave-one-basin-out plans were run before the local model was "
-            "always fitted, or every held-out basin has fewer than 3 blocks. Run run_a1.py again (it resumes)."
+            f"No {LOCAL_GLOBAL} model in this run (the local model on Global's inputs): its leave-one-basin-out plans "
+            "were run before it was fitted, or every held-out basin has fewer than 3 blocks. Run run_a1.py again "
+            "(it resumes, fitting only what is missing)."
         )
     return "No held-out basin has both a transferred and a local score."
 
@@ -101,13 +102,14 @@ def figure_transfer(inputs: FigureInputs):
     figure = draw_transfer(points, grid)
     worse = int((points["rmse_drop"] > 0).sum())
     caption = (
-        f"Figure 8. (a) RMSE of the model trained on the other basins against a model trained on the basin's own points, "
-        f"same test points, every input. Transfer is worse in {worse} of {len(points)} basins; the change ranges from "
+        f"Figure 8. (a) RMSE of Global trained on the other basins against the local model on the same inputs "
+        f"(every covariate, no predicted CaCO₃/CEC), trained on the basin's own points, same test points. Transfer is worse in {worse} of {len(points)} basins; the change ranges from "
         + ps.minus(f"{points['rmse_drop'].min():+.2f} to {points['rmse_drop'].max():+.2f}")
         + f" {SOM_UNIT}."
         + (
-            " (b) The same change for each covariate group alone: each cell compares two models given the same "
-            "inputs, so it shows how well what the group teaches carries over to an unseen basin."
+            " (b) The same change: first column as in (a); then each covariate group alone, Global + predicted "
+            "CaCO₃/CEC and the local model both fitted on the group's inputs only, so each cell compares two "
+            "models given the same inputs and shows how well what the group teaches carries over to an unseen basin."
             if not grid.empty
             else ""
         )
@@ -158,8 +160,8 @@ def draw_transfer(points: pd.DataFrame, grid: pd.DataFrame):
         points["rmse_local"],
         points["rmse_transferred"],
         s=26,
-        color=model_color(GLOBAL_AUX),
-        marker=model_marker(GLOBAL_AUX),
+        color=model_color(GLOBAL),
+        marker=model_marker(GLOBAL),
         edgecolor="white",
         lw=0.5,
         zorder=3,
@@ -210,7 +212,8 @@ def draw_transfer(points: pd.DataFrame, grid: pd.DataFrame):
     caption_line(
         figure,
         "(a) Labels: basin, its points (n) and their share of all points - what holding it out removes from training. "
-        "Model: Global + predicted CaCO₃/CEC, trained on the other basins, against the same inputs fitted inside the basin (local).",
+        "Model: Global (every covariate, no predicted CaCO₃/CEC), trained on the other basins, against the same inputs "
+        "fitted inside the basin (local).",
     )
     return figure
 
@@ -307,13 +310,13 @@ def mixed_paired(curves: pd.DataFrame) -> pd.DataFrame:
 def mixed_references(inputs: FigureInputs, *, model: str = GLOBAL) -> pd.DataFrame:
     """Per held-out basin: ``model``'s RMSE with no local points (leave one basin out) and the local model's.
 
-    Both on every point of the basin (every input).
+    Both on every point of the basin; the local model is the one on ``model``'s inputs (:data:`LOCAL_OF`).
     """
     frame = inputs.predictions
     logo = frame[(frame["split"] == TEST) & (frame["kind"] == LOGO) & (frame["covariate_group"] == COMBINED_GROUP)]
     rows = []
     for region, part in logo.groupby("held_out"):
-        transferred, local = part[part["model"] == model], part[part["model"] == LOCAL]
+        transferred, local = part[part["model"] == model], part[part["model"] == LOCAL_OF.get(model, LOCAL)]
         rows.append(
             {
                 "region": str(region),
@@ -504,13 +507,16 @@ def draw_mixed(summary: pd.DataFrame, references: pd.DataFrame, paired: pd.DataF
         handles.append(Line2D([], [], color=MIXED_COLOR, lw=0.9, ls=":", label="No local points (leave one basin out)"))
     if drawn["local"]:
         handles.append(
-            Line2D([], [], color=CONTROL_COLOR, lw=0.9, ls="--", label="Local model, all the basin's points")
+            Line2D(
+                [], [], color=CONTROL_COLOR, lw=0.9, ls="--", label="Local model (same inputs), all the basin's points"
+            )
         )
     handles.append(Line2D([], [], ls="", marker="o", color=ps.MUTED, ms=3, label="Paired difference, one repeat"))
     figure.legend(handles=handles, loc="outside upper center", ncol=2 if columns > 1 else 1, frameon=False)
     caption_line(
         figure,
-        f"Model: {pretty_name(model)}, every input. Upper: mean over repeats, band min to max. Lower: one point per "
-        "repeat, line their mean; mixed and control share their test points within a repeat.",
+        f"Model: {pretty_name(model)}, every input; dashed: {pretty_name(LOCAL_OF.get(model, LOCAL))}. Upper: mean over "
+        "repeats, band min to max. Lower: one point per repeat, line their mean; mixed and control share their test "
+        "points within a repeat.",
     )
     return figure

@@ -6,6 +6,8 @@ to the largest, leave one basin out - and each panel follows one score along the
 
 from __future__ import annotations
 
+import textwrap
+
 import numpy as np
 import pandas as pd
 from matplotlib.lines import Line2D
@@ -39,6 +41,8 @@ PANELS = (
     ("rpiq", "RPIQ", None, "higher"),
     ("bias", "Bias", SOM_UNIT, None),
 )
+#: Characters per line of a model's name in the legend panel.
+LEGEND_WRAP = 24
 
 
 def design_key(kind: str, block_size_m) -> float:
@@ -176,7 +180,9 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
                 markeredgewidth=0.4,
             )
         if metric == "bias":
-            bias_axis(axis)  # the direction words go in its right margin, beside panel e
+            # The direction words inside the panel: in its right margin they widened the first column,
+            # opening a gap between panels a and b.
+            bias_axis(axis, inside=True)
         else:
             axis.set_ylabel(better_label(name, better, unit))
         letter(axis, code)
@@ -195,8 +201,17 @@ def draw_spatial(scores: pd.DataFrame, stage1: pd.DataFrame, *, labels=(), block
     letter(stage_axis, "e")
     legend_axis = axes.flat[5]
     legend_axis.set_axis_off()
+    # Labels wrapped to the sixth panel's width, so none runs past the figure edge.
     handles = [
-        Line2D([], [], color=model_color(m), marker=model_marker(m), ms=5, lw=1.2, label=pretty_name(m))
+        Line2D(
+            [],
+            [],
+            color=model_color(m),
+            marker=model_marker(m),
+            ms=5,
+            lw=1.2,
+            label="\n".join(textwrap.wrap(pretty_name(m), LEGEND_WRAP, break_long_words=False)),
+        )
         for m in MAIN_MODELS
     ]
     # Both legends in the empty sixth panel: neither sits on data.

@@ -730,6 +730,28 @@ def _drawn_figures(offline_points):
             "rmse_local": [9.8, 10.5],
             "rmse_drop": [1.2, -0.3],
             "r2_transferred": [0.05, -0.1],
+            "r2_local": [0.3, 0.1],
+            "r2_local_low": [0.1, -0.2],
+            "r2_local_high": [0.45, 0.3],
+            "bias_transferred": [2.1, -3.2],
+            "bias_transferred_low": [0.8, -5.3],
+            "bias_transferred_high": [3.4, -1.2],
+        }
+    )
+    basin_errors = pd.DataFrame(
+        {
+            "basin": ["Oum Er Rbia", "South"],
+            "n": [2146, 200],
+            **{
+                f"{name}{end}": [value + shift, value - 1 + shift]
+                for name, value in (
+                    ("rmse_transferred", 11.7),
+                    ("bias_transferred", -3.2),
+                    ("rmse_debiased_transferred", 10.8),
+                    ("rmse_local", 9.5),
+                )
+                for end, shift in (("", 0.0), ("_low", -1.0), ("_high", 1.0))
+            },
         }
     )
     groups = pd.DataFrame(
@@ -785,6 +807,7 @@ def _drawn_figures(offline_points):
         "figS3_class_scores": class_bias.draw_class_scores(intervals, labels=LABELS),
         "figS4_shap_features": shap.draw_shap(values, labels=LABELS, n_features=5),
         "figS5_dissimilarity": basins.draw_dissimilarity(dissimilar),
+        "figS6_basin_errors": basins.draw_basin_errors(basins.printable_errors(basin_errors)),
     }
 
 

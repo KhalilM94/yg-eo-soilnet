@@ -64,6 +64,7 @@ SUPPLEMENTARY_FIGURES = (
     "figS3_class_scores",
     "figS4_shap_features",
     "figS5_dissimilarity",
+    "figS6_basin_errors",
 )
 #: The prediction-interval figures, drawn only for a run with the quantile model (``global_q``).
 UNCERTAINTY_FIGURES = uncertainty.UNCERTAINTY_FIGURES
@@ -73,7 +74,7 @@ FIGURE_NAMES = MAIN_FIGURES + SUPPLEMENTARY_FIGURES
 #: uncertainty figures, which only a run with ``global_q`` gets.
 ALL_FIGURE_NAMES = FIGURE_NAMES + UNCERTAINTY_FIGURES
 #: The figures' tables that are also written as LaTeX, for the paper.
-LATEX_TABLES = ("table_rpiq_by_class", "table_basins")
+LATEX_TABLES = ("table_rpiq_by_class", "table_basins", "table_basin_errors")
 #: The captions file.
 CAPTIONS_FILE = "captions.md"
 
@@ -104,6 +105,7 @@ def _builders(
         "figS3_class_scores": lambda: class_bias.figure_class_scores(inputs),
         "figS4_shap_features": lambda: shap.figure_shap_features(inputs, plan_id=shap_plan),
         "figS5_dissimilarity": lambda: basins.figure_dissimilarity(inputs),
+        "figS6_basin_errors": lambda: basins.figure_basin_errors(inputs),
         "figU1_bands": lambda: uncertainty.figure_bands(inputs),
         "figU2_reliability": lambda: uncertainty.figure_reliability(inputs),
         "figU3_width": lambda: uncertainty.figure_width(inputs),

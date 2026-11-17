@@ -28,7 +28,7 @@ from yg_eo_soilnet.a1.layout import find_stage1, prediction_dir, prediction_path
 from yg_eo_soilnet.a1.plans import LOGO, RANDOM, write_plans
 from yg_eo_soilnet.a1.runner import MANIFEST_FILE, run_plans, select_plans
 from yg_eo_soilnet.a1.settings import SOM_MODELS, dev_mode_settings, load_settings
-from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL, MODELS, needs_stage1
+from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL, LOCAL_GLOBAL, MODELS, needs_stage1
 
 A1_CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "a1"
 
@@ -281,14 +281,19 @@ def test_global_alone_runs_no_stage_1(a1_settings_in, tmp_path, monkeypatch):
     )
     a1 = load_a1_config(str(path))
     write_plans(a1.settings, str(tmp_path / "out" / "plans"), kinds=[RANDOM, LOGO])
-    monkeypatch.setattr(
-        runner, "predict_auxiliary", lambda *a, **k: (_ for _ in ()).throw(AssertionError("stage 1 ran"))
-    )
+    from yg_eo_soilnet.a1 import auxiliary as auxiliary_module
+
+    refuse = lambda *a, **k: (_ for _ in ()).throw(AssertionError("stage 1 ran"))  # noqa: E731
+    monkeypatch.setattr(runner, "predict_auxiliary", refuse)
+    # Nor inside the held-out region: local_global reads no stage-1 prediction, so its folds fit none.
+    monkeypatch.setattr(auxiliary_module, "predict_auxiliary", refuse)
     result = run_plans(a1, only=PLANS, groups=True, tracking=False)
     run_dir = result.run_dir
     assert not (run_dir / "stage1").exists()
     frame = load_predictions(run_dir)
-    assert set(frame["model"]) == {GLOBAL} and set(frame["covariate_group"]) == {COMBINED_GROUP}
+    # Global, and on the logo plan the local model on Global's inputs; never local (it needs global_aux).
+    assert set(frame["model"]) == {GLOBAL, LOCAL_GLOBAL} and set(frame["covariate_group"]) == {COMBINED_GROUP}
+    assert set(frame.loc[frame["model"] == LOCAL_GLOBAL, "kind"]) == {LOGO}
     assert LOCAL not in set(frame["model"])
     assert set(frame["device_stage1"]) == {"none"}
     assert (run_dir / "dissimilarity" / "logo_r04_south_west.parquet").exists()
@@ -297,7 +302,7 @@ def test_global_alone_runs_no_stage_1(a1_settings_in, tmp_path, monkeypatch):
     from experiments.a1 import evaluate
 
     tables = evaluate._evaluate(run_dir, 10.0, 0, 20, None, first_seed=42)
-    assert set(tables["scores.csv"]["model"]) == {GLOBAL}
+    assert set(tables["scores.csv"]["model"]) == {GLOBAL, LOCAL_GLOBAL}  # local scores are scored too, as local's are
 
 
 # --- choosing plans -------------------------------------------------------------------------------

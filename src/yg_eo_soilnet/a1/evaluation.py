@@ -50,13 +50,17 @@ from yg_eo_soilnet.a1.plans import (
 from yg_eo_soilnet.a1.devices import UNKNOWN_DEVICE
 from yg_eo_soilnet.a1.layout import prediction_paths
 from yg_eo_soilnet.a1.runner import PREDICTION_COLUMNS
-from yg_eo_soilnet.a1.stage2 import GLOBAL_AUX, LOCAL
+from yg_eo_soilnet.a1.stage2 import GLOBAL, GLOBAL_AUX, LOCAL, LOCAL_GLOBAL
 from yg_eo_soilnet.datamodules.splitting import TEST
 from yg_eo_soilnet.metrics import regression_metrics
 from yg_eo_soilnet.utils import assign_grid_ids
 
 #: The scores reported for every group, in order.
 SCORES = ("rmse", "mae", "r2", "bias", "rpd", "rpiq")
+#: The scores :func:`block_bootstrap` gives intervals for: :data:`SCORES`, then the debiased RMSE,
+#: sqrt(RMSE² - bias²) - the spread of the errors around their mean, what is left once a constant
+#: offset is removed.
+INTERVAL_SCORES = (*SCORES, "rmse_debiased")
 #: Groups with fewer scored points than this are flagged ``small``: their scores rest on too few points.
 MIN_GROUP_SIZE = 30
 #: What makes two rows the same prediction target: one point, held out once, in one plan.
@@ -247,16 +251,28 @@ def grouped_metrics(df: pd.DataFrame, by, *, min_n: int = MIN_GROUP_SIZE) -> pd.
     return pd.DataFrame(rows, columns=[*by, "n", "n_fallback", *SCORES, "small"])
 
 
+def _debiased_rmse(observed, predicted) -> float:
+    """sqrt(RMSE² - bias²): the standard deviation of the errors (ddof 0); NaN with fewer than two points."""
+    error = np.asarray(predicted, dtype=float) - np.asarray(observed, dtype=float)
+    return float(np.std(error)) if error.size >= 2 else np.nan
+
+
+def _interval_estimates(observed, predicted) -> dict[str, float]:
+    """Every score of :data:`INTERVAL_SCORES` on all the points: the estimate an interval is drawn around."""
+    return {**_point_scores(observed, predicted), "rmse_debiased": _debiased_rmse(observed, predicted)}
+
+
 def _scores(observed: np.ndarray, predicted: np.ndarray) -> np.ndarray:
-    """The six scores of :data:`SCORES`, computed as ``regression_metrics`` computes them, quickly.
+    """The scores of :data:`INTERVAL_SCORES`, computed as ``regression_metrics`` computes them, quickly.
 
     ``regression_metrics`` takes a few milliseconds per call - fine once, too slow a thousand times
     per group inside the bootstrap. This repeats its formulas on plain arrays (a test holds the two
     equal): RMSE; MAE; bias = mean(predicted - observed); R² = 1 - SS_res / SS_tot, undefined when
     every measurement is the same; RPD = sd(observed, ddof=1) / RMSE and RPIQ = IQR(observed) /
-    RMSE, both undefined when RMSE is 0. Fewer than two points: all undefined.
+    RMSE, both undefined when RMSE is 0; the debiased RMSE = sd(error, ddof=0). Fewer than two
+    points: all undefined.
     """
-    result = np.full(len(SCORES), np.nan)
+    result = np.full(len(INTERVAL_SCORES), np.nan)
     if observed.size < 2:
         return result
     error = predicted - observed
@@ -265,6 +281,7 @@ def _scores(observed: np.ndarray, predicted: np.ndarray) -> np.ndarray:
     result[0] = rmse
     result[1] = float(np.mean(np.abs(error)))
     result[3] = float(np.mean(error))
+    result[6] = float(np.std(error))
     variance = float(np.var(observed))
     if variance > 1e-12:
         result[2] = 1.0 - squared / variance
@@ -423,8 +440,8 @@ def block_bootstrap(
         draws = np.array(
             [_scores(observed[rows], predicted[rows]) for rows in _draws(part_blocks, n, _generator(seed, key))]
         )
-        estimate = _point_scores(observed, predicted)
-        for position, score in enumerate(SCORES):
+        estimate = _interval_estimates(observed, predicted)
+        for position, score in enumerate(INTERVAL_SCORES):
             low, high, valid = _interval(draws[:, position], level, n_blocks)
             interval_rows.append(
                 {
@@ -475,9 +492,9 @@ def block_bootstrap(
                     for rows in _draws(part_blocks, n, _generator(seed, key))
                 ]
             )
-            estimate_a = _point_scores(observed, predicted_a)
-            estimate_b = _point_scores(observed, predicted_b)
-            for position, score in enumerate(SCORES):
+            estimate_a = _interval_estimates(observed, predicted_a)
+            estimate_b = _interval_estimates(observed, predicted_b)
+            for position, score in enumerate(INTERVAL_SCORES):
                 low, high, valid = _interval(draws[:, position], level, n_blocks)
                 difference_rows.append(
                     {
@@ -629,44 +646,25 @@ def _transfer_row(transferred: pd.DataFrame, local: Optional[pd.DataFrame]) -> d
     }
 
 
-def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> pd.DataFrame:
-    """Local against transferred scores, per held-out region and covariate group, on test points.
+#: ``inputs`` of the main transfer rows: Global against the local model on the same inputs (every
+#: covariate, no predicted CaCO3/CEC). Every figure and headline number reads these.
+INPUTS_EVERY = "every covariate"
+#: ``inputs`` of the extra rows: Global + predicted CaCO3/CEC against the local model on those inputs.
+INPUTS_WITH_PREDICTED = "with predicted CaCO3/CEC"
+#: ``inputs`` of the per-group rows (``--groups``): both models on one covariate group alone.
+INPUTS_GROUP = "covariate group alone"
+#: The pairings of :func:`transfer_table`: ``inputs`` label, transferred model, local model, which groups.
+TRANSFER_PAIRINGS = (
+    (INPUTS_EVERY, GLOBAL, LOCAL_GLOBAL, "combined"),
+    (INPUTS_WITH_PREDICTED, GLOBAL_AUX, LOCAL, "combined"),
+    (INPUTS_GROUP, GLOBAL_AUX, LOCAL, "groups"),
+)
 
-    ``logo`` plans
-        *Transferred* is ``transferred_model`` trained on the other regions; *local* is the
-        ``local`` model, cross-validated inside the region on its own points. Both are scored on
-        the points both predicted. The ``local`` model is only fitted by ``run_a1.py --groups``;
-        without it the local columns are NaN.
-    ``mixed`` plans
-        *Transferred* is ``transferred_model`` trained on the other regions plus a share of this
-        one; *local* is the matching ``control`` plan - the same share, the same repeat, trained on
-        the moved points alone - scored on the same test points. Each share's repeats are averaged.
 
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        Prediction rows (:func:`load_predictions`); rows of other kinds and of validation are
-        ignored.
-    transferred_model : str, default "global_aux"
-        The model compared with the local one. ``local`` uses the same inputs as ``global_aux``.
-
-    Returns
-    -------
-    pandas.DataFrame
-        One row per region, covariate group and (for ``mixed``) share - the draws of matched
-        ``logo`` plans averaged per region, under the kind ``logo_matched`` - : ``kind, region,
-        covariate_group, fraction, n_repeats, n, local_source, has_local``, then
-        ``<score>_local`` and ``<score>_transferred`` for each score, then the drops -
-        ``rmse_drop`` and ``mae_drop`` (transferred - local), ``r2_drop``, ``rpd_drop`` and
-        ``rpiq_drop`` (local - transferred), so that a positive drop always means transfer does
-        worse - ``rmse_drop_pct`` (the RMSE drop as a percentage of the local RMSE) and
-        ``rmse_drop_sd`` (its spread over the repeats; NaN for ``logo``). A region without a local
-        score keeps its row, with NaN local columns and ``has_local`` False.
-    """
-    test = df[(df["split"] == TEST) & (df["model"].isin([transferred_model, LOCAL]))]
+def _pairing_rows(test: pd.DataFrame, transferred_model: str, local_model: str) -> list:
+    """The transfer rows of one pairing: per region and group (logo), per region, share and group (mixed)."""
     rows = []
-
-    logo = test[test["kind"] == LOGO]
+    logo = test[(test["kind"] == LOGO) & test["model"].isin([transferred_model, local_model])]
     matched_rows = []
     for (plan_id, group), part in logo.groupby(["plan_id", "covariate_group"], sort=True):
         transferred = part[part["model"] == transferred_model]
@@ -678,11 +676,12 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
             "covariate_group": group,
             "fraction": np.nan,
             "local_source": "local model",
-            **_transfer_row(transferred, part[part["model"] == LOCAL]),
+            **_transfer_row(transferred, part[part["model"] == local_model]),
         }
         (matched_rows if row["kind"] == LOGO_MATCHED else rows).append(row)
     rows += _averaged_over_repeats(matched_rows)
 
+    # Mixed plans: the local reference is the matching control plan's own fit of the same model.
     shared = test[test["model"] == transferred_model].assign(fraction_key=lambda frame: frame["fraction"].round(6))
     match = ["held_out", "fraction_key", "repeat", "covariate_group"]
     controls = {key: part for key, part in shared[shared["kind"] == CONTROL].groupby(match, sort=False)}
@@ -699,17 +698,136 @@ def transfer_table(df: pd.DataFrame, *, transferred_model: str = GLOBAL_AUX) -> 
                 **_transfer_row(transferred, controls.get(key)),
             }
         )
-    rows += _averaged_over_repeats(mixed_rows)
+    return rows + _averaged_over_repeats(mixed_rows)
+
+
+def transfer_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Local against transferred scores, per held-out region and covariate group, on test points.
+
+    Three pairings, told apart by the ``inputs`` column (:data:`TRANSFER_PAIRINGS`):
+
+    ``every covariate`` (the main rows)
+        Global against ``local_global``: both read every covariate and no predicted CaCO3/CEC.
+        Every figure, table and headline number reports these (:func:`main_transfer`).
+    ``with predicted CaCO3/CEC``
+        Global + predicted CaCO3/CEC (``global_aux``) against ``local``, which reads the same inputs.
+    ``covariate group alone``
+        With ``run_a1.py --groups``: ``global_aux`` and ``local`` each fitted on one group alone.
+
+    ``logo`` plans
+        *Transferred* is trained on the other regions; *local* is cross-validated inside the
+        region on its own points. Both are scored on the points both predicted. Without the local
+        model (a run made before it existed, or a region too small) the local columns are NaN.
+    ``mixed`` plans
+        *Transferred* is trained on the other regions plus a share of this one; *local* is the
+        same model of the matching ``control`` plan - the same share, the same repeat, trained on
+        the moved points alone - scored on the same test points. Each share's repeats are averaged.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Prediction rows (:func:`load_predictions`); rows of other kinds and of validation are
+        ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per pairing, region, covariate group and (for ``mixed``) share - the draws of
+        matched ``logo`` plans averaged per region, under the kind ``logo_matched`` - : ``kind,
+        region, covariate_group, inputs, transferred_model, local_model, fraction, n_repeats, n,
+        local_source, has_local``, then ``<score>_local`` and ``<score>_transferred`` for each
+        score, then the drops - ``rmse_drop`` and ``mae_drop`` (transferred - local), ``r2_drop``,
+        ``rpd_drop`` and ``rpiq_drop`` (local - transferred), so that a positive drop always means
+        transfer does worse - ``rmse_drop_pct`` (the RMSE drop as a percentage of the local RMSE)
+        and ``rmse_drop_sd`` (its spread over the repeats; NaN for ``logo``). A region without a
+        local score keeps its row, with NaN local columns and ``has_local`` False.
+    """
+    test = df[df["split"] == TEST]
+    rows = []
+    for inputs, transferred_model, local_model, groups in TRANSFER_PAIRINGS:
+        combined = test["covariate_group"] == COMBINED_GROUP
+        part = test[combined if groups == "combined" else ~combined]
+        for row in _pairing_rows(part, transferred_model, local_model):
+            rows.append({**row, "inputs": inputs, "transferred_model": transferred_model, "local_model": local_model})
 
     score_columns = [f"{score}_{side}" for score in SCORES for side in ("local", "transferred")]
     drop_columns = [f"{score}_drop" for score in SCORES if score != "bias"] + ["rmse_drop_pct", "rmse_drop_sd"]
-    columns = ["kind", "region", "covariate_group", "fraction", "n_repeats", "n", "local_source", "has_local"]
+    columns = [
+        "kind",
+        "region",
+        "covariate_group",
+        "inputs",
+        "transferred_model",
+        "local_model",
+        "fraction",
+        "n_repeats",
+        "n",
+        "local_source",
+        "has_local",
+    ]
     table = pd.DataFrame(rows, columns=[*columns, *score_columns, *drop_columns])
     table.loc[table["kind"] == LOGO, "n_repeats"] = 1
     if not table.empty:
         table["n_repeats"] = table["n_repeats"].astype(int)
         table["has_local"] = table["has_local"].astype(bool)
     return table
+
+
+def main_transfer(table: pd.DataFrame) -> pd.DataFrame:
+    """The rows of :func:`transfer_table` the figures report: Global on every covariate, and each group alone.
+
+    The ``with predicted CaCO3/CEC`` rows are left out, so a region and group has one row.
+    """
+    if table.empty or "inputs" not in table:
+        return table
+    return table[table["inputs"] != INPUTS_WITH_PREDICTED].reset_index(drop=True)
+
+
+#: The columns of :func:`basin_error_table`: each score with its interval bounds.
+BASIN_ERROR_SCORES = (
+    ("rmse_transferred", GLOBAL, "rmse"),
+    ("bias_transferred", GLOBAL, "bias"),
+    ("rmse_debiased_transferred", GLOBAL, "rmse_debiased"),
+    ("rmse_local", LOCAL_GLOBAL, "rmse"),
+)
+
+
+def basin_error_table(region_intervals: pd.DataFrame) -> pd.DataFrame:
+    """Per held-out basin: Global's transferred RMSE, bias and debiased RMSE, and the local RMSE, with intervals.
+
+    The debiased RMSE, sqrt(RMSE² - bias²), is what the RMSE would be if the transferred model's
+    constant offset in the basin were removed: when it is close to the local RMSE, transfer loses
+    mostly through a shift, not through scatter. Global (every covariate, no predicted CaCO3/CEC) is
+    set against the local model on the same inputs (``local_global``).
+
+    Parameters
+    ----------
+    region_intervals : pandas.DataFrame
+        :func:`block_bootstrap` intervals by ``kind, held_out, model`` (``intervals_by_region.csv``);
+        a ``seed`` column, when there, gives one block of rows per seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        ``[seed,] basin, n, n_blocks``, then for each of :data:`BASIN_ERROR_SCORES` the estimate and
+        its ``_low`` and ``_high`` bounds; NaN where the run lacks the model or the score (an
+        ``intervals_by_region.csv`` written before the debiased RMSE existed).
+    """
+    keys = ["seed", "basin"] if "seed" in region_intervals else ["basin"]
+    value_columns = [f"{name}{end}" for name, _, _ in BASIN_ERROR_SCORES for end in ("", "_low", "_high")]
+    columns = [*keys, "n", "n_blocks", *value_columns]
+    if region_intervals.empty:
+        return pd.DataFrame(columns=columns)
+    logo = region_intervals[region_intervals["kind"] == LOGO].assign(basin=lambda frame: frame["held_out"].astype(str))
+    transferred = logo[(logo["model"] == GLOBAL) & (logo["metric"] == "rmse")]
+    if transferred.empty:
+        return pd.DataFrame(columns=columns)
+    table = transferred[[*keys, "n", "n_blocks"]].drop_duplicates(keys).set_index(keys)
+    for name, model, metric in BASIN_ERROR_SCORES:
+        found = logo[(logo["model"] == model) & (logo["metric"] == metric)].set_index(keys)
+        for end, column in (("", "estimate"), ("_low", "low"), ("_high", "high")):
+            table[name + end] = found[column].reindex(table.index) if not found.empty else np.nan
+    return table.reset_index()[columns].sort_values(keys).reset_index(drop=True)
 
 
 # --- mixed and control plans ------------------------------------------------------------------------
@@ -997,7 +1115,8 @@ def headline_table(
                 add(score, "logo_mean", model, group_part(group), row[score])
 
     if transfer is not None and not transfer.empty:
-        drops = transfer[(transfer["kind"] == LOGO) & transfer["has_local"]]
+        drops = main_transfer(transfer)
+        drops = drops[(drops["kind"] == LOGO) & drops["has_local"]]
         for row in drops.itertuples():
             add("rmse_drop", f"logo_{row.region}", None, row.covariate_group, row.rmse_drop)
         for group, values in drops.groupby("covariate_group")["rmse_drop"]:

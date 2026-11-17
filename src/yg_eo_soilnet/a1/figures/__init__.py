@@ -19,6 +19,7 @@ fig10_basins            :mod:`.basins`      how each held-out basin differs (a t
 fig11_shap_groups       :mod:`.shap`        what the global model relies on, per group
 figS1-figS5             (same modules)      every block size; every model; class scores; SHAP
                                             per input; transfer against dissimilarity
+figS6_basin_errors      :mod:`.basins`      per basin: transferred RMSE, bias, debiased RMSE (a table)
 ======================  ==================  ======================================================
 
 :func:`render_all` (:mod:`.render`) draws them, saves each as PNG and PDF, and writes the tables

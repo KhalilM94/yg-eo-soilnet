@@ -31,11 +31,11 @@ from yg_eo_soilnet.a1.figures.style import (
     styled,
 )
 from yg_eo_soilnet.a1.plans import LOGO, RANDOM, SPATIAL_KFOLD
-from yg_eo_soilnet.a1.stage2 import LOCAL
+from yg_eo_soilnet.a1.stage2 import LOCAL_MODELS
 from yg_eo_soilnet.datamodules.splitting import TEST
 
 #: The models scored per class: every stage-2 model but the within-basin one.
-CLASS_MODELS = tuple(model for model in MODEL_ORDER if model != LOCAL)
+CLASS_MODELS = tuple(model for model in MODEL_ORDER if model not in LOCAL_MODELS)
 
 
 def class_intervals(inputs: FigureInputs) -> pd.DataFrame:

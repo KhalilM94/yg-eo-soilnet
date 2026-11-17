@@ -61,14 +61,15 @@ A1_CARBONATE_COLORS = dict(zip(A1_CARBONATE_CLASSES, ("#dfc27d", "#bf812d", "#8c
 # (yg_eo_soilnet.a1.figures.style), so no model is told apart by colour alone. The three main-text
 # models are the first three slots of the validated categorical palette (blue, orange, aqua); the
 # supplementary global model with predicted CaCO3/CEC is a neutral dark grey, the within-basin
-# model yellow. Checked together (blue, orange, aqua, grey): every pair dE >= 9 under colour-vision
+# model yellow (on Global's inputs; its counterpart with predicted CaCO3/CEC a darker amber). Checked together (blue, orange, aqua, grey): every pair dE >= 9 under colour-vision
 # deficiency, >= 21 with full colour vision.
 A1_MODEL_COLORS = {
     "global": "#2a78d6",
     "per_class_measured": "#eb6834",
     "per_class_predicted": "#1baf7a",
     "global_aux": "#52514e",
-    "local": "#eda100",
+    "local_global": "#eda100",
+    "local": "#9c6b00",
 }
 # The covariate groups, in this fixed order, from the same categorical palette.
 A1_GROUP_COLORS = {

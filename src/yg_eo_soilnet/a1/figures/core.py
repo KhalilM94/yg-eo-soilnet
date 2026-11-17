@@ -180,9 +180,17 @@ class FigureInputs:
         return int(self.predictions["seed"].iloc[0]) if not self.predictions.empty else self.settings.seed
 
     @property
+    def transfer_all(self) -> pd.DataFrame:
+        """:func:`~yg_eo_soilnet.a1.evaluation.transfer_table` of the predictions, every pairing."""
+        return self._cached("transfer_all", lambda: evaluation.transfer_table(self.predictions))
+
+    @property
     def transfer(self) -> pd.DataFrame:
-        """:func:`~yg_eo_soilnet.a1.evaluation.transfer_table` of the predictions."""
-        return self._cached("transfer", lambda: evaluation.transfer_table(self.predictions))
+        """The rows the figures report (:func:`~yg_eo_soilnet.a1.evaluation.main_transfer`).
+
+        On every covariate, Global against the local model on the same inputs; each group alone with ``--groups``.
+        """
+        return self._cached("transfer", lambda: evaluation.main_transfer(self.transfer_all))
 
     @property
     def dissimilarity_summary(self) -> pd.DataFrame:
@@ -251,12 +259,19 @@ class FigureInputs:
 
     @property
     def intervals_by_region(self) -> pd.DataFrame:
-        """The same per held-out basin (``evaluation/intervals_by_region.csv``)."""
+        """The same per held-out basin (``evaluation/intervals_by_region.csv``).
+
+        A file written before the debiased RMSE was scored is not used: the intervals are computed
+        again, the same way, so table S6 has them (run ``evaluate.py`` again to update the file).
+        """
 
         def build():
             path = self.run_dir / "evaluation" / "intervals_by_region.csv"
             if path.exists():
-                return pd.read_csv(path)
+                saved = pd.read_csv(path)
+                if "rmse_debiased" in set(saved["metric"]):
+                    return saved
+                logger.info(f"{path.name} predates the debiased RMSE; its intervals are computed again here.")
             logo = self._test_combined()
             logo = logo[logo["kind"] == LOGO]
             if logo.empty:
