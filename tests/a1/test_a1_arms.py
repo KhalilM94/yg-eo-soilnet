@@ -45,7 +45,7 @@ from yg_eo_soilnet.a1.plans import (
 from yg_eo_soilnet.a1.runner import run_plans
 from yg_eo_soilnet.a1.settings import load_settings
 from yg_eo_soilnet.a1.stage2 import fit_tuned
-from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN
+from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 
 A1_CONFIGS = Path(__file__).resolve().parents[2] / "configs" / "a1"
 
@@ -351,10 +351,13 @@ def arms_run(a1_settings_in, tmp_path_factory, mlflow_store):
     """A fast run of one share and repeat of one region: mixed, control and both arms, with the groups."""
     folder = tmp_path_factory.mktemp("a1_arms_run")
     seen: list = []
+    with_indicator: list = []
     original = stage2_module.fit_tuned
 
     def recording(pipeline, grid, X, y, folds, sample_weight=None):
         seen.append((list(X.columns), sample_weight))
+        if INDICATOR_COLUMN in X.columns:
+            with_indicator.append(X.copy())
         return original(pipeline, grid, X, y, folds, sample_weight=sample_weight)
 
     with mlflow_store(folder / "mlruns") as uri, pytest.MonkeyPatch.context() as patch:
@@ -372,17 +375,23 @@ def arms_run(a1_settings_in, tmp_path_factory, mlflow_store):
         a1 = load_a1_config(str(path))
         write_plans(a1.settings, str(folder / "out" / "plans"), kinds=["mixed"])
         calls = {}
+        inputs = {}
 
         def per_kind(row, seed, shared, *, logger):
             seen.clear()
+            with_indicator.clear()
             outcome = original_run(row, seed, shared, logger=logger)
             calls[row.kind] = list(seen)
+            plan = SplitPlan.from_frame(
+                pd.read_parquet(shared.plans_path / f"{row.plan_id}.parquet"), strategy=row.kind
+            )
+            inputs[row.kind] = (plan, list(with_indicator))
             return outcome
 
         original_run = runner_module._run_one_plan
         patch.setattr(runner_module, "_run_one_plan", per_kind)
         result = run_plans(a1, groups=True, kinds=[MIXED, CONTROL, *ARM_KINDS])
-        yield {"a1": a1, "result": result, "calls": calls}
+        yield {"a1": a1, "result": result, "calls": calls, "inputs": inputs}
 
 
 def test_each_arm_is_run_and_its_rows_say_which(arms_run):
@@ -418,6 +427,68 @@ def test_the_indicator_is_read_by_the_combined_models_of_its_arm_only(arms_run):
                 assert not reads, f"{kind} read the indicator with {len(columns)} input(s)"
     indicator_calls = arms_run["calls"][MIXED_INDICATOR]
     assert any(tuple(sorted(columns)) in group_columns for columns, _ in indicator_calls), "no group fit was checked"
+
+
+def test_the_indicator_arm_reads_the_plans_indicator_values(arms_run):
+    """The fitted inputs of the indicator arm: the indicator is 1 in the held-out region, 0 elsewhere."""
+    plan, frames = arms_run["inputs"][MIXED_INDICATOR]
+    assert frames, "no fit of the indicator arm read the indicator"
+    expected = indicator(plan)
+    for X in frames:
+        assert X[INDICATOR_COLUMN].isin([0.0, 1.0]).all()
+        pd.testing.assert_series_equal(X[INDICATOR_COLUMN], expected.reindex(X.index), check_names=False)
+    for kind, (_, others) in arms_run["inputs"].items():
+        assert kind == MIXED_INDICATOR or not others, kind
+
+
+def _fragmented(n_columns=120, n_rows=8):
+    """A frame built one column at a time, so pandas keeps one block per column (as the runner's X can be)."""
+    import warnings
+
+    X = pd.DataFrame(index=pd.Index([f"p{i}" for i in range(n_rows)], name="point_id"))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", pd.errors.PerformanceWarning)
+        for k in range(n_columns):
+            X[f"c{k}"] = np.arange(n_rows, dtype=float) + k
+        X["ints"] = np.arange(n_rows)
+    assert X._mgr.nblocks > 100
+    return X
+
+
+def _old_assignment(X, values):
+    """What the runner did before: assign the column in place (here on a copy)."""
+    X = X.copy()
+    X[INDICATOR_COLUMN] = values.reindex(X.index)
+    return X
+
+
+@pytest.mark.parametrize("extra", ["same", "missing_points", "extra_points"])
+def test_with_indicator_gives_the_same_inputs_as_the_old_assignment(extra):
+    """Values, dtypes, column order and index match the in-place assignment it replaced."""
+    X = _fragmented()
+    values = pd.Series((np.arange(len(X)) % 2).astype(float), index=X.index, name=INDICATOR_COLUMN)
+    if extra == "missing_points":
+        values = values.iloc[2:]
+    elif extra == "extra_points":
+        values = pd.concat([values, pd.Series([1.0], index=pd.Index(["elsewhere"], name="point_id"))])
+    values = values.sample(frac=1.0, random_state=0)
+    pd.testing.assert_frame_equal(runner_module._with_indicator(X, values), _old_assignment(X, values))
+
+
+def test_with_indicator_raises_no_performance_warning_and_leaves_its_input_unchanged():
+    import warnings
+
+    X = _fragmented()
+    before = X.copy()
+    values = pd.Series(1.0, index=X.index)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        out = runner_module._with_indicator(X, values)
+    pd.testing.assert_frame_equal(X, before)
+    assert INDICATOR_COLUMN in out.columns and INDICATOR_COLUMN not in X.columns
+    fresh = _fragmented()
+    with pytest.warns(pd.errors.PerformanceWarning):
+        fresh[INDICATOR_COLUMN] = values  # the old in-place assignment, on a frame as fragmented
 
 
 def test_the_arms_are_never_pooled_and_each_is_compared_with_control(arms_run):

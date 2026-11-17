@@ -591,6 +591,17 @@ def _run_pool(jobs, shared: _Shared, workers: int, log_file, finished, context) 
             raise
 
 
+def _with_indicator(X: pd.DataFrame, values: pd.Series) -> pd.DataFrame:
+    """``X`` with :data:`INDICATOR_COLUMN` added as its last column, read from ``values`` by point id.
+
+    Joined with :func:`pandas.concat` rather than assigned in place: ``X`` comes from a concat of many
+    columns, and adding one more to it in place makes pandas warn about a fragmented frame. ``X`` itself
+    is left unchanged; a point of ``X`` that ``values`` lacks gets NaN, as an assignment would give.
+    """
+    column = values.reindex(X.index).rename(INDICATOR_COLUMN)
+    return pd.concat([X, column], axis=1)
+
+
 def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     """Stage 1 and every stage-2 output of one plan and seed."""
     started_plan = time.monotonic()
@@ -647,7 +658,7 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
     global_columns = [column for column in resolved.combined if column not in resolved.groups.get(AUXILIARY_GROUP, ())]
     if adds_indicator(row.kind):
         # The indicator arm: one more input, read only by the models on every covariate.
-        context.X[INDICATOR_COLUMN] = indicator(plan).reindex(context.X.index)
+        context.X = _with_indicator(context.X, indicator(plan))
         global_columns.append(INDICATOR_COLUMN)
     region = table.frame[table.region_column] if table.region_column else None
     scores: dict = {}
