@@ -16,8 +16,16 @@ import pandas as pd
 from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1 import evaluation
 from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach, dissimilarity_frame
-from yg_eo_soilnet.a1.figures.style import SOM_UNIT, WIDTH_2COL, caption_line, letter, place_labels, styled
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL_GLOBAL
+from yg_eo_soilnet.a1.figures.style import (
+    FALLBACK_NOTE,
+    SOM_UNIT,
+    WIDTH_2COL,
+    caption_line,
+    letter,
+    place_labels,
+    styled,
+)
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_GLOBAL
 
 #: The table's columns: the plain heading of each, short enough for one or two lines in a cell.
 HEADINGS = {
@@ -89,7 +97,8 @@ def basin_table(inputs: FigureInputs) -> pd.DataFrame:
             "r2_transferred": frame["r2_transferred"],
         }
     )
-    for name, model, metric in (("r2_local", LOCAL_GLOBAL, "r2"), ("bias_transferred", GLOBAL, "bias")):
+    local = evaluation.region_local_model(inputs.intervals_by_region)
+    for name, model, metric in (("r2_local", local, "r2"), ("bias_transferred", GLOBAL, "bias")):
         found = region_interval(inputs, model, metric).set_index("basin")
         for column, suffix in (("estimate", ""), ("low", "_low"), ("high", "_high")):
             out[name + suffix] = out["basin"].map(found[column]) if not found.empty else np.nan
@@ -162,6 +171,7 @@ def figure_basins(inputs: FigureInputs):
             if widest is not None
             else ""
         )
+        + (FALLBACK_NOTE if evaluation.fell_back(inputs.transfer) else "")
     )
     return attach(figure, {"table_basins": text, "fig10_basins": table}, caption)
 
@@ -327,6 +337,7 @@ def figure_basin_errors(inputs: FigureInputs):
             if has_local
             else f"The local model on Global's inputs ({LOCAL_GLOBAL}) is not in this run, so its column is empty."
         )
+        + (FALLBACK_NOTE if has_local and (table["local_model"] == LOCAL).any() else "")
     )
     return attach(figure, {"table_basin_errors": printable_errors(table), "figS6_basin_errors": table}, caption)
 
@@ -406,5 +417,6 @@ def figure_dissimilarity(inputs: FigureInputs):
         f"Figure S5. The {what} of each held-out basin against (a) the median dissimilarity index of its points and "
         "(b) the change in the SOM-CEC correlation; colour: carbonate-mix difference."
         + (f" With {len(frame)} basins, no correlation is reported." if 0 < len(frame) < 3 else "")
+        + (FALLBACK_NOTE if use_drop and evaluation.fell_back(inputs.transfer) else "")
     )
     return attach(figure, {"figS5_dissimilarity": frame}, caption)

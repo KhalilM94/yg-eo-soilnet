@@ -8,22 +8,25 @@ training ("mixed") and compares with a model trained on those moved points alone
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
-from matplotlib import patheffects
+from matplotlib.ticker import NullLocator
 import pandas as pd
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 
 from yg_eo_soilnet import plot_style as ps
+from yg_eo_soilnet.a1 import evaluation
 from yg_eo_soilnet.a1.config import COMBINED_GROUP
 from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach
 from yg_eo_soilnet.a1.figures.labels import pretty_name
 from yg_eo_soilnet.a1.figures.style import (
+    FALLBACK_NOTE,
     SOM_UNIT,
-    direction_axis,
     WIDTH_1COL,
     WIDTH_2COL,
-    better_label,
+    basin_colors,
     caption_line,
     place_labels,
     letter,
@@ -31,11 +34,11 @@ from yg_eo_soilnet.a1.figures.style import (
     model_marker,
     styled,
 )
-from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_GLOBAL, LOCAL_OF
-from yg_eo_soilnet.datamodules.splitting import TEST
-from yg_eo_soilnet.metrics import regression_metrics
+from yg_eo_soilnet.a1.plans import CONTROL, LOGO, MIXED, MIXED_INDICATOR, MIXED_WEIGHTED, is_matched
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_GLOBAL
 
+#: Figure 9's E4 panel: each basin's points shifted by this share of the x range, so their intervals do not overlap.
+E4_OFFSET = 0.02
 #: Line colours of figure 9: mixed in the global model's colour, control in the local one's.
 MIXED_COLOR = model_color(GLOBAL)
 CONTROL_COLOR = model_color(LOCAL_GLOBAL)
@@ -82,7 +85,7 @@ def _no_transfer_message(inputs: FigureInputs) -> str:
     """Why figure 8 cannot be drawn, true for this run."""
     if LOGO not in set(inputs.predictions["kind"]):
         return "This run has no leave-one-basin-out plans: run run_a1.py with --kinds logo."
-    if LOCAL_GLOBAL not in set(inputs.predictions["model"]):
+    if not {LOCAL_GLOBAL, LOCAL} & set(inputs.predictions["model"]):
         return (
             f"No {LOCAL_GLOBAL} model in this run (the local model on Global's inputs): its leave-one-basin-out plans "
             "were run before it was fitted, or every held-out basin has fewer than 3 blocks. Run run_a1.py again "
@@ -113,6 +116,7 @@ def figure_transfer(inputs: FigureInputs):
             if not grid.empty
             else ""
         )
+        + (FALLBACK_NOTE if evaluation.fell_back(inputs.transfer) else "")
     )
     data = {"fig08_transfer_points": points}
     if not grid.empty:
@@ -220,303 +224,280 @@ def draw_transfer(points: pd.DataFrame, grid: pd.DataFrame):
 
 # --- figure 9 ---------------------------------------------------------------------------------------
 
-#: The shares named on figure 9's top axis, when the run has them.
-SHARE_TICKS = (0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9)
-#: Figure 9's "plateau": the mean mixed RMSE over the shares at least this large.
-PLATEAU_FROM = 0.5
+#: The kinds figure 9 draws, in legend order (whichever the run has).
+FIG9_KINDS = (CONTROL, MIXED, MIXED_WEIGHTED, MIXED_INDICATOR)
+#: Line style of the model with no local points (the plain logo plan) on each share's test points.
+TRANSFERRED_STYLE = (ps.INK_2, ":")
+#: The note under figure 9.
+FIG9_NOTE = "Bands: 95 % 10 km block bootstrap over test points, repeats stacked; dots: individual repeats."
 
 
-def _rmse(part: pd.DataFrame) -> float:
-    return regression_metrics(part["observed"].to_numpy(dtype=float), part["predicted"].to_numpy(dtype=float)).get(
-        "rmse_test", np.nan
-    )
+def moved_points(inputs: FigureInputs) -> pd.DataFrame:
+    """``region, fraction, moved``: the mean number of basin points moved into training per share.
 
-
-def mixed_curves(inputs: FigureInputs, *, model: str = GLOBAL, group: str = COMBINED_GROUP) -> pd.DataFrame:
-    """Test RMSE of every mixed and control plan of ``model``, by basin and number of moved samples.
-
-    Scored on the basin's points left out of training. The number of moved samples is the matching
-    control plan's ``n_train`` (same basin, share and repeat); the share when the plan index does
-    not hold it.
-
-    Returns
-    -------
-    pandas.DataFrame
-        ``region, kind, fraction, repeat, moved, rmse, n``.
+    The matching control plans' ``n_train`` (the moved points alone), averaged over the repeats;
+    the share itself when the plan index does not hold it.
     """
-    frame = inputs.predictions
-    rows = frame[
-        (frame["split"] == TEST)
-        & frame["kind"].isin([MIXED, CONTROL])
-        & (frame["model"] == model)
-        & (frame["covariate_group"] == group)
-    ]
-    columns = ["region", "kind", "fraction", "repeat", "moved", "rmse", "n"]
-    if rows.empty:
-        return pd.DataFrame(columns=columns)
-    scores = [
-        {
-            "plan_id": plan_id,
-            "region": str(region),
-            "kind": kind,
-            "fraction": float(fraction),
-            "repeat": repeat,
-            "rmse": _rmse(part),
-            "n": len(part),
-        }
-        for (plan_id, kind, region, fraction, repeat), part in rows.groupby(
-            ["plan_id", "kind", "held_out", "fraction", "repeat"]
-        )
-    ]
-    scores = pd.DataFrame(scores)
     index = inputs.index
-    control = index[index["kind"] == CONTROL][["held_out", "fraction", "repeat", "n_train"]].rename(
-        columns={"held_out": "region", "n_train": "moved"}
+    control = index[index["kind"] == CONTROL] if not index.empty else index
+    if control.empty:
+        return pd.DataFrame(columns=["region", "fraction", "moved"])
+    table = (
+        control.assign(region=control["held_out"].astype(str), fraction=control["fraction"].astype(float).round(6))
+        .groupby(["region", "fraction"])["n_train"]
+        .mean()
+        .rename("moved")
+        .reset_index()
     )
-    control = control.assign(region=control["region"].astype(str), fraction=control["fraction"].astype(float))
-    scores = scores.merge(control, on=["region", "fraction", "repeat"], how="left")
-    scores["moved"] = scores["moved"].fillna(scores["fraction"])
-    return scores[columns].sort_values(["region", "kind", "moved", "repeat"])
+    return table
 
 
-def mixed_summary(curves: pd.DataFrame) -> pd.DataFrame:
-    """Mean, min and max of the test RMSE over repeats, per basin, kind and number moved; mean test points."""
-    grouped = curves.groupby(["region", "kind", "moved"])
-    summary = grouped["rmse"].agg(mean="mean", low="min", high="max", repeats="count")
-    summary["n"] = grouped["n"].mean()
-    summary["fraction"] = grouped["fraction"].first()
-    return summary.reset_index()
+def _with_moved(frame: pd.DataFrame, moved: pd.DataFrame) -> pd.DataFrame:
+    frame = frame.rename(columns={"held_out": "region"}).assign(
+        region=lambda part: part["region"].astype(str), fraction=lambda part: part["fraction"].astype(float).round(6)
+    )
+    frame = frame.merge(moved, on=["region", "fraction"], how="left")
+    frame["moved"] = frame["moved"].fillna(frame["fraction"])
+    return frame
 
 
-def mixed_paired(curves: pd.DataFrame) -> pd.DataFrame:
-    """RMSE(mixed) - RMSE(control) per basin, share and repeat: the two share their test points.
+def e4_sizes(logo_runs, *, model: str = GLOBAL, block_km: float = 10.0, n: int = 1000, seed: int = 42) -> tuple:
+    """The E4 panel's data: the transferred RMSE per basin and number of external training points.
 
-    Returns
-    -------
-    pandas.DataFrame
-        ``region, fraction, moved, repeat, rmse_mixed, rmse_control, difference, n``; a negative
-        difference means the other basins help.
+    From the run folders given (the matched-size runs and the main run): each matched size, repeats
+    stacked, and the main run's full leave-one-basin-out model, each with a 95 % interval
+    (:func:`~yg_eo_soilnet.a1.compare.matched_intervals`); and every matched draw on its own.
+    Two empty tables when no folder holds matched plans.
     """
-    keys = ["region", "fraction", "repeat"]
-    mixed = curves[curves["kind"] == MIXED].set_index(keys)
-    control = curves[curves["kind"] == CONTROL].set_index(keys)
-    both = mixed[["rmse", "n"]].join(control[["rmse", "moved"]], lsuffix="_mixed", rsuffix="_control", how="inner")
-    both = both.rename(columns={"rmse_mixed": "rmse_mixed", "rmse_control": "rmse_control"})
-    both["difference"] = both["rmse_mixed"] - both["rmse_control"]
-    out = both.reset_index()[["region", "fraction", "moved", "repeat", "rmse_mixed", "rmse_control", "difference", "n"]]
-    return out.sort_values(["region", "moved", "repeat"])
+    from pathlib import Path
+
+    from yg_eo_soilnet.a1 import compare
+
+    empty = pd.DataFrame(), pd.DataFrame()
+    folders = [Path(path) for path in (logo_runs or ()) if (Path(path) / "manifest.json").exists()]
+    if not folders:
+        return empty
+    runs = [compare.read_run(folder, model=model, kinds=[LOGO]) for folder in folders]
+    reference = compare.pick_transfer_run(runs, None)
+    if reference is None:
+        plain = [run for run in runs if (~is_matched(run.predictions["plan_id"])).any()]
+        reference = plain[0] if plain else None
+    stack, _, n_train = compare.matched_stack(runs, reference, model=model)
+    stack = stack[stack["model"] != compare.LOCAL_LABEL]
+    if not compare._sizes(stack):
+        return empty
+    intervals = compare.matched_intervals(stack, n_train, block_km=block_km, n=n, seed=seed)
+    intervals = intervals[intervals["metric"] == "rmse"]
+    repeats = compare.matched_repeats(stack)
+    repeats["n_train"] = [
+        n_train.get((basin, label), np.nan) for basin, label in zip(repeats["basin"], repeats["model"])
+    ]
+    return intervals.reset_index(drop=True), repeats
 
 
-def mixed_references(inputs: FigureInputs, *, model: str = GLOBAL) -> pd.DataFrame:
-    """Per held-out basin: ``model``'s RMSE with no local points (leave one basin out) and the local model's.
+def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None):
+    """Figure 9: test RMSE and bias against the number of local points in training, every mixed kind and control.
 
-    Both on every point of the basin; the local model is the one on ``model``'s inputs (:data:`LOCAL_OF`).
+    Each kind (control, mixed, and the arms the run has) and the model with no local points are
+    scored on the same test points of each share, the repeats stacked, with a 95 % block-bootstrap
+    band; a ring marks an arm that differs from control (paired, Holm across the shares). With
+    ``logo_runs``, a small panel adds E4: the transferred RMSE against the number of external
+    training points.
     """
-    frame = inputs.predictions
-    logo = frame[(frame["split"] == TEST) & (frame["kind"] == LOGO) & (frame["covariate_group"] == COMBINED_GROUP)]
-    rows = []
-    for region, part in logo.groupby("held_out"):
-        transferred, local = part[part["model"] == model], part[part["model"] == LOCAL_OF.get(model, LOCAL)]
-        rows.append(
-            {
-                "region": str(region),
-                "rmse_transferred": _rmse(transferred) if len(transferred) else np.nan,
-                "rmse_local": _rmse(local) if len(local) else np.nan,
-            }
-        )
-    return pd.DataFrame(rows, columns=["region", "rmse_transferred", "rmse_local"])
-
-
-def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL):
-    """Figure 9: test RMSE against the number of the basin's points moved into training, and mixed - control."""
-    curves = mixed_curves(inputs, model=model)
-    if curves.empty:
+    stacked = evaluation.mixed_stack(inputs.predictions, model=model)
+    if stacked.empty:
         if MIXED in set(inputs.predictions["kind"]):
             return _missing(f"No mixed or control predictions of the {pretty_name(model)} model in this run.")
         return _missing("This run has no mixed plans: run run_a1.py with --kinds mixed (it brings the control plans).")
-    summary = mixed_summary(curves)
-    paired = mixed_paired(curves)
-    references = mixed_references(inputs, model=model)
-    figure = draw_mixed(summary, references, paired, model=model)
+    seed = inputs.settings.seed
+    moved = moved_points(inputs)
+    intervals = _with_moved(
+        evaluation.mixed_intervals(stacked, block_km=inputs.block_km, n=inputs.n_boot, seed=seed), moved
+    )
+    repeats = _with_moved(evaluation.mixed_repeat_scores(stacked), moved)
+    rows = inputs.predictions[inputs.predictions["model"] == model]
+    differences = evaluation.mixed_differences(rows, block_km=inputs.block_km, n=inputs.n_boot, seed=seed)
+    differences = _with_moved(differences.rename(columns={"region": "held_out"}), moved)
+    e4, e4_repeats = e4_sizes(logo_runs, model=model, block_km=inputs.block_km, n=inputs.n_boot, seed=seed)
+    if not e4.empty and not set(e4["basin"]) & set(intervals["region"]):
+        e4, e4_repeats = pd.DataFrame(), pd.DataFrame()  # another dataset's basins (the demo, say): no panel
+    figure = draw_mixed(intervals, repeats, differences, e4, e4_repeats, model=model)
+
     parts = []
-    for region, part in paired.groupby("region"):
-        reference = references.set_index("region").reindex([region]).iloc[0] if not references.empty else None
-        mixed = summary[(summary["region"] == region) & (summary["kind"] == MIXED)]
-        plateau = mixed[mixed["fraction"] >= PLATEAU_FROM]["mean"].mean()
-        text = (
-            f"{region}: control beats mixed in {(part['difference'] > 0).mean():.0%} of {len(part)} paired repeats; "
-            f"mean mixed − control {part['difference'].mean():+.2f} {SOM_UNIT}"
+    rmse = intervals[intervals["metric"] == "rmse"]
+    for region, part in rmse.groupby("region"):
+        last = part["fraction"].max()
+        at = part[part["fraction"] == last].set_index("kind")
+        text = f"{region}, {int(round(at['moved'].iloc[0])):,} local points: " + ", ".join(
+            f"{_kind_name(kind).lower()} {at.loc[kind, 'estimate']:.2f}"
+            for kind in (*FIG9_KINDS, evaluation.TRANSFERRED)
+            if kind in at.index
         )
-        if reference is not None and np.isfinite(reference["rmse_transferred"]):
-            text += f"; {reference['rmse_transferred']:.2f} with no local points"
-        if np.isfinite(plateau):
-            text += f", {plateau:.2f} at the plateau (shares ≥ {PLATEAU_FROM:.0%})"
+        flagged = differences[
+            (differences["region"] == region) & (differences["metric"] == "rmse") & (differences["p_holm"] < 0.05)
+        ]
+        if not flagged.empty:
+            text += "; differs from control (p_Holm < 0.05): " + ", ".join(
+                f"{_kind_name(kind).lower()} at {count} share(s)" for kind, count in flagged.groupby("a").size().items()
+            )
         parts.append(ps.minus(text))
     caption = (
-        f"Figure 9. {pretty_name(model)} model, every input. Upper row: test RMSE on the basin's remaining points as "
-        "more of its points are moved into training - mixed (the other basins plus the moved points) and control "
-        "(the moved points alone); mean over repeats, band min-max. Each share tests a different set of points, so "
-        "the upper row compares test sets as well as models. Lower row: the paired difference mixed − control on "
-        "the same test points of each repeat, the valid comparison. " + "; ".join(parts) + "."
+        f"Figure 9. {pretty_name(model)} model, every input. RMSE (upper row) and bias, predicted − measured (lower "
+        "row), on the basin's points left out of training, against the number of the basin's points in training "
+        "(log scale): control (those points alone), mixed (the other basins plus them) and each arm the run has "
+        "(weighted: the moved points weigh more; indicator: an input flags them), and, dotted, the model trained "
+        "on the other basins alone on the same test points. Each share tests a different set of points; within a "
+        "share every line is scored on the same points. Rings: an arm differs from control (paired block bootstrap, "
+        "Holm across the shares of one basin). "
+        + FIG9_NOTE
+        + (
+            " Right: E4, the transferred RMSE against the number of external training points - the matched draws "
+            "(2,000 and 3,600 points, repeats stacked) and the full leave-one-basin-out model (one fit: no dots)."
+            if not e4.empty
+            else ""
+        )
+        + " "
+        + "; ".join(parts)
+        + "."
     )
-    return attach(
-        figure,
-        {"fig09_mixed_repeats": curves, "fig09_mixed_summary": summary, "fig09_mixed_paired": paired},
-        caption,
-    )
+    data = {
+        "fig09_mixed_intervals": intervals,
+        "fig09_mixed_repeats": repeats,
+        "fig09_mixed_vs_control": differences,
+    }
+    if not e4.empty:
+        data["fig09_e4_intervals"] = e4
+        data["fig09_e4_repeats"] = e4_repeats
+    return attach(figure, data, caption)
 
 
-def _share_axis(axis, summary: pd.DataFrame) -> None:
-    """A top axis naming the share of the basin moved, at the same places as the moved counts."""
-    pairs = summary.drop_duplicates("moved").sort_values("moved")
-    moved, share = pairs["moved"].to_numpy(dtype=float), pairs["fraction"].to_numpy(dtype=float)
-    if len(moved) < 2:
-        return
-    log_moved = np.log(moved)
+def _kind_name(kind: str) -> str:
+    from yg_eo_soilnet.a1.figures.compare import kind_label
 
-    def forward(values):
-        return np.interp(np.log(np.clip(values, 1e-9, None)), log_moved, share)
-
-    def backward(values):
-        return np.exp(np.interp(values, share, log_moved))
-
-    top = axis.secondary_xaxis("top", functions=(forward, backward))
-    ticks = [value for value in SHARE_TICKS if share.min() - 1e-9 <= value <= share.max() + 1e-9]
-    from matplotlib.ticker import NullLocator
-
-    top.set_xticks(ticks, [f"{value:.0%}" for value in ticks])
-    top.xaxis.set_minor_locator(NullLocator())  # only the shares named, no automatic log-scale labels
-    top.tick_params(labelsize=7, length=2)
-    top.set_xlabel("Share of the basin moved", fontsize=7)
+    return "No local points" if kind == evaluation.TRANSFERRED else kind_label(kind)
 
 
 @styled
-def draw_mixed(summary: pd.DataFrame, references: pd.DataFrame, paired: pd.DataFrame, *, model: str = GLOBAL):
-    """Draw figure 9: per basin, (upper) mixed and control RMSE with their range; (lower) the paired difference."""
+def draw_mixed(
+    intervals: pd.DataFrame,
+    repeats: pd.DataFrame,
+    differences: pd.DataFrame,
+    e4: Optional[pd.DataFrame] = None,
+    e4_repeats: Optional[pd.DataFrame] = None,
+    *,
+    model: str = GLOBAL,
+):
+    """Draw figure 9: per basin, RMSE (upper) and bias (lower) against the local points; the E4 panel when given."""
     import matplotlib.pyplot as plt
-    from matplotlib.ticker import NullLocator
 
-    if summary.empty:
+    from yg_eo_soilnet.a1.figures.compare import KIND_STYLE
+
+    if intervals.empty:
         return _missing("No mixed-training plans to draw.")
-    regions = sorted(summary["region"].unique())
-    columns = min(3, len(regions))
-    blocks = int(np.ceil(len(regions) / columns))
-    mosaic, ratios = [], []
-    for block in range(blocks):
-        mosaic += [[f"rmse_{block}_{c}" for c in range(columns)], [f"diff_{block}_{c}" for c in range(columns)]]
-        ratios += [1.0, 0.55]
+    e4 = e4 if e4 is not None else pd.DataFrame()
+    e4_repeats = e4_repeats if e4_repeats is not None else pd.DataFrame()
+    regions = sorted(intervals["region"].unique())
+    names = [f"r{position}" for position in range(len(regions))]
+    upper_row = [f"rmse_{name}" for name in names] + (["e4"] if not e4.empty else [])
+    lower_row = [f"bias_{name}" for name in names] + (["key"] if not e4.empty else [])
+    widths = [1.0] * len(regions) + ([0.75] if not e4.empty else [])
     figure, grid = plt.subplot_mosaic(
-        mosaic,
-        figsize=(WIDTH_2COL if columns > 1 else WIDTH_1COL, 3.6 * blocks + 0.9),
+        [upper_row, lower_row],
+        figsize=(WIDTH_2COL if len(upper_row) > 1 else WIDTH_1COL, 4.6),
         layout="constrained",
-        gridspec_kw={"height_ratios": ratios},
+        gridspec_kw={"height_ratios": [1.0, 0.65], "width_ratios": widths},
     )
-    references = references.set_index("region") if not references.empty else references
-    drawn = {"mixed": False, "control": False, "transferred": False, "local": False}
-    letters = iter("abcdefghijklmnopqrstuvwxyz")
-    for position, region in enumerate(regions):
-        block, c = divmod(position, columns)
-        upper, lower = grid[f"rmse_{block}_{c}"], grid[f"diff_{block}_{c}"]
-        lower.sharex(upper)
-        part = summary[summary["region"] == region]
-        y_values = [part["low"], part["high"]]
-        for kind, color, marker in ((MIXED, MIXED_COLOR, "D"), (CONTROL, CONTROL_COLOR, "v")):
-            line = part[part["kind"] == kind].sort_values("moved")
-            if line.empty:
-                continue
-            upper.fill_between(line["moved"], line["low"], line["high"], color=color, alpha=0.18, lw=0)
-            upper.plot(
-                line["moved"],
-                line["mean"],
-                color=color,
-                lw=1.4,
-                marker=marker,
-                ms=3.5,
-                markeredgecolor="white",
-                markeredgewidth=0.4,
+    styles = {**{kind: (KIND_STYLE[kind][0], "-", KIND_STYLE[kind][1]) for kind in FIG9_KINDS}}
+    styles[evaluation.TRANSFERRED] = (TRANSFERRED_STYLE[0], TRANSFERRED_STYLE[1], "o")
+    present = [kind for kind in (*FIG9_KINDS, evaluation.TRANSFERRED) if kind in set(intervals["kind"])]
+    for region, name in zip(regions, names):
+        for metric, axis in (("rmse", grid[f"rmse_{name}"]), ("bias", grid[f"bias_{name}"])):
+            for kind in present:
+                color, style, marker = styles[kind]
+                line = intervals[
+                    (intervals["region"] == region) & (intervals["kind"] == kind) & (intervals["metric"] == metric)
+                ].sort_values("moved")
+                if line.empty:
+                    continue
+                axis.fill_between(line["moved"], line["low"], line["high"], color=color, alpha=0.14, lw=0)
+                axis.plot(line["moved"], line["estimate"], color=color, ls=style, lw=1.2)
+                dots = repeats[(repeats["region"] == region) & (repeats["kind"] == kind)]
+                axis.scatter(dots["moved"], dots[metric], s=3, color=color, alpha=0.55, lw=0, zorder=3)
+                flagged = differences[
+                    (differences["region"] == region)
+                    & (differences["a"] == kind)
+                    & (differences["metric"] == metric)
+                    & (differences["p_holm"] < 0.05)
+                ]
+                if not flagged.empty:
+                    at = line.set_index("fraction").reindex(flagged["fraction"])
+                    axis.scatter(
+                        at["moved"], at["estimate"], s=34, facecolors="none", edgecolors=color, lw=1.0, zorder=4
+                    )
+            axis.set_xscale("log")
+            axis.xaxis.set_minor_locator(NullLocator())
+            if metric == "rmse":
+                axis.set_title(region, fontsize=8)
+                axis.tick_params(labelbottom=False)
+                if name == names[0]:
+                    axis.set_ylabel(f"RMSE ({SOM_UNIT})")
+            else:
+                axis.axhline(0, color=ps.BASELINE, lw=0.8, zorder=1)
+                axis.set_xlabel("Basin points in training (log scale)")
+                if name == names[0]:
+                    axis.set_ylabel(f"Bias ({SOM_UNIT})")
+        grid[f"bias_{name}"].sharex(grid[f"rmse_{name}"])
+    # Letters along the rows: the RMSE panels (and E4), then the bias panels.
+    for code, key in zip("abcdefghijklmnop", [*upper_row, *[key for key in lower_row if key != "key"]]):
+        letter(grid[key], code)
+    handles = [
+        Line2D([], [], color=styles[kind][0], ls=styles[kind][1], lw=1.2, label=_kind_name(kind)) for kind in present
+    ]
+    handles += [
+        Patch(facecolor=ps.MUTED, alpha=0.3, label="95 % block bootstrap"),
+        Line2D([], [], ls="", marker="o", color=ps.MUTED, ms=2.5, label="One repeat"),
+        Line2D([], [], ls="", marker="o", mfc="none", color=ps.INK_2, ms=5, label="Differs from control (Holm)"),
+    ]
+    if not e4.empty:
+        axis = grid["e4"]
+        basins = sorted(e4["basin"].unique())
+        colors = basin_colors(basins)
+        span = float(e4["n_train"].max() - e4["n_train"].min()) or 1000.0
+        basin_handles = []
+        for position, basin in enumerate(basins):
+            color = colors[basin]
+            # Each basin a little to the side, so the intervals of one size do not hide each other.
+            shift = (position - (len(basins) - 1) / 2) * E4_OFFSET * span
+            line = e4[e4["basin"] == basin].sort_values("n_train")
+            x = line["n_train"].to_numpy(float) + shift
+            errors = np.vstack(
+                [(line["estimate"] - line["low"]).clip(lower=0), (line["high"] - line["estimate"]).clip(lower=0)]
             )
-            drawn["mixed" if kind == MIXED else "control"] = True
-        if not references.empty and region in references.index:
-            reference = references.loc[region]
-            if np.isfinite(reference["rmse_transferred"]):
-                upper.axhline(reference["rmse_transferred"], color=MIXED_COLOR, lw=0.9, ls=":")
-                y_values.append(pd.Series([reference["rmse_transferred"]]))
-                drawn["transferred"] = True
-            if np.isfinite(reference["rmse_local"]):
-                upper.axhline(reference["rmse_local"], color=CONTROL_COLOR, lw=0.9, ls="--")
-                y_values.append(pd.Series([reference["rmse_local"]]))
-                drawn["local"] = True
-        # Every line drawn lies inside the limits, reference lines included.
-        values = pd.concat(y_values).to_numpy(dtype=float)
-        low, high = np.nanmin(values), np.nanmax(values)
-        pad = 0.08 * (high - low if high > low else 1.0)
-        upper.set_ylim(low - pad, high + pad * 2.5)
-        # The test points left, at the first and the last share.
-        mixed = part[part["kind"] == MIXED].sort_values("moved")
-        for row, ha in ((mixed.iloc[0], "left"), (mixed.iloc[-1], "right")) if len(mixed) else ():
-            upper.annotate(
-                f"{int(round(row['n'])):,} test points",
-                (row["moved"], row["high"]),
-                xytext=(0, 5),
-                textcoords="offset points",
-                ha=ha,
-                va="bottom",
-                fontsize=7,
-                color=ps.INK_2,
-                path_effects=[patheffects.withStroke(linewidth=2.2, foreground="white")],
+            axis.errorbar(
+                x, line["estimate"], yerr=errors, color=color, lw=1.0, marker="o", ms=3, capsize=0, elinewidth=0.9
             )
-        upper.set_xscale("log")
-        upper.set_title(region, fontsize=8, pad=18)
-        upper.set_ylabel(better_label("Test RMSE", "lower", SOM_UNIT).replace(", lower", ",\nlower") if c == 0 else "")
-        upper.tick_params(labelbottom=False)
-        _share_axis(upper, part)
-        letter(upper, next(letters))
-
-        pairs = paired[paired["region"] == region]
-        lower.scatter(pairs["moved"], pairs["difference"], s=7, color=ps.MUTED, alpha=0.7, lw=0, zorder=2)
-        means = pairs.groupby("moved")["difference"].mean()
-        lower.plot(means.index, means.to_numpy(), color=ps.INK, lw=1.3, zorder=3)
-        direction_axis(lower, above="control better", below="mixed better", zero="", labels=c == columns - 1)
-        lower.set_ylabel(f"Mixed − control\nRMSE ({SOM_UNIT})" if c == 0 else "")
-        moved = sorted(part["moved"].unique())
-        lower.xaxis.set_minor_locator(NullLocator())
-        # Every count gets a tick; a label only where it clears the last one (log scale crowds the top).
-        shown, last = [], -np.inf
-        for value in moved:
-            keep = np.log10(value) - last >= 0.11
-            shown.append(f"{int(value):,}" if keep else "")
-            last = np.log10(value) if keep else last
-        lower.set_xticks(moved, shown, rotation=45, ha="right", rotation_mode="anchor")
-        lower.set_xlabel("Basin points moved into training (log scale)")
-        letter(lower, next(letters))
-    for position in range(len(regions), blocks * columns):
-        block, c = divmod(position, columns)
-        grid[f"rmse_{block}_{c}"].set_axis_off()
-        grid[f"diff_{block}_{c}"].set_axis_off()
-    handles = []
-    if drawn["mixed"]:
-        handles.append(
-            Line2D([], [], color=MIXED_COLOR, lw=1.4, marker="D", ms=3.5, label="Mixed: other basins + moved points")
+            dots = e4_repeats[e4_repeats["basin"] == basin] if not e4_repeats.empty else e4_repeats
+            if not dots.empty:
+                axis.scatter(dots["n_train"] + shift, dots["rmse"], s=3, color=color, alpha=0.55, lw=0, zorder=3)
+            basin_handles.append(Line2D([], [], color=color, marker="o", ms=3, lw=1.0, label=basin))
+        axis.set_title("E4: training size", fontsize=8)
+        axis.set_xlabel("External training points")
+        axis.set_ylabel(f"Transferred RMSE ({SOM_UNIT})")
+        # The basins just under the panel, clear of its bars; the kinds at the foot of the slot below.
+        axis.legend(
+            handles=basin_handles,
+            loc="upper center",
+            bbox_to_anchor=(0.5, -0.3),
+            frameon=False,
+            fontsize=7,
+            ncol=3,
+            handlelength=1.2,
+            columnspacing=0.8,
         )
-    if drawn["control"]:
-        handles.append(
-            Line2D([], [], color=CONTROL_COLOR, lw=1.4, marker="v", ms=3.5, label="Control: moved points alone")
-        )
-    handles.append(Patch(facecolor=ps.MUTED, alpha=0.3, label="Range over repeats"))
-    if drawn["transferred"]:
-        handles.append(Line2D([], [], color=MIXED_COLOR, lw=0.9, ls=":", label="No local points (leave one basin out)"))
-    if drawn["local"]:
-        handles.append(
-            Line2D(
-                [], [], color=CONTROL_COLOR, lw=0.9, ls="--", label="Local model (same inputs), all the basin's points"
-            )
-        )
-    handles.append(Line2D([], [], ls="", marker="o", color=ps.MUTED, ms=3, label="Paired difference, one repeat"))
-    figure.legend(handles=handles, loc="outside upper center", ncol=2 if columns > 1 else 1, frameon=False)
-    caption_line(
-        figure,
-        f"Model: {pretty_name(model)}, every input; dashed: {pretty_name(LOCAL_OF.get(model, LOCAL))}. Upper: mean over "
-        "repeats, band min to max. Lower: one point per repeat, line their mean; mixed and control share their test "
-        "points within a repeat.",
-    )
+        key = grid["key"]
+        key.set_axis_off()
+        key.legend(handles=handles, loc="lower center", frameon=False, fontsize=7)
+    else:
+        figure.legend(handles=handles, loc="outside upper center", ncol=3, frameon=False)
+    caption_line(figure, FIG9_NOTE)
     return figure

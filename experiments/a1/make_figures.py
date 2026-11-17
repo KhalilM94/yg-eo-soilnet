@@ -43,6 +43,20 @@ from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.tracking import log_figures, reopen_parent  # noqa: E402
 
 
+#: The run folders figure 9's E4 panel reads by default, when they exist.
+DEFAULT_LOGO_RUNS = tuple(
+    REPOSITORY_ROOT / "results" / name / "runs" / "default"
+    for name in ("a1_logo_matched", "a1_logo_matched_2000", "a1_xgb")
+)
+
+
+def _logo_runs(given):
+    """``--logo-runs``, or the default folders that exist."""
+    if given is not None:
+        return [Path(path) for path in given]
+    return [path for path in DEFAULT_LOGO_RUNS if (path / "manifest.json").exists()]
+
+
 def main(argv: list[str] | None = None) -> dict:
     """Draw and save the figures from the command line.
 
@@ -94,6 +108,13 @@ def main(argv: list[str] | None = None) -> dict:
         help="Draw only these figures, comma-separated file names (e.g. fig05_spatial,fig06_obs_pred).",
     )
     parser.add_argument("--skip", default=None, help="Do not draw these figures, comma-separated file names.")
+    parser.add_argument(
+        "--logo-runs",
+        nargs="*",
+        default=None,
+        help="Run folders for figure 9's E4 panel (default: results/a1_logo_matched, results/a1_logo_matched_2000 "
+        "and results/a1_xgb, those that exist; the panel only when they share a basin with this run).",
+    )
     parser.add_argument("--no-relief", action="store_true", help="Flat ground under the map, no relief tiles.")
     parser.add_argument(
         "--check-text",
@@ -129,6 +150,7 @@ def main(argv: list[str] | None = None) -> dict:
             n_boot=args.n_boot,
             shap_plan=args.shap_plan,
             mixed_model=args.mixed_model,
+            logo_runs=_logo_runs(args.logo_runs),
             close=False,
             only=only,
             skip=skip,

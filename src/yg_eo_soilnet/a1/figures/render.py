@@ -87,6 +87,7 @@ def _builders(
     n_boot: int,
     shap_plan: Optional[str],
     mixed_model: str = GLOBAL,
+    logo_runs=None,
 ) -> dict[str, Callable]:
     return {
         "fig01_design": lambda: design.figure_design(inputs),
@@ -97,7 +98,7 @@ def _builders(
         "fig06_obs_pred": lambda: obs_pred.figure_obs_pred(inputs),
         "fig07_class_bias": lambda: class_bias.figure_class_bias(inputs),
         "fig08_transfer": lambda: transfer.figure_transfer(inputs),
-        "fig09_mixed": lambda: transfer.figure_mixed(inputs, model=mixed_model),
+        "fig09_mixed": lambda: transfer.figure_mixed(inputs, model=mixed_model, logo_runs=logo_runs),
         "fig10_basins": lambda: basins.figure_basins(inputs),
         "fig11_shap_groups": lambda: shap.figure_shap_groups(inputs, plan_id=shap_plan),
         "figS1_obs_pred_blocks": lambda: obs_pred.figure_obs_pred_blocks(inputs),
@@ -161,6 +162,7 @@ def render_all(
     n_boot: Optional[int] = None,
     shap_plan: Optional[str] = None,
     mixed_model: str = GLOBAL,
+    logo_runs=None,
     close: bool = False,
     only: Optional[Sequence[str]] = None,
     skip: Optional[Sequence[str]] = None,
@@ -183,6 +185,8 @@ def render_all(
         leave-one-basin-out plan when the run has no random split (:func:`.shap.shap_plans`).
     mixed_model : str, default "global"
         The model figure 9 follows through the mixed and control plans.
+    logo_runs : list of path, optional
+        Run folders of the matched-size runs and the main run, for figure 9's E4 panel.
     close : bool, default False
         Close each figure once saved, to free memory when they are not going to be shown.
     only, skip : list of str, optional
@@ -200,7 +204,13 @@ def render_all(
     if n_boot is not None:
         inputs.n_boot = n_boot
     builders = _builders(
-        inputs, relief=relief, cache_dir=cache_dir, n_boot=inputs.n_boot, shap_plan=shap_plan, mixed_model=mixed_model
+        inputs,
+        relief=relief,
+        cache_dir=cache_dir,
+        n_boot=inputs.n_boot,
+        shap_plan=shap_plan,
+        mixed_model=mixed_model,
+        logo_runs=logo_runs,
     )
     figures, captions = {}, {}
     for name in names:

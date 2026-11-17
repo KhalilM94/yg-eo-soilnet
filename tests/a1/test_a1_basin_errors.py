@@ -130,14 +130,17 @@ def test_main_transfer_leaves_out_the_pair_with_predicted_caco3_and_cec():
     assert not main.duplicated(["kind", "region", "covariate_group"]).any()  # one row per region and group
 
 
-def test_without_local_global_the_main_row_has_empty_local_columns_not_the_other_pair():
+def test_without_local_global_the_main_row_falls_back_on_local_and_names_it():
     points = _points(30)
     table = transfer_table(pd.concat(_logo(points, "A", {GLOBAL: 3.0, GLOBAL_AUX: 5.0, LOCAL: 2.0})))
     main = table[table["inputs"] == INPUTS_EVERY].iloc[0]
-    assert not main["has_local"] and np.isnan(main["rmse_local"]) and np.isnan(main["rmse_drop"])
-    assert main["rmse_transferred"] == pytest.approx(3.0)
+    assert main["has_local"] and main["local_model"] == LOCAL and main["rmse_local"] == pytest.approx(2.0)
+    assert main["rmse_transferred"] == pytest.approx(3.0) and main["rmse_drop"] == pytest.approx(1.0)
     extra = table[table["inputs"] == INPUTS_WITH_PREDICTED].iloc[0]
     assert extra["has_local"] and extra["rmse_local"] == pytest.approx(2.0)
+    # Without either local model the main row keeps empty local columns.
+    bare = transfer_table(pd.concat(_logo(points, "A", {GLOBAL: 3.0})))
+    assert not bare.iloc[0]["has_local"] and np.isnan(bare.iloc[0]["rmse_local"])
 
 
 def test_mixed_main_rows_compare_global_with_the_control_plans_global():

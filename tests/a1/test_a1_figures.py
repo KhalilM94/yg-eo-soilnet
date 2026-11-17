@@ -473,127 +473,41 @@ def test_figure_6_stats_are_the_metrics_slope_and_spread_ratio_recomputed():
 
 
 # --- figure 9: mixed training ------------------------------------------------------------------------
+# Its data and drawing are tested in test_a1_stacked.py (the stacked repeats, the bands, the E4 panel).
 
 
-def _mixed_inputs(with_mixed=True):
-    rng = np.random.default_rng(7)
-    rows, index = [], []
-    if with_mixed:
-        for fraction, moved in ((0.2, 20), (0.5, 50)):
+def _fig09_tables():
+    """Figure 9's tables for one basin: two kinds and the transferred line at two sizes, with dots."""
+    rows, dots = [], []
+    for kind, base in ((CONTROL, 10.0), (MIXED, 9.0), ("transferred", 12.0)):
+        for moved, fraction in ((20, 0.2), (50, 0.5)):
+            for metric, value in (("rmse", base - moved / 50), ("bias", 0.5)):
+                rows.append(
+                    {
+                        "kind": kind,
+                        "region": "North",
+                        "fraction": fraction,
+                        "moved": moved,
+                        "metric": metric,
+                        "estimate": value,
+                        "low": value - 0.6,
+                        "high": value + 0.6,
+                    }
+                )
             for repeat in (0, 1):
-                for kind in (MIXED, CONTROL):
-                    plan_id = f"{kind}_north_p{int(fraction * 100)}_s{repeat}"
-                    observed = rng.gamma(4, 5, 40)
-                    rows.append(
-                        pd.DataFrame(
-                            {
-                                "plan_id": plan_id,
-                                "kind": kind,
-                                "held_out": "North",
-                                "fraction": fraction,
-                                "repeat": repeat,
-                                "split": "test",
-                                "model": GLOBAL,
-                                "covariate_group": "combined",
-                                "observed": observed,
-                                "predicted": observed + rng.normal(0, 2 if kind == MIXED else 4, 40),
-                            }
-                        )
-                    )
-                    index.append(
-                        {
-                            "plan_id": plan_id,
-                            "kind": kind,
-                            "held_out": "North",
-                            "fraction": fraction,
-                            "repeat": repeat,
-                            "n_train": moved if kind == CONTROL else 500 + moved,
-                        }
-                    )
-    else:
-        rows.append(
-            pd.DataFrame(
-                {
-                    "plan_id": "random",
-                    "kind": RANDOM,
-                    "held_out": np.nan,
-                    "fraction": np.nan,
-                    "repeat": np.nan,
-                    "split": "test",
-                    "model": GLOBAL,
-                    "covariate_group": "combined",
-                    "observed": [1.0, 2.0],
-                    "predicted": [1.5, 2.5],
-                }
-            )
-        )
-    return SimpleNamespace(
-        predictions=pd.concat(rows, ignore_index=True),
-        index=pd.DataFrame(index, columns=["plan_id", "kind", "held_out", "fraction", "repeat", "n_train"]),
-        transfer=pd.DataFrame(),
-    )
-
-
-def test_figure_9_is_a_message_without_mixed_plans():
-    assert figures.is_message_figure(transfer.figure_mixed(_mixed_inputs(with_mixed=False)))
-
-
-def test_figure_9_puts_the_number_of_moved_samples_on_x_with_the_range_over_repeats():
-    curves = transfer.mixed_curves(_mixed_inputs())
-    assert sorted(curves["moved"].unique()) == [20, 50]  # the control plans' n_train, not the share
-    summary = transfer.mixed_summary(curves)
-    row = summary[(summary["kind"] == MIXED) & (summary["moved"] == 20)].iloc[0]
-    repeats = curves[(curves["kind"] == MIXED) & (curves["moved"] == 20)]["rmse"]
-    assert (row["mean"], row["low"], row["high"], row["repeats"]) == pytest.approx(
-        (repeats.mean(), repeats.min(), repeats.max(), 2)
-    )
-    figure = transfer.figure_mixed(_mixed_inputs())
-    assert not figures.is_message_figure(figure) and "fig09_mixed_summary" in figures.figure_data(figure)
-    _check_print_size(figure)
-
-
-def test_figure_9_pairs_mixed_and_control_on_their_shared_test_points():
-    curves = transfer.mixed_curves(_mixed_inputs())
-    paired = transfer.mixed_paired(curves)
-    assert len(paired) == 4  # 2 shares x 2 repeats
-    one = paired.iloc[0]
-    mixed = curves[
-        (curves["kind"] == MIXED) & (curves["fraction"] == one["fraction"]) & (curves["repeat"] == one["repeat"])
-    ]
-    control = curves[
-        (curves["kind"] == CONTROL) & (curves["fraction"] == one["fraction"]) & (curves["repeat"] == one["repeat"])
-    ]
-    assert one["difference"] == pytest.approx(mixed["rmse"].iloc[0] - control["rmse"].iloc[0])
-    assert "fig09_mixed_paired" in figures.figure_data(transfer.figure_mixed(_mixed_inputs()))
-
-
-def test_figure_9_reference_lines_lie_inside_the_y_limits():
-    inputs = _mixed_inputs()
-    observed = np.random.default_rng(8).gamma(4, 5, 60)
-    # Leave one basin out far worse than any mixed plan: its line must still be inside the axes.
-    logo = pd.DataFrame(
-        {
-            "plan_id": "logo_north",
-            "kind": LOGO,
-            "held_out": "North",
-            "fraction": np.nan,
-            "repeat": np.nan,
-            "split": "test",
-            "model": GLOBAL,
-            "covariate_group": "combined",
-            "observed": observed,
-            "predicted": observed + 40.0,
-        }
-    )
-    inputs.predictions = pd.concat([inputs.predictions, logo], ignore_index=True)
-    figure = transfer.figure_mixed(inputs)
-    reference = transfer.mixed_references(inputs).set_index("region").loc["North", "rmse_transferred"]
-    upper = figure.axes[0]
-    low, high = upper.get_ylim()
-    assert low < reference < high
-    legend = [text.get_text() for text in figure.legends[0].get_texts()]
-    assert "No local points (leave one basin out)" in legend
-    assert "Local model, all the basin's points" not in legend  # not drawn, so not in the legend
+                dots.append(
+                    {
+                        "kind": kind,
+                        "region": "North",
+                        "fraction": fraction,
+                        "moved": moved,
+                        "repeat": repeat,
+                        "rmse": base - moved / 50 + 0.2 * repeat,
+                        "bias": 0.5,
+                    }
+                )
+    differences = pd.DataFrame([{"region": "North", "a": MIXED, "metric": "rmse", "p_holm": 0.01, "fraction": 0.5}])
+    return pd.DataFrame(rows), pd.DataFrame(dots), differences
 
 
 # --- every figure draws ----------------------------------------------------------------------
@@ -713,8 +627,7 @@ def _drawn_figures(offline_points):
     grid = pd.DataFrame(
         rng.normal(0, 1, (3, 3)), index=["North", "South", "East"], columns=["combined", "terrain", "climate"]
     )
-    curves = transfer.mixed_curves(_mixed_inputs())
-    summary, paired = transfer.mixed_summary(curves), transfer.mixed_paired(curves)
+    fig09 = _fig09_tables()
     basin_table = pd.DataFrame(
         {
             "basin": ["North", "South"],
@@ -796,9 +709,7 @@ def _drawn_figures(offline_points):
         "fig06_obs_pred": obs_pred.draw_obs_pred(obs[obs["model"] == GLOBAL], labels=LABELS),
         "fig07_class_bias": class_bias.draw_class_bias(intervals[intervals["metric"] == "bias"], labels=LABELS),
         "fig08_transfer": transfer.draw_transfer(points, grid),
-        "fig09_mixed": transfer.draw_mixed(
-            summary, pd.DataFrame({"region": ["North"], "rmse_transferred": [11.0], "rmse_local": [9.0]}), paired
-        ),
+        "fig09_mixed": transfer.draw_mixed(*fig09),
         "fig10_basins": basins.draw_basins(basins.printable(basin_table)),
         "fig11_shap_groups": shap.draw_shap_groups(
             groups, labels=LABELS, order=["satellite", "climate", "terrain", "legacy_soil"]
@@ -1090,4 +1001,4 @@ def test_a_logo_and_mixed_run_draws_every_figure_it_can_and_no_two_alike(
     folder = inputs.run_dir / "figures"
     digests = [hashlib.sha256((folder / f"{name}.png").read_bytes()).hexdigest() for name in figures.FIGURE_NAMES]
     assert len(set(digests)) == len(digests)  # no figure is a copy of another
-    assert (folder / "data" / "fig09_mixed_paired.csv").exists()
+    assert (folder / "data" / "fig09_mixed_intervals.csv").exists()

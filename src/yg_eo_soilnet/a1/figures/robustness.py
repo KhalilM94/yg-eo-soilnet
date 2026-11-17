@@ -20,6 +20,7 @@ from yg_eo_soilnet.a1.figures.labels import pretty_name
 from yg_eo_soilnet.a1.figures.style import (
     SOM_UNIT,
     WIDTH_2COL,
+    basin_colors,
     caption_line,
     letter,
     model_color,
@@ -28,8 +29,6 @@ from yg_eo_soilnet.a1.figures.style import (
 from yg_eo_soilnet.a1.robustness import ALPHA, METHODS, local_text
 from yg_eo_soilnet.a1.stage2 import GLOBAL
 
-#: One colour per basin (figure C7), from the validated categorical palette of the covariate groups.
-BASIN_COLORS = tuple(ps.A1_GROUP_COLORS.values())
 #: One marker per measured carbonate class (figure C7).
 CLASS_MARKERS = ("o", "s", "^", "D")
 #: Line style of each correction (figure C6).
@@ -409,7 +408,7 @@ def draw_cells(cells: pd.DataFrame, correlations: pd.DataFrame, *, labels):
     from matplotlib.lines import Line2D
 
     basins = list(dict.fromkeys(cells["basin"]))
-    colors = {basin: BASIN_COLORS[position % len(BASIN_COLORS)] for position, basin in enumerate(basins)}
+    colors = basin_colors(basins)
     markers = {label: CLASS_MARKERS[position % len(CLASS_MARKERS)] for position, label in enumerate(labels)}
     figure, axes = plt.subplots(1, 2, figsize=(WIDTH_2COL, 3.2), layout="constrained")
     for code, axis, (x, y, xlabel, ylabel) in zip("ab", axes, C7_PANELS):

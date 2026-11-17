@@ -600,7 +600,7 @@ def _averaged_over_repeats(per_repeat_rows: list) -> list:
     if not per_repeat_rows:
         return []
     per_repeat = pd.DataFrame(per_repeat_rows)
-    keys = ["kind", "region", "covariate_group", "fraction", "local_source"]
+    keys = ["kind", "region", "covariate_group", "fraction", "local_source", "local_model"]
     grouped = per_repeat.groupby(keys, sort=True, dropna=False)
     averaged = grouped.mean(numeric_only=True)
     averaged["has_local"] = grouped["has_local"].all()
@@ -659,24 +659,38 @@ TRANSFER_PAIRINGS = (
     (INPUTS_WITH_PREDICTED, GLOBAL_AUX, LOCAL, "combined"),
     (INPUTS_GROUP, GLOBAL_AUX, LOCAL, "groups"),
 )
+#: The local model a pairing falls back on when its own is missing (a run made before ``local_global``
+#: existed): the main rows then compare Global with ``local``, and say so in ``local_model``.
+LOCAL_FALLBACK = {LOCAL_GLOBAL: LOCAL}
 
 
 def _pairing_rows(test: pd.DataFrame, transferred_model: str, local_model: str) -> list:
-    """The transfer rows of one pairing: per region and group (logo), per region, share and group (mixed)."""
+    """The transfer rows of one pairing: per region and group (logo), per region, share and group (mixed).
+
+    A logo plan without ``local_model`` uses its :data:`LOCAL_FALLBACK`, when it has that one;
+    ``local_model`` in each row names the model used (for mixed plans: the control plan's own fit
+    of the transferred model).
+    """
     rows = []
-    logo = test[(test["kind"] == LOGO) & test["model"].isin([transferred_model, local_model])]
+    fallback = LOCAL_FALLBACK.get(local_model)
+    wanted = [transferred_model, local_model, *([fallback] if fallback else [])]
+    logo = test[(test["kind"] == LOGO) & test["model"].isin(wanted)]
     matched_rows = []
     for (plan_id, group), part in logo.groupby(["plan_id", "covariate_group"], sort=True):
         transferred = part[part["model"] == transferred_model]
         if transferred.empty:
             continue
+        used = local_model
+        if fallback and not (part["model"] == local_model).any() and (part["model"] == fallback).any():
+            used = fallback
         row = {
             "kind": LOGO_MATCHED if matched_training_size(plan_id) is not None else LOGO,
             "region": transferred["held_out"].iloc[0],
             "covariate_group": group,
             "fraction": np.nan,
             "local_source": "local model",
-            **_transfer_row(transferred, part[part["model"] == local_model]),
+            "local_model": used,
+            **_transfer_row(transferred, part[part["model"] == used]),
         }
         (matched_rows if row["kind"] == LOGO_MATCHED else rows).append(row)
     rows += _averaged_over_repeats(matched_rows)
@@ -695,6 +709,7 @@ def _pairing_rows(test: pd.DataFrame, transferred_model: str, local_model: str) 
                 "covariate_group": group,
                 "fraction": float(fraction),
                 "local_source": "control plan",
+                "local_model": transferred_model,
                 **_transfer_row(transferred, controls.get(key)),
             }
         )
@@ -748,7 +763,7 @@ def transfer_table(df: pd.DataFrame) -> pd.DataFrame:
         combined = test["covariate_group"] == COMBINED_GROUP
         part = test[combined if groups == "combined" else ~combined]
         for row in _pairing_rows(part, transferred_model, local_model):
-            rows.append({**row, "inputs": inputs, "transferred_model": transferred_model, "local_model": local_model})
+            rows.append({**row, "inputs": inputs, "transferred_model": transferred_model})
 
     score_columns = [f"{score}_{side}" for score in SCORES for side in ("local", "transferred")]
     drop_columns = [f"{score}_drop" for score in SCORES if score != "bias"] + ["rmse_drop_pct", "rmse_drop_sd"]
@@ -771,6 +786,22 @@ def transfer_table(df: pd.DataFrame) -> pd.DataFrame:
         table["n_repeats"] = table["n_repeats"].astype(int)
         table["has_local"] = table["has_local"].astype(bool)
     return table
+
+
+def fell_back(table: pd.DataFrame) -> bool:
+    """Whether any main ``logo`` row of :func:`transfer_table` compares with ``local`` for want of ``local_global``."""
+    if table.empty or "local_model" not in table:
+        return False
+    main = table[(table.get("inputs") == INPUTS_EVERY) & table["kind"].isin([LOGO, LOGO_MATCHED])]
+    return bool((main["local_model"] == LOCAL).any())
+
+
+def region_local_model(region_intervals: pd.DataFrame) -> str:
+    """The local model of the per-basin intervals: ``local_global`` when there, else ``local`` (when there)."""
+    models = set(region_intervals["model"]) if not region_intervals.empty and "model" in region_intervals else set()
+    if LOCAL_GLOBAL not in models and LOCAL in models:
+        return LOCAL
+    return LOCAL_GLOBAL
 
 
 def main_transfer(table: pd.DataFrame) -> pd.DataFrame:
@@ -809,13 +840,14 @@ def basin_error_table(region_intervals: pd.DataFrame) -> pd.DataFrame:
     Returns
     -------
     pandas.DataFrame
-        ``[seed,] basin, n, n_blocks``, then for each of :data:`BASIN_ERROR_SCORES` the estimate and
-        its ``_low`` and ``_high`` bounds; NaN where the run lacks the model or the score (an
-        ``intervals_by_region.csv`` written before the debiased RMSE existed).
+        ``[seed,] basin, n, n_blocks, local_model``, then for each of :data:`BASIN_ERROR_SCORES` the
+        estimate and its ``_low`` and ``_high`` bounds; NaN where the run lacks the model or the
+        score (an ``intervals_by_region.csv`` written before the debiased RMSE existed). The local
+        RMSE is ``local_global``'s, or ``local``'s when the run lacks it (``local_model`` says which).
     """
     keys = ["seed", "basin"] if "seed" in region_intervals else ["basin"]
     value_columns = [f"{name}{end}" for name, _, _ in BASIN_ERROR_SCORES for end in ("", "_low", "_high")]
-    columns = [*keys, "n", "n_blocks", *value_columns]
+    columns = [*keys, "n", "n_blocks", "local_model", *value_columns]
     if region_intervals.empty:
         return pd.DataFrame(columns=columns)
     logo = region_intervals[region_intervals["kind"] == LOGO].assign(basin=lambda frame: frame["held_out"].astype(str))
@@ -823,7 +855,10 @@ def basin_error_table(region_intervals: pd.DataFrame) -> pd.DataFrame:
     if transferred.empty:
         return pd.DataFrame(columns=columns)
     table = transferred[[*keys, "n", "n_blocks"]].drop_duplicates(keys).set_index(keys)
+    local = region_local_model(region_intervals)
+    table["local_model"] = local
     for name, model, metric in BASIN_ERROR_SCORES:
+        model = local if model == LOCAL_GLOBAL else model
         found = logo[(logo["model"] == model) & (logo["metric"] == metric)].set_index(keys)
         for end, column in (("", "estimate"), ("_low", "low"), ("_high", "high")):
             table[name + end] = found[column].reindex(table.index) if not found.empty else np.nan
@@ -996,6 +1031,122 @@ def mixed_differences(df: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000
     differences["p_holm"] = differences.groupby(family, sort=False)["p_value"].transform(holm)
     differences["kind"] = differences["a"].astype(str) + "_vs_" + differences["b"].astype(str)
     return differences[columns].sort_values(["region", "model", "metric", "kind", "fraction"])
+
+
+# --- the mixed kinds against the model with no local points ---------------------------------------
+
+#: The ``kind`` of the rows :func:`mixed_stack` adds: the plain logo model on a mixed plan's test points.
+TRANSFERRED = "transferred"
+#: The scores the stacked comparisons and figure 9 report.
+STACKED_SCORES = ("rmse", "bias", "r2")
+
+
+def mixed_stack(df: pd.DataFrame, *, model: str) -> pd.DataFrame:
+    """The divided plans' test rows of ``model``, plus the transferred model's on the same points, stacked.
+
+    For every basin, share and repeat, the mixed kinds and ``control`` test the same points of the
+    basin; the plain ``logo`` plan of that basin (the model with no local points) predicts every
+    point of it. Its rows on each repeat's test points are added as kind :data:`TRANSFERRED`, so
+    every kind of one share can be scored - and compared - on the same points. The repeats are
+    stacked: a point counts once per repeat. ``plan_id`` becomes ``basin|share|repeat``, the key a
+    paired comparison matches rows on.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Prediction rows; only test rows of ``model`` on every covariate are read (the columns
+        ``split`` and ``covariate_group`` are optional, for tables already narrowed to those).
+    model : str
+
+    Returns
+    -------
+    pandas.DataFrame
+        The divided rows and the transferred ones, ``fraction`` rounded to 6 decimals.
+    """
+    keep = df["model"] == model
+    if "split" in df:
+        keep &= df["split"] == TEST
+    if "covariate_group" in df:
+        keep &= df["covariate_group"] == COMBINED_GROUP
+    rows = df[keep]
+    divided = rows[rows["kind"].isin(DIVIDED_KINDS)].assign(
+        fraction=lambda frame: frame["fraction"].astype(float).round(6)
+    )
+    logo = rows[(rows["kind"] == LOGO) & ~is_matched(rows["plan_id"])]
+    if divided.empty:
+        return divided
+    keys = divided[["held_out", "fraction", "repeat", "point_id"]].drop_duplicates()
+    transferred = logo.drop(columns=["fraction", "repeat"]).merge(keys, on=["held_out", "point_id"], how="inner")
+    transferred = transferred.assign(kind=TRANSFERRED)
+    stacked = pd.concat([divided, transferred[divided.columns]], ignore_index=True)
+    stacked["plan_id"] = (
+        stacked["held_out"].astype(str) + "|" + stacked["fraction"].astype(str) + "|" + stacked["repeat"].astype(str)
+    )
+    return stacked
+
+
+def mixed_intervals(stacked: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000, seed: int = 42) -> pd.DataFrame:
+    """RMSE, bias and R² per kind, basin and share on :func:`mixed_stack`'s rows, repeats stacked, with intervals.
+
+    The interval resamples the 10 km blocks of the test points of every repeat together, as the
+    paired comparisons do.
+    """
+    columns = ["kind", "held_out", "fraction", "metric", "estimate", "low", "high", "n", "n_blocks"]
+    if stacked.empty:
+        return pd.DataFrame(columns=columns)
+    intervals = block_bootstrap(stacked, ["kind", "held_out", "fraction"], block_km=block_km, n=n, seed=seed).intervals
+    return intervals[intervals["metric"].isin(STACKED_SCORES)][columns].reset_index(drop=True)
+
+
+def mixed_repeat_scores(stacked: pd.DataFrame) -> pd.DataFrame:
+    """RMSE, bias and R² of each repeat on its own, per kind, basin and share (figure 9's dots)."""
+    if stacked.empty:
+        return pd.DataFrame(columns=["kind", "held_out", "fraction", "repeat", "n", *STACKED_SCORES])
+    table = grouped_metrics(stacked, ["kind", "held_out", "fraction", "repeat"], min_n=0)
+    return table[["kind", "held_out", "fraction", "repeat", "n", *STACKED_SCORES]]
+
+
+def arms_vs_transferred(
+    stacked: pd.DataFrame, *, block_km: float = 10.0, n: int = 1000, seed: int = 42
+) -> pd.DataFrame:
+    """Each divided kind against the transferred model on the same test points, per basin and share.
+
+    Paired on :func:`mixed_stack`'s rows (repeats stacked): both are scored on every resample of
+    the 10 km blocks. ``estimate`` is score(kind) - score(transferred); ``p_holm`` corrects across
+    the kinds and shares of one basin and score.
+    """
+    columns = [
+        "held_out",
+        "fraction",
+        "a",
+        "b",
+        "metric",
+        "estimate",
+        "low",
+        "high",
+        "p_value",
+        "p_holm",
+        "n",
+        "n_blocks",
+        "n_unpaired",
+    ]
+    if stacked.empty or TRANSFERRED not in set(stacked["kind"]):
+        return pd.DataFrame(columns=columns)
+    kinds = [kind for kind in (CONTROL, *MIXED_KINDS) if kind in set(stacked["kind"])]
+    result = block_bootstrap(
+        stacked,
+        ["held_out", "fraction"],
+        block_km=block_km,
+        n=n,
+        seed=seed,
+        compare=[(kind, TRANSFERRED) for kind in kinds],
+        compare_on="kind",
+    )
+    found = result.differences[result.differences["metric"].isin(STACKED_SCORES)].copy()
+    if found.empty:
+        return pd.DataFrame(columns=columns)
+    found["p_holm"] = found.groupby(["held_out", "metric"], sort=False)["p_value"].transform(holm)
+    return found[columns].reset_index(drop=True)
 
 
 # --- headline metrics, for MLflow ---------------------------------------------------------------

@@ -38,6 +38,17 @@ What is written (:func:`compare_runs`):
     difference, the points' mean absolute prediction difference and their correlation; summarised
     per kind beside the mean mixed - control difference, so the processor noise can be read against
     the effect.
+``matched_paired.csv`` and ``matched_intervals.csv``
+    The matched sizes, repeats stacked (one row per point and repeat) and paired on the same points:
+    per basin, the largest size against the full leave-one-basin-out model (the main run's first
+    seed), each size against the next larger, each size against the local model (``local_global``;
+    ``local``, named in ``local_model``, when the main run lacks it) - RMSE, bias and R²
+    differences with 10 km block-bootstrap intervals, Holm within each basin and score; and each
+    size's (and the full and local models') scores with their intervals.
+``arms_vs_transferred.csv``
+    "Local data against transferred": each mixed kind and control, per basin and share, against the
+    basin's leave-one-basin-out model on the same test points, repeats stacked, paired block
+    bootstrap, Holm across the kinds and shares of one basin and score.
 """
 
 from __future__ import annotations
@@ -67,7 +78,7 @@ from yg_eo_soilnet.a1.plans import (
     is_matched,
     matched_training_size,
 )
-from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_OF
+from yg_eo_soilnet.a1.stage2 import GLOBAL, LOCAL, LOCAL_GLOBAL, LOCAL_OF
 from yg_eo_soilnet.datamodules.splitting import TEST, TRAIN, SplitPlan
 
 logger = logging.getLogger(__name__)
@@ -182,7 +193,8 @@ def read_run(
 ) -> RunFolder:
     """Read one run folder: its manifest, plan index and the test predictions compared.
 
-    The predictions of ``model`` and of its local model (:func:`local_of`), and of ``local`` too when given.
+    The predictions of ``model``, of its local model (:func:`local_of`), of ``local`` (the fallback
+    of a run without ``local_global``), and of ``local`` the argument when given.
 
     Raises
     ------
@@ -209,7 +221,7 @@ def read_run(
         (frame["seed"] == first)
         & (frame["split"] == TEST)
         & (frame["covariate_group"] == COMBINED_GROUP)
-        & frame["model"].isin([model, local_of(model), *([local] if local else [])])
+        & frame["model"].isin([model, local_of(model), LOCAL, *([local] if local else [])])
     )
     if kinds:
         keep &= frame["kind"].isin(list(kinds))
@@ -565,6 +577,212 @@ def logo_matched(unmatched: pd.DataFrame, draws: pd.DataFrame, *, with_devices: 
     return pd.DataFrame(rows, columns=columns)
 
 
+# --- matched sizes, paired on stacked repeats ------------------------------------------------------
+
+#: The label of the full leave-one-basin-out model in the matched tables.
+FULL = "full"
+#: The label of the local model in the matched tables.
+LOCAL_LABEL = "local"
+
+
+def matched_stack(runs: Sequence[RunFolder], reference: Optional[RunFolder], *, model: str = GLOBAL) -> tuple:
+    """The matched draws and their references as one table, one row per point, model and repeat.
+
+    ``model`` is a size label (``"3600"``, ``"2000"``) for each matched draw, :data:`FULL` for the
+    reference run's plain ``logo`` plan and :data:`LOCAL_LABEL` for its local model on Global's inputs
+    (``local``, with predicted CaCO3/CEC, when the run has no ``local_global``). ``plan_id`` is
+    ``r<repeat>``: the key a paired comparison matches rows on. The full and local rows appear once,
+    under ``r0``; :func:`matched_paired` repeats them per repeat.
+
+    Returns
+    -------
+    stack : pandas.DataFrame
+    local_model : str
+        The local model used (empty without a reference).
+    n_train : dict
+        ``(basin, label)`` to the mean training size.
+    """
+    columns = ["held_out", "plan_id", "point_id", "split", "lat", "lon", "observed", "predicted", "model", "repeat"]
+    parts, n_train = [], {}
+    for run in runs:
+        frame = run.predictions[
+            (run.predictions["kind"] == LOGO)
+            & is_matched(run.predictions["plan_id"])
+            & (run.predictions["model"] == model)
+        ]
+        for plan_id, part in frame.groupby("plan_id", sort=True):
+            label = str(matched_training_size(plan_id))
+            repeat = int(part["repeat"].dropna().iloc[0]) if part["repeat"].notna().any() else 0
+            parts.append(part.assign(model=label, repeat=repeat, plan_id=f"r{repeat}"))
+            key = (str(part["held_out"].iloc[0]), label)
+            n_train.setdefault(key, []).append(run.n_train(plan_id))
+    local_model = ""
+    if reference is not None:
+        plain = reference.predictions[
+            (reference.predictions["kind"] == LOGO) & ~is_matched(reference.predictions["plan_id"])
+        ]
+        present = set(plain["model"])
+        local_model = LOCAL_GLOBAL if LOCAL_GLOBAL in present else (LOCAL if LOCAL in present else "")
+        for wanted, label in ((model, FULL), (local_model, LOCAL_LABEL)):
+            if not wanted:
+                continue
+            part = plain[plain["model"] == wanted]
+            parts.append(part.assign(model=label, repeat=0, plan_id="r0"))
+            if label == FULL:
+                for plan_id, rows in part.groupby("plan_id"):
+                    n_train[(str(rows["held_out"].iloc[0]), FULL)] = [reference.n_train(plan_id)]
+    if not parts:
+        return pd.DataFrame(columns=columns), local_model, {}
+    stack = pd.concat(parts, ignore_index=True)
+    stack["held_out"] = stack["held_out"].astype(str)
+    means = {key: float(np.nanmean(values)) for key, values in n_train.items()}
+    return stack[columns], local_model, means
+
+
+def _sizes(stack: pd.DataFrame) -> list:
+    """The matched size labels, largest first."""
+    return sorted({label for label in stack["model"] if label not in (FULL, LOCAL_LABEL)}, key=float, reverse=True)
+
+
+def matched_paired(
+    stack: pd.DataFrame, *, local_model: str = "", block_km: float = 10.0, n: int = 1000, seed: int = 42
+) -> pd.DataFrame:
+    """``matched_paired.csv``: per basin, the largest size against the full model, each size against the next larger,
+    and each size against the local model - RMSE, bias and R² differences on the same points.
+
+    Repeats are stacked (one row per point and repeat); the full and local predictions, one fit
+    each, are repeated for every repeat so each draw is paired with them on its points; size
+    against size pairs repeat r with repeat r. Intervals and p-values from resampling the 10 km
+    blocks of the stacked points; ``p_holm`` corrects across the comparisons of one basin and score.
+    """
+    columns = [
+        "basin",
+        "a",
+        "b",
+        "metric",
+        "estimate",
+        "low",
+        "high",
+        "p_value",
+        "p_holm",
+        "n",
+        "n_blocks",
+        "n_unpaired",
+        "local_model",
+    ]
+    sizes = _sizes(stack)
+    if not sizes:
+        return pd.DataFrame(columns=columns)
+    repeats = sorted({key for key in stack.loc[stack["model"].isin(sizes), "plan_id"]})
+    single = stack[stack["model"].isin([FULL, LOCAL_LABEL])]
+    paired = pd.concat(
+        [stack[stack["model"].isin(sizes)], *[single.assign(plan_id=key) for key in repeats]], ignore_index=True
+    )
+    present = set(paired["model"])
+    comparisons = [(sizes[0], FULL)] if FULL in present else []
+    comparisons += [(smaller, larger) for larger, smaller in zip(sizes, sizes[1:])]
+    comparisons += [(size, LOCAL_LABEL) for size in sizes if LOCAL_LABEL in present]
+    result = evaluation.block_bootstrap(
+        paired, ["held_out"], block_km=block_km, n=n, seed=seed, compare=comparisons, compare_on="model"
+    )
+    found = result.differences[result.differences["metric"].isin(evaluation.STACKED_SCORES)].copy()
+    if found.empty:
+        return pd.DataFrame(columns=columns)
+    found["p_holm"] = found.groupby(["held_out", "metric"], sort=False)["p_value"].transform(evaluation.holm)
+    found = found.rename(columns={"held_out": "basin"}).assign(local_model=local_model)
+    return found[columns].reset_index(drop=True)
+
+
+def matched_intervals(
+    stack: pd.DataFrame,
+    n_train: dict,
+    *,
+    local_model: str = "",
+    block_km: float = 10.0,
+    n: int = 1000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """``matched_intervals.csv``: RMSE, bias and R² per basin and size (and full, local), repeats stacked.
+
+    Each with a 95 % interval from resampling the 10 km blocks of the stacked points; the full and
+    local models count once. ``n_train`` is the mean training size of the size's draws.
+    """
+    columns = ["basin", "model", "n_train", "metric", "estimate", "low", "high", "n", "n_blocks", "local_model"]
+    if stack.empty or not _sizes(stack):  # no matched draws: nothing to set the references against
+        return pd.DataFrame(columns=columns)
+    intervals = evaluation.block_bootstrap(stack, ["held_out", "model"], block_km=block_km, n=n, seed=seed).intervals
+    intervals = intervals[intervals["metric"].isin(evaluation.STACKED_SCORES)].rename(columns={"held_out": "basin"})
+    intervals["n_train"] = [
+        n_train.get((basin, label), np.nan) for basin, label in zip(intervals["basin"], intervals["model"])
+    ]
+    return intervals.assign(local_model=local_model)[columns].reset_index(drop=True)
+
+
+def matched_repeats(stack: pd.DataFrame) -> pd.DataFrame:
+    """RMSE, bias and R² of every matched draw on its own (the dots of figure 9's E4 panel)."""
+    sizes = _sizes(stack)
+    part = stack[stack["model"].isin(sizes)]
+    if part.empty:
+        return pd.DataFrame(columns=["basin", "model", "repeat", "n", *evaluation.STACKED_SCORES])
+    table = evaluation.grouped_metrics(part, ["held_out", "model", "repeat"], min_n=0)
+    return table.rename(columns={"held_out": "basin"})[["basin", "model", "repeat", "n", *evaluation.STACKED_SCORES]]
+
+
+# --- the mixed kinds against the model with no local points -----------------------------------------
+
+
+def arms_vs_transferred(
+    runs: Sequence[RunFolder],
+    arms: pd.DataFrame,
+    *,
+    model: str = GLOBAL,
+    block_km: float = 10.0,
+    n: int = 1000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """``arms_vs_transferred.csv``: each kind (control, mixed, arms) against the logo model on the same test points.
+
+    Per run, basin and share, repeats stacked (:func:`~yg_eo_soilnet.a1.evaluation.mixed_stack`),
+    paired block bootstrap; Holm across the kinds and shares of one basin and score
+    (:func:`~yg_eo_soilnet.a1.evaluation.arms_vs_transferred`). ``estimate`` < 0: the local data do
+    better than the model trained on the other basins alone.
+    """
+    columns = [
+        "run",
+        "basin",
+        "fraction",
+        "n_moved",
+        "a",
+        "b",
+        "metric",
+        "estimate",
+        "low",
+        "high",
+        "p_value",
+        "p_holm",
+        "n",
+        "n_blocks",
+        "n_unpaired",
+    ]
+    parts = []
+    for run in runs:
+        stacked = evaluation.mixed_stack(run.predictions, model=model)
+        found = evaluation.arms_vs_transferred(stacked, block_km=block_km, n=n, seed=seed)
+        if found.empty:
+            continue
+        found = found.rename(columns={"held_out": "basin"}).assign(run=run.name)
+        mine = arms[arms["run"] == run.name] if not arms.empty else arms
+        moved = mine.groupby(["basin", "fraction"])["n_moved"].mean() if not mine.empty else pd.Series(dtype=float)
+        found["n_moved"] = [
+            float(moved.get((basin, fraction), np.nan)) if len(moved) else np.nan
+            for basin, fraction in zip(found["basin"], found["fraction"])
+        ]
+        parts.append(found)
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)[columns]
+
+
 # --- whether transfer fails, from the main run -------------------------------------------------------
 
 
@@ -581,7 +799,8 @@ def transfer_status(
 
     The plain ``logo`` plans of ``run``: ``model`` (transferred, trained on the other basins)
     against the local model on the same inputs (:func:`local_of`, or ``local`` when given; the basin's own
-    points, out of fold), paired on the basin's points,
+    points, out of fold) - ``local`` (with predicted CaCO3/CEC) when the run lacks ``local_global``,
+    named in ``local_model`` - paired on the basin's points,
     with a block-bootstrap interval and p-value; Holm across the basins. A basin's transfer fails
     when the difference is above 0, its interval lies above 0 and ``p_holm`` < 0.05.
     """
@@ -597,11 +816,15 @@ def transfer_status(
         "p_holm",
         "n",
         "transfer_fails",
+        "local_model",
     ]
     if run is None:
         return pd.DataFrame(columns=columns)
     frame = run.predictions[(run.predictions["kind"] == LOGO) & ~is_matched(run.predictions["plan_id"])]
     local = local or local_of(model)
+    if local == LOCAL_GLOBAL and local not in set(frame["model"]) and LOCAL in set(frame["model"]):
+        logger.warning(f"{run.name} has no {LOCAL_GLOBAL}; transfer status against {LOCAL} (with predicted CaCO3/CEC).")
+        local = LOCAL
     if frame.empty or local not in set(frame["model"]) or model not in set(frame["model"]):
         logger.warning(f"{run.name} has no plain logo plans with both the {model} and the {local} model.")
         return pd.DataFrame(columns=columns)
@@ -626,6 +849,7 @@ def transfer_status(
                 "p_holm": row.p_holm,
                 "n": row.n,
                 "transfer_fails": bool(row.estimate > 0 and row.low > 0 and row.p_holm < ALPHA),
+                "local_model": local,
             }
         )
     return pd.DataFrame(rows, columns=columns)
@@ -793,7 +1017,14 @@ TABLE_NAMES = (
     "cross_run_summary",
 )
 #: Tables too long for a LaTeX page: one row per plan or draw.
-CSV_ONLY = ("mixed_arms", "logo_matched_draws", "cross_run")
+CSV_ONLY = (
+    "mixed_arms",
+    "logo_matched_draws",
+    "cross_run",
+    "matched_paired",
+    "matched_intervals",
+    "arms_vs_transferred",
+)
 CAPTIONS_FILE = "captions.md"
 
 
@@ -866,6 +1097,7 @@ def compare_runs(
         reference = read_run(transfer_run, model=model)
     status = transfer_status(reference, model=model, block_km=block_km, n=n_boot, seed=seed)
     crossed = cross_run(runs, model=model, with_devices=with_devices)
+    stack, local_model, n_train = matched_stack(runs, reference, model=model)
     tables = {
         "mixed_arms": arms,
         "mixed_arms_paired": paired,
@@ -874,6 +1106,11 @@ def compare_runs(
         "transfer_status": status,
         "cross_run": crossed,
         "cross_run_summary": cross_run_summary(runs, crossed, arms, model=model),
+        "matched_paired": matched_paired(stack, local_model=local_model, block_km=block_km, n=n_boot, seed=seed),
+        "matched_intervals": matched_intervals(
+            stack, n_train, local_model=local_model, block_km=block_km, n=n_boot, seed=seed
+        ),
+        "arms_vs_transferred": arms_vs_transferred(runs, arms, model=model, block_km=block_km, n=n_boot, seed=seed),
     }
 
     out = Path(out_dir)

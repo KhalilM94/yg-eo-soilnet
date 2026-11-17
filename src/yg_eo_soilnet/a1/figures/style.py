@@ -163,6 +163,25 @@ def bias_axis(axis, *, orientation: str = "y", unit: str = SOM_UNIT, labels: boo
     direction_axis(axis, above="over-predicts", below="under-predicts", zero="no bias", labels=labels, inside=inside)
 
 
+def basin_colors(basins) -> dict:
+    """One colour per held-out basin, the same in every A1 figure that colours basins (C7, figure 9's E4 panel).
+
+    The basins in alphabetical order take the validated categorical palette of the covariate groups.
+
+    >>> basin_colors(["Sebou", "Bouregreg"]) == {"Bouregreg": "#2a78d6", "Sebou": "#eb6834"}
+    True
+    """
+    palette = tuple(ps.A1_GROUP_COLORS.values())
+    return {basin: palette[position % len(palette)] for position, basin in enumerate(sorted(set(map(str, basins))))}
+
+
+#: Added to a caption whose local model is ``local`` for want of ``local_global``.
+FALLBACK_NOTE = (
+    " Here the local model reads the predicted CaCO₃/CEC too (local): this run has no local model on Global's "
+    "inputs (local_global) yet."
+)
+
+
 def caption_line(figure, text: str) -> None:
     """A small line under the figure saying what its bars or bands are.
 
