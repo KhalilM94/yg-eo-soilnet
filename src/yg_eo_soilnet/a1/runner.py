@@ -680,6 +680,13 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
         if row.kind == LOGO:
             jobs += [(LOCAL, name) for name in resolved.groups]
     todo = [(model, group) for model, group in jobs if not (out / _output_name(model, group)).exists()]
+    for model, group in jobs:
+        variant = shared.variants.get(group) if model == GLOBAL else None
+        path = out / _output_name(model, group)
+        if variant is not None and path.exists() and stored_inputs(path) != variant.inputs_hash:
+            # Made from another version of the cached features: fitted again, the file replaced.
+            logger.warning(f"  {model} / {group}: made from other features ({path.name}); fitted again")
+            todo.append((model, group))
     outcome.skipped += [str(out / _output_name(model, group)) for model, group in jobs if (model, group) not in todo]
     for model, group in jobs:
         if (model, group) not in todo:
@@ -758,7 +765,8 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
         path = out / _output_name(model, group)
         if result.calibration is not None:
             _write_calibration(run_dir, row, seed, result.calibration, logger)
-        _atomic_write_parquet(frame, path)
+        variant = shared.variants.get(group) if model == GLOBAL else None
+        _atomic_write_parquet(frame, path, metadata={INPUTS_KEY: variant.inputs_hash} if variant is not None else None)
         outcome.computed.append(str(path))
         note = _rmse_note(frame)
         if group == COMBINED_GROUP:
@@ -1099,10 +1107,21 @@ class Variant:
     pca : object, optional
         A plan-dependent extra (E5's R5): ``transform(context, table)`` returns columns fitted on
         the plan's training points alone, added to the inputs.
+    inputs : tuple of (str, str)
+        The cached files the columns were read from and the SHA-256 of each (E5's representations).
+        Kept in each prediction file's metadata: a file made from other versions is refitted.
     """
 
     columns: tuple
     pca: object = None
+    inputs: tuple = ()
+
+    @property
+    def inputs_hash(self) -> str:
+        """One hash of :attr:`inputs`; empty when the variant reads no cached file."""
+        if not self.inputs:
+            return ""
+        return hashlib.sha256(repr(sorted(self.inputs)).encode()).hexdigest()
 
     @property
     def fingerprint(self) -> str:
@@ -1122,9 +1141,13 @@ def _check_variants(manifest: dict, variants: dict, run_dir: Path, *, restart: b
         )
     folder = run_dir / VARIANTS_DIR
     folder.mkdir(parents=True, exist_ok=True)
+    features = manifest.setdefault("features", {})
+    inputs = manifest.setdefault("variant_inputs", {})
     for name, variant in variants.items():
         (folder / f"{name}.txt").write_text("\n".join(variant.columns) + "\n", encoding="utf-8")
         recorded[name] = variant.fingerprint
+        features.update(dict(variant.inputs))
+        inputs[name] = variant.inputs_hash
     logger.info(
         f"{len(variants)} input variant(s): {', '.join(f'{n} ({len(v.columns)})' for n, v in variants.items())}"
     )
@@ -1173,11 +1196,34 @@ def _output_name(model: str, group: str) -> str:
     return f"{model}__{group}.parquet"
 
 
-def _atomic_write_parquet(frame: pd.DataFrame, path: Path) -> None:
-    """Write under a temporary name, then rename: a half-written file never has the final name."""
+#: The key of a prediction file's metadata holding the hash of the cached features it was made from.
+INPUTS_KEY = "a1_inputs_hash"
+
+
+def stored_inputs(path: Path) -> str:
+    """The features hash a prediction file was made from (:data:`INPUTS_KEY`); empty when it has none."""
+    import pyarrow.parquet as pq
+
+    metadata = pq.read_schema(path).metadata or {}
+    return metadata.get(INPUTS_KEY.encode(), b"").decode()
+
+
+def _atomic_write_parquet(frame: pd.DataFrame, path: Path, metadata: Optional[dict] = None) -> None:
+    """Write under a temporary name, then rename: a half-written file never has the final name.
+
+    ``metadata`` is added to the file's key-value metadata (:func:`stored_inputs` reads it back).
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".partial")
-    frame.to_parquet(temporary, index=False)
+    if metadata:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        merged = {**(table.schema.metadata or {}), **{str(k).encode(): str(v).encode() for k, v in metadata.items()}}
+        pq.write_table(table.replace_schema_metadata(merged), temporary)
+    else:
+        frame.to_parquet(temporary, index=False)
     os.replace(temporary, path)
 
 

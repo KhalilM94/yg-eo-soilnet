@@ -490,3 +490,105 @@ def test_run_e5_refuses_a_changed_variant(e5_run, tmp_path):
         _check_variants(
             dict(manifest), {"all": Variant(("elevation",))}, run_dir, restart=False, logger=SimpleNamespace(info=print)
         )
+
+
+# --- faulty composites and stale caches ----------------------------------------------------------------------
+
+
+def _composites():
+    rows = []
+    for month in range(1, 7):
+        rows.append(
+            {
+                "point_id": "p1",
+                "date": pd.Timestamp(2018, month, 1),
+                "S2_B2": 0.0 if month == 1 else 0.05,  # January: a zero band, a no-data composite
+                "S2_B4": 0.1,
+                "S2_B8": 0.3,
+                "S2_B11": 0.3,
+                "S2_B12": 0.2,
+                "AG_NDVI": 0.5,
+                "SOIL_SOCI": np.inf if month == 1 else 1.0,
+                "CLIM_ETa": np.inf if month == 2 else float(month),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def test_zero_band_composites_and_infinities_become_missing():
+    cleaned, report = e5.clean_composites(_composites())
+    january = cleaned.iloc[0]
+    for column in ("S2_B2", "S2_B4", "S2_B8", "S2_B11", "S2_B12", "AG_NDVI", "SOIL_SOCI"):
+        assert np.isnan(january[column]), column  # every band and every S2 index of the composite
+    assert january["CLIM_ETa"] == 1.0  # not a Sentinel-2 variable: kept
+    assert np.isnan(cleaned.iloc[1]["CLIM_ETa"])  # an infinity anywhere becomes missing
+    assert cleaned.iloc[1:][["S2_B2", "S2_B4", "AG_NDVI", "SOIL_SOCI"]].notna().all().all()
+    assert not np.isinf(cleaned.select_dtypes("number")).to_numpy().any()
+    assert report.loc["SOIL_SOCI", "inf"] == 1 and report.loc["CLIM_ETa", "inf"] == 1
+    assert report.loc["S2_B4", "zero_band_composites"] == 1 and report.loc["CLIM_ETa", "zero_band_composites"] == 0
+    # The bare-month test never sees the no-data composite.
+    assert (
+        e5.bare_soil_percentiles(cleaned, ["S2_B4"], min_months=1, ndvi_max=1.0, nbr2_max=1.0).loc["p1", e5.BARE_N] == 5
+    )
+
+
+def test_extend_table_refuses_infinite_values():
+    table = SimpleNamespace(frame=pd.DataFrame({"a": [1.0, 2.0]}, index=pd.Index(["p1", "p2"])), static_columns=("a",))
+    with pytest.raises(ValueError, match="infinite"):
+        e5.extend_table(table, pd.DataFrame({"R2__x__DJF": [1.0, np.inf]}, index=["p1", "p2"]))
+
+
+def _cache_table():
+    frame = pd.DataFrame({"S2_B4_q50": [0.1, 0.2]}, index=pd.Index(["p1", "p2"], name="uuid"))
+    return SimpleNamespace(frame=frame, feature_columns=("S2_B4_q50",), sample_year_column=None)
+
+
+def test_a_cache_built_for_other_inputs_or_rules_is_rebuilt(tmp_path, caplog, monkeypatch):
+    ts = pd.concat([_series({1: 1.0, 2: 3.0, 4: 2.0, 5: 4.0}, point=p) for p in ("p1", "p2")])
+    options = e5.E5Settings(representations=("R2",))
+    first, hashes = e5.build_representations(_cache_table(), ts, options, tmp_path, source_digest="a")
+    assert set(hashes) == {"R2"} and hashes["R2"] == e5.file_digest(tmp_path / "R2.parquet")
+    _, again = e5.build_representations(_cache_table(), ts, options, tmp_path, source_digest="a")
+    assert again == hashes  # same inputs: read back
+    with caplog.at_level("WARNING"):
+        e5.build_representations(_cache_table(), ts, options, tmp_path, source_digest="b")  # another file
+    assert "built from other inputs or rules; rebuilt" in caplog.text
+    caplog.clear()
+    monkeypatch.setattr(e5, "FEATURES_VERSION", "test: other rules")
+    with caplog.at_level("WARNING"):
+        e5.build_representations(_cache_table(), ts, options, tmp_path, source_digest="b")
+    assert "rebuilt" in caplog.text
+    (tmp_path / "R2.json").unlink()  # a cache without its record (made before the record existed)
+    caplog.clear()
+    with caplog.at_level("WARNING"):
+        e5.build_representations(_cache_table(), ts, options, tmp_path, source_digest="b")
+    assert "no record of what it was built from" in caplog.text
+
+
+def test_a_prediction_made_from_older_features_is_refitted_by_itself(e5_run):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from experiments.a1.run_e5 import main as run_e5_main
+    from yg_eo_soilnet.a1.runner import INPUTS_KEY, stored_inputs
+
+    run_dir = e5_run["out"] / "runs" / "default"
+    stale = sorted(run_dir.glob("predictions/*/seed_*/global__ts_R2.parquet"))
+    assert stale
+    current = stored_inputs(stale[0])
+    assert current  # made from the cached R2, whose hash it records
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["features"]["R2"] and manifest["variant_inputs"]["ts_R2"] == current
+    for path in stale:  # as if made from an older version of the features
+        table = pq.read_table(path)
+        pq.write_table(
+            table.replace_schema_metadata({**(table.schema.metadata or {}), INPUTS_KEY.encode(): b"old"}), path
+        )
+    untouched = sorted(run_dir.glob("predictions/*/seed_*/global__ts_R4.parquet"))
+    before = {path: path.stat().st_mtime_ns for path in untouched}
+    result = run_e5_main(["--config", str(e5_run["path"]), "--part", "B", "--only", "random,logo_*", "--no-mlflow"])
+    refitted = {str(path) for path in stale}
+    assert refitted <= set(result.computed)
+    assert all(stored_inputs(path) == current for path in stale)
+    assert all(path.stat().st_mtime_ns == before[path] for path in untouched)  # the others are not refitted
+    assert pa  # the module is used for the metadata above

@@ -181,8 +181,64 @@ def static_variable(column: str) -> str:
     return re.sub(r"^S1_(asc|desc)_(.+)$", r"S1_\2_\1", column)
 
 
+#: The indices computed from the Sentinel-2 bands of a composite: missing when its bands are.
+S2_DERIVED = ("AG_NDVI", "SOIL_NBR2", "SOIL_SOCI")
+
+
+def clean_composites(ts: pd.DataFrame, *, log=None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """The composites with their faults made missing, and a report of what was changed, per column.
+
+    - An infinite value (an index divided by a zero band) becomes NaN.
+    - A composite with any Sentinel-2 band exactly 0 is a no-data composite: a reflectance of exactly
+      0 is not physical (in this data: 130 composites, nearly all December-February, with B2, B3 or
+      B4 at 0 and the other bands plausible). Every Sentinel-2 band and every index computed from
+      them (:data:`S2_DERIVED`) becomes NaN for it - so the bare-month test of R6 never sees it.
+
+    Returns
+    -------
+    cleaned : pandas.DataFrame
+    report : pandas.DataFrame
+        Per column: ``inf`` (set to NaN), ``zero_band_composites`` (set to NaN), ``nan_before``,
+        ``nan_after``.
+    """
+    log = log or logger
+    cleaned = ts.copy()
+    numeric = [
+        c for c in cleaned.columns if c not in ("point_id", "date") and pd.api.types.is_numeric_dtype(cleaned[c])
+    ]
+    nan_before = cleaned[numeric].isna().sum()
+    infinite = np.isinf(cleaned[numeric]).sum()
+    cleaned[numeric] = cleaned[numeric].replace([np.inf, -np.inf], np.nan)
+    bands = [c for c in numeric if c in S2_BANDS]
+    derived = [c for c in numeric if c in S2_DERIVED]
+    zero = (cleaned[bands] == 0).any(axis=1) if bands else pd.Series(False, index=cleaned.index)
+    masked = pd.Series(0, index=numeric)
+    for column in bands + derived:
+        masked[column] = int((zero & cleaned[column].notna()).sum())
+        cleaned.loc[zero, column] = np.nan
+    report = pd.DataFrame(
+        {
+            "inf": infinite,
+            "zero_band_composites": masked,
+            "nan_before": nan_before,
+            "nan_after": cleaned[numeric].isna().sum(),
+        }
+    ).rename_axis("column")
+    if int(infinite.sum()) or int(zero.sum()):
+        points = cleaned.loc[zero, "point_id"].nunique() if "point_id" in cleaned else 0
+        log.warning(
+            f"E5 time series: {int(infinite.sum())} infinite value(s) set to NaN "
+            f"({', '.join(f'{c}: {int(n)}' for c, n in infinite.items() if n)}); {int(zero.sum())} composite(s) of "
+            f"{points} point(s) with a Sentinel-2 band at exactly 0 treated as missing for every band and "
+            f"{', '.join(derived)}."
+        )
+    return cleaned, report
+
+
 def load_timeseries(path, *, id_column: str = "uuid", time_column: str = "observation_date") -> pd.DataFrame:
     """The monthly composites, one row per point and date, columns under the static file's names.
+
+    As read: :func:`clean_composites` makes their faults missing before any representation is built.
 
     Returns
     -------
@@ -418,12 +474,63 @@ def representation(rep: str, ts: pd.DataFrame, variables: Sequence[str], options
     raise ValueError(f"No point-level columns for {rep}")
 
 
-def build_representations(table, ts: pd.DataFrame, options: E5Settings, cache_dir, *, log=None) -> dict:
+#: Bumped whenever the way a representation is computed changes, so every older cache is rebuilt.
+FEATURES_VERSION = "2: composites with a zero Sentinel-2 band and infinite values treated as missing"
+
+
+def file_digest(path) -> str:
+    """The SHA-256 of a file's bytes."""
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def cache_fingerprint(rep: str, variables: Sequence[str], options: E5Settings, *, source: str, years=None) -> str:
+    """What one cached representation was computed from: the rules' version, the settings it reads,
+    the variables, the time-series file's content and (R3) the sampling years."""
+    import hashlib
+    import json
+
+    payload = {
+        "version": FEATURES_VERSION,
+        "rep": rep,
+        "variables": list(variables),
+        "source": source,
+        "quarter_min_readings": options.quarter_min_readings,
+        "harmonic_min_readings": options.harmonic_min_readings,
+        "bare": [options.ndvi_max, options.nbr2_max, options.min_bare_months],
+        "years": None
+        if years is None or rep != "R3"
+        else hashlib.sha256(
+            pd.util.hash_pandas_object(years.sort_index(), index=True).to_numpy().tobytes()
+        ).hexdigest(),
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def build_representations(
+    table, ts: pd.DataFrame, options: E5Settings, cache_dir, *, source_digest: str = "", log=None
+) -> tuple[dict, dict]:
     """Every representation's columns, computed once and cached in ``cache_dir/<rep>.parquet``.
 
-    R1 needs no new columns (a subset of the static percentiles); R5's PCA is plan-dependent and
-    only its monthly medians are cached.
+    Each cache has a sidecar ``<rep>.json`` with the :func:`cache_fingerprint` it was built for and
+    the SHA-256 of the parquet file. A cache whose fingerprint differs (older rules, other settings,
+    another time-series file) or whose file changed is rebuilt. R1 needs no new columns (a subset of
+    the static percentiles); R5's PCA is plan-dependent and only its monthly medians are cached.
+
+    Returns
+    -------
+    features : dict
+        Representation to its point-level columns.
+    hashes : dict
+        Representation to the SHA-256 of its cached file: what the prediction files record.
     """
+    import json
+
     log = log or logger
     variables = [variable for variable in ts_variables(table.feature_columns) if variable in ts.columns]
     absent = [variable for variable in ts_variables(table.feature_columns) if variable not in ts.columns]
@@ -440,7 +547,7 @@ def build_representations(table, ts: pd.DataFrame, options: E5Settings, cache_di
     wanted = [rep for rep in options.representations if rep != "R1"]
     if options.r5_enabled and "R5" not in wanted:
         wanted.append("R5")
-    found = {}
+    found, hashes = {}, {}
     for rep in wanted:
         if rep == "R3" and years is None:
             log.warning("E5 R3 skipped: no sampling year (set sample_year in the settings).")
@@ -450,16 +557,24 @@ def build_representations(table, ts: pd.DataFrame, options: E5Settings, cache_di
                 "E5 R6 skipped: the time series lacks S2 B4, B8, B11 or B12, which the bare-month filter needs."
             )
             continue
-        path = cache_dir / f"{rep}.parquet"
-        if path.exists():
-            found[rep] = pd.read_parquet(path)
-            log.info(f"E5 {rep}: read {path.name} ({found[rep].shape[1]} columns)")
-            continue
+        path, sidecar = cache_dir / f"{rep}.parquet", cache_dir / f"{rep}.json"
+        fingerprint = cache_fingerprint(rep, variables, options, source=source_digest, years=years)
+        if path.exists() and sidecar.exists():
+            record = json.loads(sidecar.read_text())
+            if record.get("fingerprint") == fingerprint and record.get("sha256") == file_digest(path):
+                found[rep], hashes[rep] = pd.read_parquet(path), record["sha256"]
+                log.info(f"E5 {rep}: read {path.name} ({found[rep].shape[1]} columns)")
+                continue
+            log.warning(f"E5 {rep}: {path.name} was built from other inputs or rules; rebuilt.")
+        elif path.exists():
+            log.warning(f"E5 {rep}: {path.name} has no record of what it was built from; rebuilt.")
         columns = representation(rep, ts, variables, options, years=years)
         columns.to_parquet(path)
+        hashes[rep] = file_digest(path)
+        sidecar.write_text(json.dumps({"fingerprint": fingerprint, "sha256": hashes[rep], "version": FEATURES_VERSION}))
         found[rep] = columns
         log.info(f"E5 {rep}: {columns.shape[1]} columns, {float(columns.isna().to_numpy().mean()):.1%} NaN, cached")
-    return found
+    return found, hashes
 
 
 # --- coordinates and external covariates -------------------------------------------------------------------
@@ -525,6 +640,13 @@ def extend_table(table, new: pd.DataFrame):
     clash = [c for c in aligned.columns if c in table.frame.columns]
     if clash:
         raise ValueError(f"E5 columns {clash[:3]} already exist in the table")
+    numeric = aligned.select_dtypes("number")
+    infinite = np.isinf(numeric).sum()
+    if int(infinite.sum()):
+        raise ValueError(
+            f"E5 columns hold infinite values, which no model can read: {infinite[infinite > 0].to_dict()}. "
+            "Make them missing (NaN) where they are built."
+        )
     frame = pd.concat([table.frame, aligned], axis=1)
     return replace(table, frame=frame, static_columns=tuple(table.static_columns) + tuple(aligned.columns))
 
@@ -595,11 +717,16 @@ def _is_satellite_ts(column: str) -> bool:
     return variable.startswith(SATELLITE_TS_PREFIXES)
 
 
-def part_b_variants(resolved, table_columns: Sequence[str], representations: Sequence[str], *, r5=None) -> dict:
+def part_b_variants(
+    resolved, table_columns: Sequence[str], representations: Sequence[str], *, r5=None, hashes=None
+) -> dict:
     """Part B: each representation on ``all``, on ``all_minus_legacy_soil``, and (R2, R6) on ``only_satellite``.
 
     The references - ``all``, ``all_minus_legacy_soil``, ``only_satellite`` (all R0) - are included.
+    ``hashes`` (representation to the SHA-256 of its cached file, :func:`build_representations`)
+    become each variant's ``inputs``: a prediction made from another version of the file is refitted.
     """
+    hashes = hashes or {}
     base = global_inputs(resolved)
     percentiles = [c for c in base if c in set(sum(ts_variables(base).values(), []))]
     legacy = list(resolved.groups.get("legacy_soil", ()))
@@ -617,11 +744,14 @@ def part_b_variants(resolved, table_columns: Sequence[str], representations: Seq
         if (rep != "R5" and not columns) or (rep == "R5" and pca is None):
             logger.warning(f"E5 {rep}: no columns in the table (skipped when its features were built); not fitted.")
             continue
-        variants[f"ts_{rep}"] = Variant(statics + tuple(columns), pca=pca)
-        variants[f"ts_{rep}_minus_legacy_soil"] = Variant(_without(statics, legacy) + tuple(columns), pca=pca)
+        inputs = ((rep, hashes[rep]),) if rep in hashes else ()
+        variants[f"ts_{rep}"] = Variant(statics + tuple(columns), pca=pca, inputs=inputs)
+        variants[f"ts_{rep}_minus_legacy_soil"] = Variant(
+            _without(statics, legacy) + tuple(columns), pca=pca, inputs=inputs
+        )
         if rep in ("R2", "R6"):
             sat = [c for c in columns if _is_satellite_ts(c)]
-            variants[f"only_satellite_{rep}"] = Variant(sat_statics + tuple(sat))
+            variants[f"only_satellite_{rep}"] = Variant(sat_statics + tuple(sat), inputs=inputs)
     return variants
 
 

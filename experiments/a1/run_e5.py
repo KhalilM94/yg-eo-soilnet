@@ -71,12 +71,16 @@ def build_hook_and_variants(a1, part: str, *, wanted=None, log=None):
             root = Path(getattr(config, "DATA_FOLDER", None) or settings.data.get("root", "."))
             if not options.timeseries_file:
                 raise ValueError("Part B needs e5.timeseries_file (the monthly composites).")
-            ts = e5.load_timeseries(
-                root / options.timeseries_file,
-                id_column=options.timeseries_id_column,
-                time_column=options.timeseries_time_column,
+            source = root / options.timeseries_file
+            raw = e5.load_timeseries(
+                source, id_column=options.timeseries_id_column, time_column=options.timeseries_time_column
             )
-            features = e5.build_representations(table, ts, options, output_dir / FEATURES_DIR, log=log)
+            ts, cleaning = e5.clean_composites(raw, log=log)
+            (output_dir / FEATURES_DIR).mkdir(parents=True, exist_ok=True)
+            cleaning.to_csv(output_dir / FEATURES_DIR / "report_cleaning.csv")
+            features, state["hashes"] = e5.build_representations(
+                table, ts, options, output_dir / FEATURES_DIR, source_digest=e5.file_digest(source), log=log
+            )
             regions = table.frame[table.region_column] if table.region_column else None
             for name, report in e5.feature_report(features, table, ts, regions).items():
                 report.to_csv(output_dir / FEATURES_DIR / f"report_{name}.csv")
@@ -102,7 +106,9 @@ def build_hook_and_variants(a1, part: str, *, wanted=None, log=None):
             found = e5.part_a_variants(resolved)
         elif part == "B":
             reps = list(options.representations) + (["R5"] if options.r5_enabled else [])
-            found = e5.part_b_variants(resolved, table.feature_columns, reps, r5=state.get("r5"))
+            found = e5.part_b_variants(
+                resolved, table.feature_columns, reps, r5=state.get("r5"), hashes=state.get("hashes")
+            )
         else:
             found = e5.part_c_variants(resolved, state.get("extras", {}))
         chosen = wanted or (options.variants if part == "A" else None)
