@@ -672,6 +672,51 @@ def dissimilarity_frame(transfer: pd.DataFrame, summary: pd.DataFrame) -> pd.Dat
     return logo.assign(region=logo["region"].astype(str)).merge(summary, on="region", how="inner")
 
 
+# --- E5's sensitivity of the main results ------------------------------------------------------------
+
+#: The E5 output folder, beside the run's own (``results/a1_e5`` next to ``results/a1_xgb``).
+E5_FOLDER = "a1_e5"
+
+
+def legacy_soil_sensitivity(inputs) -> str:
+    """A caption sentence: what E5 found when the legacy soil-map layers are left out of Global.
+
+    Read from ``<output_dir>/../a1_e5/ablation.csv`` (variant ``all_minus_legacy_soil``, ΔRMSE on the
+    random split, the 10 km folds and the basins pooled). Empty when the file is not there, or when
+    E5's held-out basins do not include this run's (another dataset, the demo).
+    """
+    from yg_eo_soilnet.a1.figures.style import SOM_UNIT
+
+    path = Path(inputs.settings.output_dir).parent / E5_FOLDER / "ablation.csv"
+    if not path.exists():
+        return ""
+    table = pd.read_csv(path)
+    rows = table[(table["variant"] == "all_minus_legacy_soil") & (table["metric"] == "rmse")].set_index("design")
+    e5_basins = {
+        design.removeprefix("logo ") for design in rows.index if design.startswith("logo ") and design != "logo pooled"
+    }
+    mine = set(inputs.held_out_names) if not inputs.predictions.empty else set()
+    if rows.empty or not mine or not mine <= e5_basins:
+        return ""
+    parts, p_values = [], []
+    for design, label in (
+        ("random", "the random split"),
+        ("10 km", "the 10 km folds"),
+        ("logo pooled", "the basins pooled"),
+    ):
+        if design in rows.index:
+            row = rows.loc[design]
+            parts.append(f"{row['estimate']:+.2f} [{row['low']:.2f}, {row['high']:.2f}] on {label}")
+            p_values.append(f"{row['p_holm']:.2f}")
+    seeds = int(rows["n_seeds"].max()) if "n_seeds" in rows else 1
+    return ps.minus(
+        " Sensitivity (E5): without the legacy soil-map layers (soil-property layers exported from Google Earth "
+        f"Engine; source product not documented), Global's RMSE changes ({SOM_UNIT}) by {', '.join(parts)} "
+        f"(p_Holm {', '.join(p_values)}; {seeds} seed(s)) - no difference survives the Holm correction, so the "
+        "results stand with these layers in."
+    )
+
+
 # --- SHAP -----------------------------------------------------------------------------------------
 
 

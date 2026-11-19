@@ -359,6 +359,10 @@ MIXED_ARMS = ("weighted", "indicator")
 BALANCED = "balanced"
 
 
+#: How a mixed plan's moved points are drawn (:attr:`MixedPlanSettings.draw`).
+MIXED_DRAWS = ("points", "blocks")
+
+
 @dataclass(frozen=True)
 class MixedPlanSettings:
     """The mixed-transfer splits: a share of the held-out region moved into training.
@@ -379,12 +383,18 @@ class MixedPlanSettings:
         The weight of each moved point in the ``weighted`` arm (every other point weighs 1):
         ``"balanced"`` gives (training points from the other regions) / (moved points), so both
         sets carry the same total weight; a positive number sets it directly.
+    draw : {"points", "blocks"}, default "points"
+        How the moved points are drawn. ``points``: single points at random (Broeg et al. 2023).
+        ``blocks``: whole squares of ``bootstrap.block_size_km`` until the share is reached, the
+        last one cut to the exact number; the rest of that block is left out of the plan, so no
+        test point shares a block with a moved one.
     """
 
     fractions: tuple[float, ...] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9)
     n_repeats: int = 5
     arms: tuple[str, ...] = ()
     local_weight: Union[str, float] = BALANCED
+    draw: str = "points"
 
 
 @dataclass(frozen=True)
@@ -946,6 +956,11 @@ def _mixed_kwargs(values: Mapping) -> dict:
         if isinstance(weight, bool) or not isinstance(weight, (str, int, float)):
             raise ValueError(f'plans.mixed.local_weight must be "{BALANCED}" or a positive number; got {weight!r}')
         kwargs["local_weight"] = weight if isinstance(weight, str) else float(weight)
+    if "draw" in values:
+        draw = str(values["draw"])
+        if draw not in MIXED_DRAWS:
+            raise ValueError(f"plans.mixed.draw must be one of {list(MIXED_DRAWS)}; got {draw!r}")
+        kwargs["draw"] = draw
     return kwargs
 
 

@@ -105,6 +105,9 @@ INDEX_FILE = "index.csv"
 #: sets: the size asked for, and the other regions' points left out of the plan (``n_train`` is the
 #: size drawn). A folder without matched plans keeps the plain index, byte for byte.
 MATCHED_INDEX_COLUMNS = ("training_size", "n_left_out")
+#: The columns ``index.csv`` gains when mixed plans move whole blocks (``plans.mixed.draw: blocks``):
+#: the draw, the region's points left out (the rest of the last, cut block) and the blocks moved.
+BLOCK_DRAW_INDEX_COLUMNS = ("draw", "n_left_out", "n_blocks_moved")
 #: A matched ``logo`` plan's id: ``logo_m<training size>_<region>_s<repeat>``.
 MATCHED_ID = re.compile(r"^logo_m(?P<size>\d+)_")
 #: The name matched ``logo`` plans go under in the evaluation tables (their plan kind stays ``logo``).
@@ -149,7 +152,14 @@ class BuiltPlan:
     training_size : int or None
         For matched ``logo`` plans, the training size asked for (``plans.logo.training_size``).
     n_left_out : int or None
-        For matched ``logo`` plans, the other regions' points not drawn into training.
+        For matched ``logo`` plans, the other regions' points not drawn into training; for mixed
+        plans drawn by blocks, the rest of the last, cut block (in neither split).
+    draw : str or None
+        For mixed plans, how the moved points were drawn (``points`` or ``blocks``).
+    n_blocks_moved : int or None
+        For mixed plans drawn by blocks, the blocks the moved points came from.
+    blocks : pandas.Series or None
+        For mixed plans drawn by blocks, each region point's block (checked by :func:`validate_plan`).
     """
 
     plan_id: str
@@ -165,6 +175,9 @@ class BuiltPlan:
     held_out_list: Optional[str] = None
     training_size: Optional[int] = None
     n_left_out: Optional[int] = None
+    draw: Optional[str] = None
+    n_blocks_moved: Optional[int] = None
+    blocks: Optional[pd.Series] = field(default=None, compare=False, repr=False)
 
     def index_row(self) -> dict:
         """The plan's row of ``index.csv``."""
@@ -183,6 +196,8 @@ class BuiltPlan:
             "n_test": counts[TEST],
             "training_size": self.training_size if self.training_size is not None else np.nan,
             "n_left_out": self.n_left_out if self.n_left_out is not None else np.nan,
+            "draw": self.draw if self.draw is not None else "",
+            "n_blocks_moved": self.n_blocks_moved if self.n_blocks_moved is not None else np.nan,
         }
 
 
@@ -661,6 +676,7 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
     """
     _require_regions(population, MIXED)
     options = settings.plans.mixed
+    blocks = training_blocks(population, settings) if options.draw == "blocks" else None
     plans = []
     for region in population.held_out:
         region_ids = population.region_points(region)
@@ -668,10 +684,19 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
         tag = _region_tag(population, region)
         name = population.region_names[region]
         for repeat in range(options.n_repeats):
-            order = region_ids[np.random.default_rng([settings.seed, repeat, region]).permutation(len(region_ids))]
+            rng = np.random.default_rng([settings.seed, repeat, region])
+            if options.draw == "blocks":
+                order, block_of = block_order(region_ids, blocks, rng)
+            else:
+                order, block_of = region_ids[rng.permutation(len(region_ids))], None
             for fraction in options.fractions:
                 n_moved = min(max(int(round(fraction * len(region_ids))), 1), len(region_ids) - 1)
-                moved, test_ids = order[:n_moved], order[n_moved:]
+                moved, left_out = order[:n_moved], order[:0]
+                if block_of is not None:
+                    # The rest of the last block cut is left out: in neither split.
+                    last = block_of[moved[-1]]
+                    left_out = order[n_moved:][(block_of.reindex(order[n_moved:]) == last).to_numpy()]
+                test_ids = order[n_moved:].difference(left_out)
                 suffix = f"{tag}_p{int(round(fraction * 100)):02d}_s{repeat}"
                 common = dict(
                     held_out=name,
@@ -680,14 +705,25 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
                     held_out_cluster=region,
                     moved=frozenset(moved),
                     **_region_record(settings),
+                    draw=options.draw,
+                    **(
+                        dict(
+                            n_left_out=len(left_out),
+                            n_blocks_moved=int(block_of.reindex(moved).nunique()),
+                            blocks=block_of,
+                        )
+                        if block_of is not None
+                        else {}
+                    ),
                 )
 
-                assignments = _assignments(population.ids, test=test_ids, val=val_ids)
+                assignments = _assignments(population.ids, test=test_ids, val=val_ids).drop(left_out)
                 mixed = _plan(assignments, MIXED, settings, clusters=population.region_ids, population=population)
                 plans.append(BuiltPlan(plan_id=f"mixed_{suffix}", kind=MIXED, plan=mixed, **common))
 
                 # Only the region's own points: the moved ones to learn from, the rest to test on.
-                control_assignments = pd.Series(TEST, index=pd.Index(region_ids, name="point_id"), dtype=object)
+                kept = pd.Index(region_ids, name="point_id").difference(left_out)
+                control_assignments = pd.Series(TEST, index=kept, dtype=object)
                 control_assignments.loc[moved] = TRAIN
                 control = _plan(
                     control_assignments, CONTROL, settings, clusters=population.region_ids, population=population
@@ -699,6 +735,42 @@ def mixed_plans(population: PlanPopulation, settings: A1Settings) -> list[BuiltP
                     plan = _plan(assignments, kind, settings, clusters=population.region_ids, population=population)
                     plans.append(BuiltPlan(plan_id=f"{prefix}{suffix}", kind=kind, plan=plan, **common))
     return plans
+
+
+def block_order(region_ids: pd.Index, blocks: pd.Series, rng: np.random.Generator) -> tuple[pd.Index, pd.Series]:
+    """The region's points in the order whole blocks are moved: the blocks in a random order, the points
+    of each block in a random order within it.
+
+    Moving the first n points of this order moves whole blocks, and part of one more: the shares of
+    one repeat are nested, as with single points.
+
+    Returns
+    -------
+    order : pandas.Index
+    block_of : pandas.Series
+        Each region point's block.
+    """
+    block_of = blocks.reindex(region_ids)
+    labels = block_of.unique()
+    order = []
+    for label in rng.permutation(labels):
+        members = region_ids[(block_of == label).to_numpy()]
+        order.extend(members[rng.permutation(len(members))])
+    return pd.Index(order, name=region_ids.name), block_of
+
+
+def shared_block_share(test_ids, moved, blocks: pd.Series) -> float:
+    """The share of the test points whose block also holds a moved point (0 for a block draw).
+
+    >>> blocks = pd.Series({"a": 1, "b": 1, "c": 2, "d": 2})
+    >>> shared_block_share(["b", "c", "d"], ["a"], blocks)
+    0.3333333333333333
+    """
+    test_ids = list(test_ids)
+    if not test_ids:
+        return 0.0
+    moved_blocks = set(blocks.reindex(list(moved)).dropna())
+    return float(blocks.reindex(test_ids).isin(moved_blocks).mean())
 
 
 def plain_mixed_id(plan_id: str) -> str:
@@ -812,6 +884,10 @@ def _validate_divided(built: BuiltPlan) -> None:
     test = set(assignments.index[assignments.to_numpy() == TEST])
     if test != set(assignments.index[in_region]) - set(built.moved):
         raise PlanError(f"{name}: the test set is not the rest of the held-out region")
+    if built.draw == "blocks" and built.blocks is not None:
+        shared = shared_block_share(test, built.moved, built.blocks)
+        if shared > 0:
+            raise PlanError(f"{name}: {shared:.1%} of the test points share a block with a moved point")
     if built.kind == CONTROL:
         if (assignments == VAL).any():
             raise PlanError(f"{name}: a control plan has no validation set")
@@ -959,9 +1035,11 @@ def write_plans(
     for built in plans:
         built.plan.to_frame().to_parquet(out / f"{built.plan_id}.parquet", index=False)
     matched = any(built.training_size is not None for built in plans)
+    by_blocks = any(built.draw == "blocks" for built in plans)
     columns = [*INDEX_COLUMNS, *(MATCHED_INDEX_COLUMNS if matched else ())]
+    columns += [c for c in (BLOCK_DRAW_INDEX_COLUMNS if by_blocks else ()) if c not in columns]
     index = pd.DataFrame([built.index_row() for built in plans], columns=columns)
-    for column in ("training_size", "n_left_out"):
+    for column in ("training_size", "n_left_out", "n_blocks_moved"):
         if column in index:
             index[column] = index[column].astype("Int64")
     index["repeat"] = index["repeat"].astype("Int64")

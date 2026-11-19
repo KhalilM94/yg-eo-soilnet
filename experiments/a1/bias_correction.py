@@ -9,8 +9,12 @@ measured ~ a + b x predicted fitted on the samples (linear, k >= 25); one offset
 carbonate class (a diagnostic - it needs the measured class), the overall offset for a class with
 fewer than 5 samples; and the local model. Writes into ``<output_dir>/robustness/``:
 ``bias_correction.csv`` (per basin and k: each RMSE's mean and 5-95 % over the draws, the
-transferred RMSE on every point), ``bias_correction_draws.csv`` and figure C6 with its data and
-caption. See :mod:`yg_eo_soilnet.a1.robustness`.
+transferred RMSE on every point), ``bias_correction_draws.csv``,
+``bias_correction_calibration.csv`` (per basin, k and method, and for the local model: slope and
+intercept of measured on predicted, bias and RMSE, each the mean and 5-95 % over the draws), figure
+C6, and figure C9 (``figC9_bias_correction_scatter``, k = 100, and ``..._k400`` where a basin leaves
+100 points): measured against predicted for one draw per basin - the one whose offset RMSE is the
+median - with their data and captions. See :mod:`yg_eo_soilnet.a1.robustness`.
 
 With ``--mixed-run`` (default ``results/a1_mixed_arms/runs/default``, when it exists) the E2
 retraining curves of Oum Er Rbia and Sebou - control and mixed, mean over repeats against the number
@@ -39,7 +43,10 @@ if str(REPOSITORY_ROOT) not in sys.path:
 import pandas as pd  # noqa: E402
 
 from yg_eo_soilnet.a1 import evaluation, robustness  # noqa: E402
-from yg_eo_soilnet.a1.figures.robustness import figure_bias_correction  # noqa: E402
+from yg_eo_soilnet.a1.figures.robustness import (  # noqa: E402
+    figure_bias_correction,
+    figure_bias_correction_scatter,
+)
 from yg_eo_soilnet.a1.logs import setup_logging, summary  # noqa: E402
 from yg_eo_soilnet.a1.settings import load_settings  # noqa: E402
 from yg_eo_soilnet.a1.stage2 import GLOBAL  # noqa: E402
@@ -48,6 +55,23 @@ from yg_eo_soilnet.a1.stage2 import GLOBAL  # noqa: E402
 DEFAULT_MIXED_RUN = REPOSITORY_ROOT / "results" / "a1_mixed_arms" / "runs" / "default"
 #: The basins E2 holds out.
 E2_BASINS = ("Oum Er Rbia", "Sebou")
+#: Figure C9's numbers of local samples and file names.
+SCATTER_KS = ((100, "figC9_bias_correction_scatter"), (400, "figC9_bias_correction_scatter_k400"))
+
+
+def scatter_points(pairs, blocks, draws, *, k: int, seed: int):
+    """Figure C9's points: for each basin, the test points of the draw whose offset RMSE is the median."""
+    parts, chosen = [], {}
+    for basin, part in pairs.groupby("basin", sort=True):
+        draw = robustness.median_draw(draws, basin, k)
+        if draw is None:
+            continue
+        test, _ = robustness.one_draw(
+            part.set_index("point_id", drop=False), blocks, basin=basin, k=k, draw=draw, seed=seed
+        )
+        parts.append(test.assign(basin=basin))
+        chosen[basin] = draw
+    return (pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()), chosen
 
 
 def main(argv: list[str] | None = None) -> dict:
@@ -116,7 +140,21 @@ def main(argv: list[str] | None = None) -> dict:
     tables = {"figC6_bias_correction": table}
     if not e2.empty:
         tables["figC6_bias_correction_e2"] = e2
-    robustness.save_figures({"figC6_bias_correction": (figure, caption, tables)}, out)
+    figures = {"figC6_bias_correction": (figure, caption, tables)}
+
+    # Figure C9 and the calibration of each method: slope and intercept of measured on predicted.
+    calibration = robustness.calibration_summary(draws, local_model=local_model)
+    calibration.to_csv(out / "bias_correction_calibration.csv", index=False)
+    labels = list(settings.carbonate.labels)
+    for k, name in SCATTER_KS:
+        points, chosen = scatter_points(pairs, blocks, draws, k=k, seed=settings.seed)
+        if points.empty:
+            continue
+        figure, caption = figure_bias_correction_scatter(
+            points, k=k, local_model=local_model, labels=labels, chosen=chosen
+        )
+        figures[name] = (figure, caption, {name: points.assign(k=k, draw=points["basin"].map(chosen))})
+    robustness.save_figures(figures, out)
     if not args.no_mlflow:
         robustness.log_robustness(run_dir, out, step="bias_correction")
     summary(f"Local model: {local_model} ({robustness.local_text(local_model)}); seed {first}")

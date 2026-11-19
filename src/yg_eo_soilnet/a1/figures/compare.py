@@ -64,6 +64,9 @@ def draw_all(tables: dict, unmatched: pd.DataFrame, *, model: str = GLOBAL) -> d
             tables["mixed_arms"], tables["mixed_arms_paired"], tables["transfer_status"], model=model
         ),
         "figC2_logo_matched": figure_logo_matched(tables["logo_matched_draws"], unmatched, model=model),
+        "figC8_draw_types": figure_draw_types(
+            tables.get("draw_type_curves", pd.DataFrame()), tables.get("block_sharing", pd.DataFrame()), model=model
+        ),
     }
 
 
@@ -318,4 +321,91 @@ def draw_logo_matched(draws: pd.DataFrame, unmatched: pd.DataFrame, basins: list
     ]
     figure.legend(handles=handles, loc="outside upper center", ncol=3, frameon=False)
     caption_line(figure, f"{pretty_name(model)} model, every input. Points: draws; line: mean over draws.")
+    return figure
+
+
+# --- C8 -----------------------------------------------------------------------------------------------
+
+#: Line style of each draw type in figure C8.
+DRAW_STYLE = {"points": "-", "blocks": "--"}
+#: The kinds figure C8 draws, and the model with no local points.
+C8_KINDS = (CONTROL, MIXED, MIXED_WEIGHTED, "transferred")
+
+
+def figure_draw_types(curves: pd.DataFrame, sharing: pd.DataFrame, *, model: str = GLOBAL):
+    """Figure C8 and its caption: point draws against block draws, per basin and kind."""
+    if curves.empty:
+        message = "Figure C8 needs runs with both point and block draws of the mixed plans."
+        return _missing(message), f"Not drawn: {message}"
+    figure = draw_draw_types(curves)
+    parts = []
+    if not sharing.empty:
+        blocks = sharing[sharing["draw"] == "blocks"]
+        for (basin, fraction), part in blocks.groupby(["basin", "fraction"], sort=True):
+            parts.append(f"{basin} {fraction:.0%}: {part['n_blocks_moved'].mean():.1f} blocks")
+        points = sharing[sharing["draw"] == "points"]
+        leak = (
+            f" With point draws, {points['share_test_sharing_block'].mean():.0%} of the test points share a 10 km "
+            f"block with a moved point (range {points['share_test_sharing_block'].min():.0%}-"
+            f"{points['share_test_sharing_block'].max():.0%}); with block draws, "
+            f"{blocks['share_test_sharing_block'].max():.0%}."
+            if not points.empty and not blocks.empty
+            else ""
+        )
+    else:
+        leak = ""
+    caption = (
+        f"Figure C8. {pretty_name(model)} model, every input. RMSE on each basin's remaining points against the "
+        "number of its points moved into training (log scale), when single points are moved (solid; the design of "
+        "Broeg et al. 2023, as in figure 9) and when whole 10 km blocks are (dashed; the rest of the last, cut "
+        "block is left out, so no test point shares a block with a moved one). Control: the moved points alone; "
+        "mixed: the other basins plus them; weighted: the same, each moved point weighted up; dotted grey: the "
+        "model with no local points on the same test points. Bands: 95 % 10 km block bootstrap over test points, "
+        "repeats stacked." + leak + (" Mean blocks moved: " + "; ".join(parts) + "." if parts else "")
+    )
+    return figure, ps.minus(caption)
+
+
+@styled
+def draw_draw_types(curves: pd.DataFrame):
+    """Draw figure C8: one panel per basin; a colour per kind, a line style per draw type."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    basins = sorted(curves["basin"].unique())
+    figure, axes = plt.subplots(
+        1, len(basins), figsize=(WIDTH_2COL, 3.0), layout="constrained", squeeze=False, sharey=True
+    )
+    for position, basin in enumerate(basins):
+        axis = axes[0, position]
+        for kind in C8_KINDS:
+            color = ps.INK_2 if kind == "transferred" else KIND_STYLE[kind][0]
+            for draw, style in DRAW_STYLE.items():
+                line = curves[
+                    (curves["basin"] == basin) & (curves["kind"] == kind) & (curves["draw"] == draw)
+                ].sort_values("n_moved")
+                if line.empty:
+                    continue
+                axis.fill_between(line["n_moved"], line["low"], line["high"], color=color, alpha=0.10, lw=0)
+                axis.plot(
+                    line["n_moved"], line["estimate"], color=color, lw=1.1, ls=":" if kind == "transferred" else style
+                )
+        axis.set_xscale("log")
+        axis.set_title(basin, fontsize=8)
+        axis.set_xlabel("Basin points moved (log scale)")
+        if position == 0:
+            axis.set_ylabel(f"RMSE ({SOM_UNIT})")
+        letter(axis, "abcdefgh"[position])
+    handles = [
+        Line2D([], [], color=KIND_STYLE[kind][0], lw=1.2, label=kind_label(kind))
+        for kind in (CONTROL, MIXED, MIXED_WEIGHTED)
+        if kind in set(curves["kind"])
+    ]
+    handles += [
+        Line2D([], [], color=ps.INK_2, lw=1.0, ls=":", label="No local points"),
+        Line2D([], [], color=ps.INK, lw=1.0, ls="-", label="Single points moved"),
+        Line2D([], [], color=ps.INK, lw=1.0, ls="--", label="Whole 10 km blocks moved"),
+    ]
+    figure.legend(handles=handles, loc="outside upper center", ncol=3, frameon=False)
+    caption_line(figure, "Bands: 95 % 10 km block bootstrap over test points, repeats stacked.")
     return figure

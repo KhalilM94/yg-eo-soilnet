@@ -442,3 +442,144 @@ def draw_cells(cells: pd.DataFrame, correlations: pd.DataFrame, *, labels):
     ]
     figure.legend(handles=handles, loc="outside upper center", ncol=5, frameon=False)
     return figure
+
+
+# --- C9 ------------------------------------------------------------------------------------------------
+
+#: The rows of figure C9: the basins where transfer fails, then the references.
+C9_BASINS = ("Oum Er Rbia", "Sebou", "Bouregreg", "Tensift")
+#: Its columns: each correction, then the local model.
+C9_COLUMNS = (
+    ("uncorrected", "No correction"),
+    ("offset", "Offset"),
+    ("linear", "Linear"),
+    ("per_class_offset", "Offset per class"),
+    ("local", "Local model"),
+)
+#: Above this many test points a panel shows a density (hexbin) and the class medians, not every point.
+HEXBIN_FROM = 1000
+
+
+def figure_bias_correction_scatter(points: pd.DataFrame, *, k: int, local_model: str, labels, chosen: dict):
+    """Figure C9 (one k) and its caption, from the test points of each basin's chosen draw.
+
+    ``points``: ``basin, point_id, class, observed`` and a column per method of
+    :data:`~yg_eo_soilnet.a1.robustness.CALIBRATED`; ``chosen``: basin to the draw shown.
+    """
+    from yg_eo_soilnet.a1.robustness import calibration
+
+    basins = [basin for basin in C9_BASINS if basin in set(points["basin"])]
+    if not basins:
+        return _missing(f"No basin leaves 100 test points with k = {k}."), "Not drawn."
+    figure = draw_bias_correction_scatter(points, basins=basins, labels=labels)
+    parts = []
+    for basin in basins:
+        part = points[points["basin"] == basin]
+        uncorrected, offset, linear = (
+            calibration(part["observed"], part[m]) for m in ("uncorrected", "offset", "linear")
+        )
+        parts.append(
+            f"{basin} (draw {chosen.get(basin)}): slope {uncorrected['slope']:.2f} uncorrected, {offset['slope']:.2f} "
+            f"with the offset, {linear['slope']:.2f} linear"
+        )
+    missing = [basin for basin in C9_BASINS if basin not in basins]
+    caption = (
+        f"Figure C9. Measured SOM against predicted on each basin's remaining points, k = {k} local samples, for "
+        "the model trained on the other basins (Global) with no correction, minus the samples' mean residual "
+        "(offset), recalibrated on them (linear), with one offset per measured carbonate class, and for the "
+        f"{local_text(local_model)} on the same points. For each basin one draw is shown: the one whose offset "
+        "RMSE is the median over the 100 draws. Dashed: 1:1; solid: least-squares line of measured on predicted. "
+        "Colour: measured carbonate class; above 1,000 points, a density with each class's median point. The offset "
+        "changes only the intercept; the linear correction changes the slope too. A slope that stays below 1 after "
+        "correction is an error recalibration cannot remove. "
+        + "; ".join(parts)
+        + "."
+        + (f" Not shown (fewer than 100 points left with k = {k}): {', '.join(missing)}." if missing else "")
+    )
+    return figure, ps.minus(caption)
+
+
+@styled
+def draw_bias_correction_scatter(points: pd.DataFrame, *, basins, labels):
+    """Draw figure C9: a row per basin, a column per method; observed (y) against predicted (x)."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    from yg_eo_soilnet.a1.figures.style import class_color
+    from yg_eo_soilnet.a1.robustness import calibration
+
+    figure, axes = plt.subplots(
+        len(basins),
+        len(C9_COLUMNS),
+        figsize=(WIDTH_2COL, 1.75 * len(basins) + 0.7),
+        layout="constrained",
+        squeeze=False,
+    )
+    for row, basin in enumerate(basins):
+        part = points[points["basin"] == basin]
+        values = pd.concat([part["observed"], *[part[m] for m, _ in C9_COLUMNS]]).to_numpy(float)
+        low, high = np.nanpercentile(values, [0.5, 99.5])
+        pad = 0.04 * (high - low)
+        limits = (low - pad, high + pad)
+        for column, (method, title) in enumerate(C9_COLUMNS):
+            axis = axes[row, column]
+            x, y = part[method].to_numpy(float), part["observed"].to_numpy(float)
+            if len(part) > HEXBIN_FROM:
+                axis.hexbin(x, y, gridsize=28, cmap="Greys", mincnt=1, extent=(*limits, *limits), linewidths=0)
+                for label in labels:
+                    cls = part[part["class"] == label]
+                    if len(cls):
+                        axis.scatter(
+                            cls[method].median(),
+                            cls["observed"].median(),
+                            s=26,
+                            color=class_color(label),
+                            edgecolor=ps.INK,
+                            lw=0.5,
+                            zorder=4,
+                        )
+            else:
+                for label in labels:
+                    cls = part[part["class"] == label]
+                    axis.scatter(cls[method], cls["observed"], s=4, color=class_color(label), alpha=0.4, lw=0)
+            axis.plot(limits, limits, color=ps.INK_2, lw=0.7, ls="--")
+            scores = calibration(y, x)
+            if np.isfinite(scores["slope"]):
+                line = np.array(limits)
+                axis.plot(line, scores["intercept"] + scores["slope"] * line, color=ps.INK, lw=0.9)
+            axis.set_xlim(limits)
+            axis.set_ylim(limits)
+            axis.set_aspect("equal", adjustable="box")
+            axis.text(
+                0.03,
+                0.97,
+                ps.minus(
+                    f"RMSE {scores['rmse']:.1f}\nbias {scores['bias']:+.1f}\nslope {scores['slope']:.2f}\n"
+                    f"int. {scores['intercept']:.1f}"
+                ),
+                transform=axis.transAxes,
+                va="top",
+                fontsize=7,
+                color=ps.INK_2,
+            )
+            if row == 0:
+                axis.set_title(title, fontsize=8)
+            if column == 0:
+                axis.set_ylabel(f"{basin}\nmeasured ({SOM_UNIT})")
+            else:
+                axis.tick_params(labelleft=False)
+            if row == len(basins) - 1:
+                axis.set_xlabel(f"Predicted ({SOM_UNIT})")
+            else:
+                axis.tick_params(labelbottom=False)
+            axis.grid(False)
+    handles = [
+        Line2D([], [], marker="o", ls="", color=class_color(label), ms=4, label=f"CaCO₃ {pretty_name(label)}")
+        for label in labels
+    ]
+    handles += [
+        Line2D([], [], color=ps.INK_2, ls="--", lw=0.7, label="1:1"),
+        Line2D([], [], color=ps.INK, lw=0.9, label="Least squares"),
+    ]
+    figure.legend(handles=handles, loc="outside upper center", ncol=len(handles), frameon=False)
+    return figure

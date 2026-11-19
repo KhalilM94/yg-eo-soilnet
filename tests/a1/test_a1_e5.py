@@ -592,3 +592,11 @@ def test_a_prediction_made_from_older_features_is_refitted_by_itself(e5_run):
     assert all(stored_inputs(path) == current for path in stale)
     assert all(path.stat().st_mtime_ns == before[path] for path in untouched)  # the others are not refitted
     assert pa  # the module is used for the metadata above
+
+
+def test_a_seed_counts_only_where_both_the_variant_and_its_reference_were_fitted():
+    frame = _predictions()
+    # all_minus_climate fitted for seed 42 only; its reference for both seeds.
+    frame = frame[~((frame["covariate_group"] == "all_minus_climate") & (frame["seed"] == 7))]
+    table = e5.variant_differences(frame, [("all_minus_climate", "all")], part="A", first_seed=42, n=50)
+    assert (table["n_seeds"] == 1).all() and (table["n_seeds_same_sign"] <= 1).all()

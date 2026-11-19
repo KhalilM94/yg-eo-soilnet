@@ -596,6 +596,73 @@ def class_offset_correction(sample: pd.DataFrame, test: pd.DataFrame, *, min_sam
     return test["predicted"].to_numpy(float) - per_point
 
 
+def one_draw(part: pd.DataFrame, blocks: pd.Series, *, basin: str, k: int, draw: int, seed: int = 42):
+    """One draw of the correction check: its k samples, and its test points with every correction.
+
+    ``part`` is one basin's :func:`paired` rows indexed by point id. Seeded by
+    ``[seed, draw, basin, k]``, so a draw can be rebuilt exactly (figure C9 does).
+
+    Returns
+    -------
+    test : pandas.DataFrame
+        The test points: ``point_id, class, observed``, a column per method of :data:`METHODS`
+        (the corrected predictions) and ``local``.
+    info : dict
+        ``n_test, n_set_aside, offset, a, b``.
+    """
+    rng = np.random.default_rng([int(seed), draw, _key(basin), int(k)])
+    chosen, leftover = block_sample(part.index, blocks, k, rng)
+    sample = part.loc[chosen]
+    test = part.loc[part.index.difference(chosen).difference(leftover)]
+    a, b = linear_fit(sample) if k >= MIN_LINEAR else (np.nan, np.nan)
+    frame = pd.DataFrame(
+        {
+            "point_id": test.index,
+            "class": test["class"].to_numpy(),
+            "observed": test["observed"].to_numpy(float),
+            "uncorrected": test["predicted"].to_numpy(float),
+            "offset": offset_correction(sample, test),
+            "linear": a + b * test["predicted"].to_numpy(float),
+            "per_class_offset": class_offset_correction(sample, test),
+            "local": test["local"].to_numpy(float),
+        }
+    )
+    info = {
+        "n_test": len(test),
+        "n_set_aside": len(leftover),
+        "offset": float((sample["predicted"] - sample["observed"]).mean()),
+        "a": a,
+        "b": b,
+    }
+    return frame, info
+
+
+def calibration(observed, predicted) -> dict:
+    """``slope, intercept`` of observed ~ a + b * predicted (least squares), ``bias`` (predicted - observed), ``rmse``.
+
+    >>> calibration([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])
+    {'slope': 1.0, 'intercept': -1.0, 'bias': 1.0, 'rmse': 1.0}
+    """
+    x, y = np.asarray(predicted, dtype=float), np.asarray(observed, dtype=float)
+    keep = np.isfinite(x) & np.isfinite(y)
+    x, y = x[keep], y[keep]
+    if x.size < 2 or np.ptp(x) == 0:
+        slope = intercept = np.nan
+    else:
+        slope, intercept = (float(v) for v in np.polyfit(x, y, 1))
+    error = x - y
+    return {
+        "slope": slope,
+        "intercept": intercept,
+        "bias": float(error.mean()) if error.size else np.nan,
+        "rmse": _rmse(error),
+    }
+
+
+#: The predictions figure C9 and the calibration table read: the corrections and the local model.
+CALIBRATED = (*METHODS, "local")
+
+
 def correction_draws(
     pairs: pd.DataFrame,
     blocks: pd.Series,
@@ -608,17 +675,17 @@ def correction_draws(
     """Every draw of the correction check: per basin and k, the RMSE of each correction and of the local model.
 
     For each held-out basin (one seed's ``pairs``, :func:`paired`) and each k leaving at least
-    ``min_test`` points, ``n_draws`` times: k basin points are drawn by whole blocks
-    (:func:`block_sample`) as local samples; the rest of the partly used block is set aside; every
-    other basin point is a test point. On those same test points: the uncorrected Global
+    ``min_test`` points, ``n_draws`` times (:func:`one_draw`): k basin points are drawn by whole
+    blocks (:func:`block_sample`) as local samples; the rest of the partly used block is set aside;
+    every other basin point is a test point. On those same test points: the uncorrected Global
     predictions, the :func:`offset_correction`, the :func:`linear_correction` (k >= 25), the
-    :func:`class_offset_correction`, and the local model. Seeded by ``[seed, draw, basin, k]``.
+    :func:`class_offset_correction`, and the local model.
 
     Returns
     -------
     pandas.DataFrame
-        ``basin, k, draw, n_test, n_set_aside, rmse_<method>`` for each of :data:`METHODS`,
-        ``rmse_local``, ``offset``, ``a``, ``b``.
+        ``basin, k, draw, n_test, n_set_aside``, then for each of :data:`CALIBRATED`
+        ``rmse_<m>, bias_<m>, slope_<m>, intercept_<m>`` (observed on predicted), then ``offset, a, b``.
     """
     rows = []
     for basin, part in pairs.groupby("basin", sort=True):
@@ -627,33 +694,48 @@ def correction_draws(
             if len(part) - k < min_test:
                 continue
             for draw in range(n_draws):
-                rng = np.random.default_rng([int(seed), draw, _key(basin), int(k)])
-                chosen, leftover = block_sample(part.index, blocks, k, rng)
-                sample = part.loc[chosen]
-                test = part.loc[part.index.difference(chosen).difference(leftover)]
-                observed = test["observed"].to_numpy(float)
-                a, b = linear_fit(sample) if k >= MIN_LINEAR else (np.nan, np.nan)
-                corrected = {
-                    "uncorrected": test["predicted"].to_numpy(float),
-                    "offset": offset_correction(sample, test),
-                    "linear": a + b * test["predicted"].to_numpy(float),
-                    "per_class_offset": class_offset_correction(sample, test),
+                test, info = one_draw(part, blocks, basin=basin, k=k, draw=draw, seed=seed)
+                row = {
+                    "basin": basin,
+                    "k": int(k),
+                    "draw": draw,
+                    "n_test": info["n_test"],
+                    "n_set_aside": info["n_set_aside"],
                 }
-                rows.append(
-                    {
-                        "basin": basin,
-                        "k": int(k),
-                        "draw": draw,
-                        "n_test": len(test),
-                        "n_set_aside": len(leftover),
-                        **{f"rmse_{method}": _rmse(values - observed) for method, values in corrected.items()},
-                        "rmse_local": _rmse(test["local"].to_numpy(float) - observed),
-                        "offset": float((sample["predicted"] - sample["observed"]).mean()),
-                        "a": a,
-                        "b": b,
-                    }
-                )
+                for method in CALIBRATED:
+                    scores = calibration(test["observed"], test[method])
+                    for name, value in scores.items():
+                        row[f"{name}_{method}"] = value
+                rows.append({**row, "offset": info["offset"], "a": info["a"], "b": info["b"]})
     return pd.DataFrame(rows)
+
+
+def calibration_summary(draws: pd.DataFrame, *, local_model: str) -> pd.DataFrame:
+    """``bias_correction_calibration.csv``: per basin, k and method (and the local model), the slope and
+    intercept of observed on predicted, the bias and the RMSE - each the mean and 5-95 % over the draws,
+    on each draw's own test points."""
+    rows = []
+    for (basin, k), part in draws.groupby(["basin", "k"], sort=True):
+        for method in CALIBRATED:
+            row = {"local_model": local_model, "basin": basin, "k": int(k), "method": method, "n_draws": len(part)}
+            for name in ("slope", "intercept", "bias", "rmse"):
+                values = part[f"{name}_{method}"].to_numpy(float)
+                finite = values[np.isfinite(values)]
+                row[name] = float(finite.mean()) if finite.size else np.nan
+                row[f"{name}_q05"] = float(np.percentile(finite, 5)) if finite.size else np.nan
+                row[f"{name}_q95"] = float(np.percentile(finite, 95)) if finite.size else np.nan
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def median_draw(draws: pd.DataFrame, basin: str, k: int, method: str = "offset") -> Optional[int]:
+    """The draw whose RMSE of ``method`` is the median over the draws of one basin and k (the lower
+    middle one for an even count): figure C9 shows that one draw. None when there is none."""
+    part = draws[(draws["basin"] == basin) & (draws["k"] == k)].dropna(subset=[f"rmse_{method}"])
+    if part.empty:
+        return None
+    ordered = part.sort_values([f"rmse_{method}", "draw"])
+    return int(ordered["draw"].iloc[(len(ordered) - 1) // 2])
 
 
 def correction_summary(draws: pd.DataFrame, pairs: pd.DataFrame, *, local_model: str) -> pd.DataFrame:

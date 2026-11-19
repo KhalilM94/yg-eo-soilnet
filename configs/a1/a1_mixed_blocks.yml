@@ -1,0 +1,95 @@
+# Paper A1, E2 with whole-block draws: the local points moved into training are whole 10 km blocks
+# (bootstrap.block_size_km), the last one cut to the exact number and the rest of that block left
+# out of the plan, so no test point shares a block with a moved point. results/a1_mixed and
+# results/a1_mixed_arms draw single points (the design of Broeg et al. 2023), where a test point
+# can sit next to a moved one; this run is the stricter check of what local data win back.
+# Same basins and settings as configs/a1/a1_mixed_arms.yml; the small shares only, Global only.
+#
+# Run with (pixi run -e dev ...):
+#   python experiments/a1/make_plans.py --config configs/a1/a1_mixed_blocks.yml --kinds logo,mixed
+#   python experiments/a1/run_a1.py --config configs/a1/a1_mixed_blocks.yml \
+#       --kinds logo,mixed,control,mixed_weighted --workers 2
+#   python experiments/a1/evaluate.py --config configs/a1/a1_mixed_blocks.yml
+#   python experiments/a1/compare.py --runs results/a1_mixed_arms/runs/default \
+#       results/a1_mixed_blocks/runs/default --out results/a1_compare_blocks
+
+# --- data ---------------------------------------------------------------------------------------
+main_config: main_config.yml
+data:
+  root: "/home/kmisbah/CESBIO/AL_Moutmir/Soil_Datasets/soil_dataset_20251118_140815"
+  static: "Morocco_roadsafe_6k_with_ts_features_and_covariates_V_310826.csv"
+  targets: "Morocco_soil_targets_uuid_roadsafe_6ksample_V_310826.csv"
+  timeseries: null
+
+target: organic_matter_g_kg
+auxiliary:
+  targets: [caco3_pct_total, c_e_c_meq_100g]
+
+covariate_groups: covariate_groups.yml
+
+regions:
+  source: polygons
+  column: null
+  polygons_path: /home/kmisbah/CESBIO/AL_Moutmir/BDMaroc/BassinsHydrauliques.shp
+  name_field: Bassin
+
+# --- models -------------------------------------------------------------------------------------
+stage1:
+  estimator: XGBoost
+  init_args:
+    device: cpu
+  params:
+    model__n_estimators: [100]
+    model__max_depth: [6]
+    model__learning_rate: [0.05]
+stage2:
+  estimator: XGBoost
+  init_args:
+    device: cuda
+  params:
+    model__max_depth: [3, 4, 5, 6, 7]
+    model__n_estimators: [100, 200]
+    model__learning_rate: [0.05]
+  # Global only (no stage 1, no quantile model).
+  models: [global]
+inner_cv_folds: 5
+seeds: [42]
+
+# --- what the results are read with -------------------------------------------------------------
+min_cell_size: 30
+bootstrap:
+  block_size_km: 10
+
+timeseries_percentiles:
+  source: static
+
+exclude_inputs: [S2_SZA, S1_angle]
+
+carbonate:
+  column: caco3_pct_total
+  edges: [2, 10, 25]
+  labels: ["<2", "2-10", "10-25", ">=25"]
+
+sample_year:
+  column: null
+  file: null
+
+# --- split plans --------------------------------------------------------------------------------
+plans:
+  logo:
+    min_points: 100
+    held_out: [Oum Er Rbia, Sebou]
+    validation_region: false
+  mixed:
+    fractions: [0.05, 0.1, 0.2, 0.3]
+    n_repeats: 5
+    # control and mixed come with every mixed plan; weighted is the one extra arm.
+    arms: [weighted]
+    # each moved point weighs (points from the other basins) / (points actually moved), counted on
+    # the plan's training points after the last block is cut.
+    local_weight: balanced
+    draw: blocks
+
+# --- where the results go -----------------------------------------------------------------------
+output_dir: results/a1_mixed_blocks
+mlflow_experiment: Paper_A1

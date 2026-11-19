@@ -14,7 +14,7 @@ from matplotlib.lines import Line2D
 
 from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1.config import stage1_prediction_column
-from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach
+from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach, legacy_soil_sensitivity
 from yg_eo_soilnet.a1.layout import find_stage1
 from yg_eo_soilnet.a1.figures.labels import pretty_name, pretty_split
 from yg_eo_soilnet.a1.figures.style import (
@@ -142,7 +142,7 @@ def figure_spatial(inputs: FigureInputs):
             else ""
         )
         + "Spatial-block scores pool every fold, so each point is tested once. (e) Stage 1's out-of-fold R² for "
-        "CaCO₃ and CEC on the same designs."
+        "CaCO₃ and CEC on the same designs." + legacy_soil_sensitivity(inputs)
     )
     return attach(figure, {"fig05_spatial_scores": scores, "fig05_stage1_r2": stage1}, caption)
 

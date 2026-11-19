@@ -15,7 +15,13 @@ import pandas as pd
 
 from yg_eo_soilnet import plot_style as ps
 from yg_eo_soilnet.a1 import evaluation
-from yg_eo_soilnet.a1.figures.core import FigureInputs, _missing, attach, dissimilarity_frame
+from yg_eo_soilnet.a1.figures.core import (
+    FigureInputs,
+    _missing,
+    attach,
+    dissimilarity_frame,
+    legacy_soil_sensitivity,
+)
 from yg_eo_soilnet.a1.figures.style import (
     FALLBACK_NOTE,
     SOM_UNIT,
@@ -172,6 +178,7 @@ def figure_basins(inputs: FigureInputs):
             else ""
         )
         + (FALLBACK_NOTE if evaluation.fell_back(inputs.transfer) else "")
+        + legacy_soil_sensitivity(inputs)
     )
     return attach(figure, {"table_basins": text, "fig10_basins": table}, caption)
 

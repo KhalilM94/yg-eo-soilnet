@@ -45,6 +45,15 @@ What is written (:func:`compare_runs`):
     ``local``, named in ``local_model``, when the main run lacks it) - RMSE, bias and R²
     differences with 10 km block-bootstrap intervals, Holm within each basin and score; and each
     size's (and the full and local models') scores with their intervals.
+``block_sharing.csv``
+    Per run, basin, share and repeat of the mixed plans: how they were drawn (``points``, single
+    points as in Broeg et al. 2023, or ``blocks``), the moved points and the blocks they came from
+    (and the mean over the repeats), and the share of the test points sitting in a block that holds a
+    moved point - 0 for block draws.
+``draw_type_curves.csv``
+    With point and block draws among the runs: per run, kind (control, mixed, weighted, the model
+    with no local points), basin and share, RMSE with its stacked 10 km block-bootstrap interval and
+    the mean moved points (figure C8).
 ``arms_vs_transferred.csv``
     "Local data against transferred": each mixed kind and control, per basin and share, against the
     basin's leave-one-basin-out model on the same test points, repeats stacked, paired block
@@ -289,7 +298,8 @@ def check_mixed_pairing(runs: Sequence[RunFolder]) -> None:
     seen: dict = {}
     for run in runs:
         for row in _mixed_plans(run).itertuples():
-            key = (row.basin, row.fraction, row.repeat)
+            # Point and block draws of one share test different points by design: never paired.
+            key = (row.basin, row.fraction, row.repeat, draw_type(run, row.plan_id))
             points = run.test_points(row.plan_id)
             if key in seen and seen[key][2] != points:
                 other_run, other_plan, _ = seen[key]
@@ -307,6 +317,16 @@ def check_mixed_pairing(runs: Sequence[RunFolder]) -> None:
                         f"{plan_id} ({run.name}) does not test every point of {other_plan} ({other_run}): the model "
                         "with no local points cannot be scored on the shared test points."
                     )
+
+
+def draw_type(run: RunFolder, plan_id: Optional[str] = None) -> str:
+    """How a run's mixed plans drew their moved points (``plans.mixed.draw``): ``points`` unless the index says ``blocks``."""
+    index = run.index
+    if "draw" not in index.columns:
+        return "points"
+    values = index["draw"] if plan_id is None else index.loc[[plan_id], "draw"]
+    values = values[values.astype(str).isin(["points", "blocks"])]
+    return str(values.iloc[0]) if len(values) else "points"
 
 
 def local_of(model: str) -> str:
@@ -783,6 +803,117 @@ def arms_vs_transferred(
     return pd.concat(parts, ignore_index=True)[columns]
 
 
+# --- point draws against block draws ------------------------------------------------------------------
+
+#: The blocks of each settings file, read once per comparison.
+_BLOCKS_CACHE: dict = {}
+
+
+def _run_blocks(run: RunFolder):
+    """The 10 km blocks of every point of a run (its settings' ``bootstrap.block_size_km`` grid)."""
+    from yg_eo_soilnet.a1.plans import plan_population, training_blocks
+    from yg_eo_soilnet.a1.settings import load_settings
+
+    path = run.manifest.get("settings")
+    if not path or not Path(path).exists():
+        return None
+    if path not in _BLOCKS_CACHE:
+        settings = load_settings(path)
+        _BLOCKS_CACHE[path] = training_blocks(plan_population(settings), settings)
+    return _BLOCKS_CACHE[path]
+
+
+def block_sharing(runs: Sequence[RunFolder]) -> pd.DataFrame:
+    """``block_sharing.csv``: per run, basin, share and repeat, how many blocks were moved, and the
+    share of the test points that sit in a block holding a moved point (0 for block draws).
+
+    ``mean_blocks_moved`` repeats, on every row of a basin and share, the mean over its repeats.
+    """
+    from yg_eo_soilnet.a1.plans import shared_block_share
+
+    columns = [
+        "run",
+        "draw",
+        "basin",
+        "fraction",
+        "repeat",
+        "n_moved",
+        "n_blocks_moved",
+        "mean_blocks_moved",
+        "n_test",
+        "share_test_sharing_block",
+    ]
+    rows = []
+    for run in runs:
+        plans = _mixed_plans(run)
+        plans = plans[plans["kind"] == MIXED]
+        if plans.empty:
+            continue
+        blocks = _run_blocks(run)
+        if blocks is None:
+            logger.warning(f"{run.name}: its settings file is not found; no block sharing.")
+            continue
+        for row in plans.itertuples():
+            plan = run.plan(row.plan_id)
+            test = plan.point_ids_for(TEST)
+            region = plan.clusters.reindex(test).dropna().unique() if plan.clusters is not None else []
+            train = plan.point_ids_for(TRAIN)
+            moved = train[(plan.clusters.reindex(train) == region[0]).to_numpy()] if len(region) == 1 else train[:0]
+            rows.append(
+                {
+                    "run": run.name,
+                    "draw": draw_type(run, row.plan_id),
+                    "basin": row.basin,
+                    "fraction": float(row.fraction),
+                    "repeat": int(row.repeat),
+                    "n_moved": len(moved),
+                    "n_blocks_moved": int(blocks.reindex(moved).nunique()),
+                    "n_test": len(test),
+                    "share_test_sharing_block": shared_block_share(test, moved, blocks),
+                }
+            )
+    table = pd.DataFrame(rows, columns=[c for c in columns if c != "mean_blocks_moved"])
+    if table.empty:
+        return pd.DataFrame(columns=columns)
+    table["mean_blocks_moved"] = table.groupby(["run", "basin", "fraction"])["n_blocks_moved"].transform("mean")
+    return table[columns].sort_values(["run", "basin", "fraction", "repeat"]).reset_index(drop=True)
+
+
+def draw_type_curves(
+    runs: Sequence[RunFolder],
+    arms: pd.DataFrame,
+    *,
+    model: str = GLOBAL,
+    block_km: float = 10.0,
+    n: int = 1000,
+    seed: int = 42,
+) -> pd.DataFrame:
+    """Per run (draw type), kind, basin and share: RMSE with its stacked block-bootstrap interval, and the moved points.
+
+    Figure C8's lines: control, mixed, weighted and the model with no local points, each scored on
+    each share's own test points, repeats stacked (:func:`~yg_eo_soilnet.a1.evaluation.mixed_intervals`).
+    Empty unless the runs hold both point and block draws.
+    """
+    columns = ["run", "draw", "kind", "basin", "fraction", "n_moved", "estimate", "low", "high", "n"]
+    if len({draw_type(run) for run in runs if not _mixed_plans(run).empty}) < 2:
+        return pd.DataFrame(columns=columns)
+    parts = []
+    for run in runs:
+        rows = run.predictions[run.predictions["kind"] != MIXED_INDICATOR]
+        stacked = evaluation.mixed_stack(rows, model=model)
+        if stacked.empty:
+            continue
+        found = evaluation.mixed_intervals(stacked, block_km=block_km, n=n, seed=seed)
+        found = found[found["metric"] == "rmse"].rename(columns={"held_out": "basin"})
+        mine = arms[arms["run"] == run.name] if not arms.empty else arms
+        moved = mine.groupby(["basin", "fraction"])["n_moved"].mean() if not mine.empty else pd.Series(dtype=float)
+        found["n_moved"] = [float(moved.get((b, f), np.nan)) for b, f in zip(found["basin"], found["fraction"])]
+        parts.append(found.assign(run=run.name, draw=draw_type(run)))
+    if not parts:
+        return pd.DataFrame(columns=columns)
+    return pd.concat(parts, ignore_index=True)[columns]
+
+
 # --- whether transfer fails, from the main run -------------------------------------------------------
 
 
@@ -872,6 +1003,8 @@ def cross_run(runs: Sequence[RunFolder], *, model: str = GLOBAL, with_devices: b
             a = run_a.predictions[run_a.predictions["model"] == model]
             b = run_b.predictions[run_b.predictions["model"] == model]
             for plan_id in sorted(set(a["plan_id"]) & set(b["plan_id"])):
+                if draw_type(run_a, plan_id) != draw_type(run_b, plan_id):
+                    continue  # the same name, another draw (points against blocks): not the same plan
                 if run_a.test_points(plan_id) != run_b.test_points(plan_id):
                     raise CompareError(
                         f"{plan_id} tests different points in {run_a.name} and {run_b.name}; they cannot be paired."
@@ -1024,6 +1157,8 @@ CSV_ONLY = (
     "matched_paired",
     "matched_intervals",
     "arms_vs_transferred",
+    "block_sharing",
+    "draw_type_curves",
 )
 CAPTIONS_FILE = "captions.md"
 
@@ -1111,6 +1246,8 @@ def compare_runs(
             stack, n_train, local_model=local_model, block_km=block_km, n=n_boot, seed=seed
         ),
         "arms_vs_transferred": arms_vs_transferred(runs, arms, model=model, block_km=block_km, n=n_boot, seed=seed),
+        "block_sharing": block_sharing(runs),
+        "draw_type_curves": draw_type_curves(runs, arms, model=model, block_km=block_km, n=n_boot, seed=seed),
     }
 
     out = Path(out_dir)

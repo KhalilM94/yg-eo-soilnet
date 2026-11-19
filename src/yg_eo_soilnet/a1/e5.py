@@ -854,8 +854,9 @@ def variant_differences(
     """Each ``(variant, reference)`` pair on every design: ΔRMSE, Δbias, ΔR² (variant - reference).
 
     The first seed's predictions give the estimate, a 95 % paired 10 km block-bootstrap interval
-    and a p-value; Holm corrects within each family (``part``, design, score). Every seed gives
-    its own estimate: ``mean_over_seeds`` and ``n_seeds_same_sign`` (as the first seed's).
+    and a p-value; Holm corrects within each family (``part``, design, score). Every seed with both
+    the variant and its reference gives its own estimate: ``mean_over_seeds``, ``n_seeds_same_sign``
+    (as the first seed's) and ``n_seeds`` count those seeds only.
     """
     columns = [
         "part",
@@ -915,7 +916,8 @@ def variant_differences(
                     "n_blocks": row.n_blocks,
                     "mean_over_seeds": float(np.nanmean(values)) if np.isfinite(values).any() else np.nan,
                     "n_seeds_same_sign": int(np.sum(np.sign(values) == sign)),
-                    "n_seeds": len(seeds),
+                    # The seeds with both the variant and its reference (E5's extra seeds cover some variants).
+                    "n_seeds": int(np.isfinite(values).sum()),
                     "n_features": (n_features or {}).get(row.a, np.nan),
                     "n_features_reference": (n_features or {}).get(row.b, np.nan),
                 }
