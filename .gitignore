@@ -13,6 +13,10 @@ htmlcov/
 
 # ML / training artifacts
 mlruns/
+# A1's MLflow metadata (SQLite, with its write-ahead log) and the file store kept from before it.
+mlflow.db
+mlflow.db-*
+mlruns_backup_*/
 lightning_logs/
 mlflow_exports/
 optuna_studies/

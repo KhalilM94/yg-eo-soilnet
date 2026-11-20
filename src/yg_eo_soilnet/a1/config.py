@@ -336,8 +336,10 @@ class A1Config:
 
     def describe(self) -> dict[str, Any]:
         """The configuration's provenance as flat name/value pairs, ready to be recorded with a run."""
+        from yg_eo_soilnet.a1.tracking import repository_path
+
         described: dict[str, Any] = {
-            "a1_config_path": self.path,
+            "a1_config_path": repository_path(self.path),
             "a1_git_commit": self.git_commit or "unknown",
             "a1_git_dirty": self.git_dirty,
             "a1_target": self.settings.target,

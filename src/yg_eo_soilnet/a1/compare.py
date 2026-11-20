@@ -247,7 +247,9 @@ def _first_seed(manifest: dict) -> Optional[int]:
     from yg_eo_soilnet.a1.settings import load_settings
 
     try:
-        return load_settings(manifest["settings"]).seed
+        from yg_eo_soilnet.a1.tracking import resolve_repository_path
+
+        return load_settings(str(resolve_repository_path(manifest["settings"]))).seed
     except Exception:  # an older or moved settings file: the first seed in the predictions is used
         return None
 
@@ -814,7 +816,10 @@ def _run_blocks(run: RunFolder):
     from yg_eo_soilnet.a1.plans import plan_population, training_blocks
     from yg_eo_soilnet.a1.settings import load_settings
 
-    path = run.manifest.get("settings")
+    from yg_eo_soilnet.a1.tracking import resolve_repository_path
+
+    resolved = resolve_repository_path(run.manifest.get("settings"))
+    path = str(resolved) if resolved is not None else None
     if not path or not Path(path).exists():
         return None
     if path not in _BLOCKS_CACHE:
@@ -1284,8 +1289,9 @@ def _log_to_mlflow(first: RunFolder, out: Path, runs: Sequence[RunFolder]) -> Op
     if not entry.get("experiment_id"):
         logger.warning(f"{first.name} records no MLflow experiment; the comparison is not added to MLflow.")
         return None
-    if entry.get("tracking_uri"):
-        mlflow.set_tracking_uri(entry["tracking_uri"])
+    from yg_eo_soilnet.a1.tracking import configure_a1_tracking
+
+    configure_a1_tracking(recorded=entry.get("tracking_uri"))
     tags = {"a1_compare_runs": ";".join(run.name for run in runs), "a1_step": "compare"}
     with mlflow.start_run(experiment_id=entry["experiment_id"], run_name="compare", tags=tags) as run:
         mlflow.log_artifacts(str(out), "compare")

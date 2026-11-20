@@ -889,8 +889,9 @@ def log_robustness(run_dir, out, *, step: str) -> Optional[str]:
     if not entry.get("experiment_id"):
         logger.warning(f"{run_dir} records no MLflow experiment; {out} is not added to MLflow.")
         return None
-    if entry.get("tracking_uri"):
-        mlflow.set_tracking_uri(entry["tracking_uri"])
+    from yg_eo_soilnet.a1.tracking import configure_a1_tracking
+
+    configure_a1_tracking(recorded=entry.get("tracking_uri"))
     found = mlflow.search_runs(
         experiment_ids=[entry["experiment_id"]],
         filter_string="tags.mlflow.runName = 'compare'",

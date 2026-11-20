@@ -51,6 +51,7 @@ import json
 import logging
 import os
 import shutil
+import socket
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -67,6 +68,7 @@ from yg_eo_soilnet.a1.config import AUXILIARY_GROUP, COMBINED_GROUP, A1Config
 from yg_eo_soilnet.a1.dissimilarity import importance_weights, plan_dissimilarity, region_summary
 from yg_eo_soilnet.a1.logs import format_duration
 from yg_eo_soilnet.a1.features import build_table
+from yg_eo_soilnet.a1.tracking import repository_path
 from yg_eo_soilnet.a1.layout import prediction_dir, prediction_paths, stage1_path
 from yg_eo_soilnet.a1.plans import CONTROL, INDEX_COLUMNS, INDEX_FILE, LOGO, MIXED, RANDOM, SPATIAL_KFOLD
 from yg_eo_soilnet.a1.settings import dev_mode_settings
@@ -1078,6 +1080,10 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, 
                     f"Resuming {run_dir}, started at commit {manifest.get('git_commit')}; the code is now at "
                     f"{a1.git_commit}. Files already written are kept as they are."
                 )
+            # An older manifest holds the settings file as an absolute path of the machine that made
+            # it: stored relative from now on (the same file), and the host recorded once.
+            manifest["settings"] = repository_path(manifest.get("settings") or a1.path)
+            manifest.setdefault("host", socket.gethostname())
             return manifest
         logger.warning(f"Clearing {run_dir}: {'; '.join(problems)}.")
         _clear_run_folder(run_dir)
@@ -1085,9 +1091,11 @@ def _check_manifest(a1, config, plans_path, index, run_dir, *, restart, logger, 
     manifest = {
         "format": PREDICTION_FORMAT,
         "config_hash": fingerprint,
-        "settings": a1.path,
+        # Relative to the repository root, so the folder reads the same on another machine.
+        "settings": repository_path(a1.path),
         "overrides": overrides or {},
         "git_commit": a1.git_commit,
+        "host": socket.gethostname(),
         "git_dirty": a1.git_dirty,
         "created": datetime.datetime.now().isoformat(timespec="seconds"),
         "plans": {},
@@ -1277,10 +1285,21 @@ def _start_parent(
     """
     import mlflow
 
-    from yg_eo_soilnet.a1.tracking import A1TrackingError, check_run, record_parent, recorded_run_id
-    from yg_eo_soilnet.tracking import close_stale_runs, configure_tracking, log_params_once, run_owner_tags
+    from yg_eo_soilnet.a1.tracking import (
+        A1TrackingError,
+        check_run,
+        configure_a1_tracking,
+        record_parent,
+        recorded_run_id,
+    )
+    from yg_eo_soilnet.tracking import close_stale_runs, log_params_once, run_owner_tags
 
-    experiment = configure_tracking(config, a1.settings.mlflow_experiment)
+    from yg_eo_soilnet.tracking import DEFAULT_EXPERIMENT_NAME
+
+    experiment = a1.settings.mlflow_experiment or str(
+        getattr(config, "MLFLOW_EXPERIMENT_NAME", "") or DEFAULT_EXPERIMENT_NAME
+    )
+    configure_a1_tracking(config, experiment, recorded=((manifest or {}).get("mlflow") or {}).get("tracking_uri"))
     close_stale_runs(experiment)
     existing = recorded_run_id(manifest or {})
     if existing:
@@ -1306,26 +1325,33 @@ def _start_parent(
             "a1_diagnostic_models": ",".join(DIAGNOSTIC_MODELS),
         }
     )
-    log_params_once(
-        {
-            **a1.describe(),
-            "a1_kinds": ",".join(kinds) if kinds else "all",
-            "a1_groups": groups,
-            "a1_dev_mode": dev_mode,
-            "a1_logo_min_points": a1.settings.plans.logo.min_points,
-            "a1_logo_held_out": ";".join(a1.settings.plans.logo.held_out or ()) or "all eligible",
-            "a1_kfold_method": a1.settings.plans.spatial_kfold.method,
-            "a1_kfold_block_sizes_m": ",".join(
-                f"{size:g}" for size in a1.settings.plans.spatial_kfold.block_sizes_m() if size is not None
-            )
-            or "none",
-            "a1_min_cell_size": a1.settings.min_cell_size,
-            "a1_models": ",".join(a1.settings.som_models),
-            **{f"a1_device_{stage}": name for stage, name in (devices or {}).items()},
-        }
-    )
+    log_params_once(parent_params(a1, kinds=kinds, groups=groups, dev_mode=dev_mode, devices=devices))
     mlflow.log_artifact(a1.path)
     return run
+
+
+def parent_params(a1: A1Config, *, kinds=None, groups=False, dev_mode=False, devices=None) -> dict:
+    """The parent run's parameters: the settings' description and how the run was started.
+
+    Shared by ``run_a1.py`` and :mod:`yg_eo_soilnet.a1.sync`, so a folder logged afterwards gets the
+    same parameters as a live run.
+    """
+    return {
+        **a1.describe(),
+        "a1_kinds": ",".join(kinds) if kinds else "all",
+        "a1_groups": groups,
+        "a1_dev_mode": dev_mode,
+        "a1_logo_min_points": a1.settings.plans.logo.min_points,
+        "a1_logo_held_out": ";".join(a1.settings.plans.logo.held_out or ()) or "all eligible",
+        "a1_kfold_method": a1.settings.plans.spatial_kfold.method,
+        "a1_kfold_block_sizes_m": ",".join(
+            f"{size:g}" for size in a1.settings.plans.spatial_kfold.block_sizes_m() if size is not None
+        )
+        or "none",
+        "a1_min_cell_size": a1.settings.min_cell_size,
+        "a1_models": ",".join(a1.settings.som_models),
+        **{f"a1_device_{stage}": name for stage, name in (devices or {}).items()},
+    }
 
 
 def _log_plan(

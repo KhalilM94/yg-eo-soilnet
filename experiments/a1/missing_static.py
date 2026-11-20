@@ -13,6 +13,9 @@ See :mod:`yg_eo_soilnet.a1.missing_static`. Writes into ``<output_dir>/robustnes
   relations of ``--relations-basins`` recomputed without them, and the within-class counts before
   and after (before: ``basin_relations/basin_relations.csv``).
 
+In MLflow (unless ``--no-mlflow``) the tables are a child run ``missing_static`` of the newest
+``compare`` run of the run's experiment, like the other robustness checks.
+
 Run from the repository root::
 
     python experiments/a1/missing_static.py --config configs/a1/a1_xgb.yml
@@ -66,6 +69,7 @@ def main(argv: list[str] | None = None) -> dict:
     )
     parser.add_argument("--out", default=None, help="Where to write (default <output_dir>/robustness).")
     parser.add_argument("--n-boot", type=int, default=1000, help="Bootstrap resamples (default 1000).")
+    parser.add_argument("--no-mlflow", action="store_true", help="Do not add the tables to MLflow.")
     args = parser.parse_args(argv)
 
     settings = load_settings(args.config)
@@ -115,6 +119,10 @@ def main(argv: list[str] | None = None) -> dict:
     for name, table in tables.items():
         table.to_csv(out / f"{name}.csv", index=False)
 
+    if not args.no_mlflow:
+        from yg_eo_soilnet.a1 import robustness
+
+        robustness.log_robustness(run_dir, out, step="missing_static")
     summary(f"{len(absent)} of {len(data.frame)} points absent from {export.name}.")
     shown = ["design", "model", "basin", "n_absent", "n_other", "rmse_difference", "rmse_low", "rmse_high"]
     summary("RMSE absent - others (first seed, 95 % 10 km block bootstrap):")
