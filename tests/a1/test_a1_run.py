@@ -656,11 +656,12 @@ def test_the_figure_script_saves_every_figure(demo_run, monkeypatch, tmp_path):
         f"{n}{s}" for n in FIGURE_NAMES for s in (".png", ".pdf")
     )
     assert (tmp_path / "captions.md").exists() and any((tmp_path / "data").glob("*.csv"))
-    # The module's run has random and logo plans only: figure 9 needs mixed plans, and figure S1 block sizes
-    # beyond figure 6's; both say so.
+    # The module's run has random and logo plans only: figures 9 and S7 need mixed plans, and figure S1
+    # block sizes beyond figure 6's; each says so.
     assert [name for name, figure in drawn.items() if is_message_figure(figure)] == [
         "fig09_mixed",
         "figS1_obs_pred_blocks",
+        "figS7_mixed_points",
     ]
 
 

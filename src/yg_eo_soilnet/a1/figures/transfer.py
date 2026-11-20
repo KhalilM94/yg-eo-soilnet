@@ -295,20 +295,84 @@ def e4_sizes(logo_runs, *, model: str = GLOBAL, block_km: float = 10.0, n: int =
     return intervals.reset_index(drop=True), repeats
 
 
-def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None):
-    """Figure 9: test RMSE and bias against the number of local points in training, every mixed kind and control.
+#: The figure each draw of the moved points gets: block draws the main figure 9, point draws figure S7.
+DRAW_FIGURES = {"blocks": ("fig09_mixed", "Figure 9"), "points": ("figS7_mixed_points", "Figure S7")}
+
+
+def mixed_draw(inputs: FigureInputs) -> str:
+    """How this run's mixed plans drew their moved points: ``blocks`` when the plan index says so, else ``points``."""
+    index = inputs.index
+    if index.empty or "draw" not in index.columns:
+        return "points"
+    draws = set(index.loc[index["kind"] == MIXED, "draw"].dropna().astype(str))
+    return "blocks" if "blocks" in draws else "points"
+
+
+def _compare_rows(inputs: FigureInputs, name: str) -> pd.DataFrame:
+    """This run's rows of a ``compare.py`` table, from the newest ``<results>/a1_compare*/`` folder that has some."""
+    from pathlib import Path
+
+    if getattr(inputs, "run_dir", None) is None:
+        return pd.DataFrame()
+    run_dir = Path(inputs.run_dir)
+    output = run_dir.parent.parent
+    run_name = output.name + ("" if run_dir.name == "default" else f"/{run_dir.name}")
+    found = sorted(output.parent.glob(f"a1_compare*/{name}"), key=lambda path: path.stat().st_mtime, reverse=True)
+    for path in found:
+        table = pd.read_csv(path)
+        if "run" in table and (table["run"] == run_name).any():
+            return table[table["run"] == run_name]
+    return pd.DataFrame()
+
+
+def sharing_range(inputs: FigureInputs) -> Optional[tuple]:
+    """The min and max, over basins and shares, of the mean share of test points beside a moved point
+    (``block_sharing.csv``); None without that table."""
+    table = _compare_rows(inputs, "block_sharing.csv")
+    if table.empty:
+        return None
+    means = table.groupby(["basin", "fraction"])["share_test_sharing_block"].mean()
+    return float(means.min()), float(means.max())
+
+
+def compare_rings(inputs: FigureInputs, moved: pd.DataFrame) -> pd.DataFrame:
+    """Figure 9's RMSE rings from ``compare.py``'s ``mixed_arms_paired.csv`` (each arm minus control), when it has this run."""
+    table = _compare_rows(inputs, "mixed_arms_paired.csv")
+    if table.empty:
+        return table
+    rows = table[table["b"] == CONTROL]
+    found = pd.DataFrame(
+        {
+            "held_out": rows["basin"],
+            "fraction": rows["fraction"],
+            "a": rows["a"],
+            "metric": "rmse",
+            "p_holm": rows["p_holm"],
+        }
+    )
+    return _with_moved(found, moved)
+
+
+def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None, draw: Optional[str] = None):
+    """Figure 9 (block draws) or S7 (point draws): test RMSE and bias against the local points in training.
 
     Each kind (control, mixed, and the arms the run has) and the model with no local points are
     scored on the same test points of each share, the repeats stacked, with a 95 % block-bootstrap
-    band; a ring marks an arm that differs from control (paired, Holm across the shares). With
-    ``logo_runs``, a small panel adds E4: the transferred RMSE against the number of external
-    training points.
+    band; a ring marks an arm that differs from control (paired, Holm across the shares) - read from
+    ``compare.py``'s ``mixed_arms_paired.csv`` for the RMSE when it has this run, computed the same
+    way otherwise. With ``logo_runs``, a small panel adds E4. ``draw`` (``blocks`` for figure 9,
+    ``points`` for S7) draws only a run whose mixed plans were drawn that way; None draws any run.
     """
     stacked = evaluation.mixed_stack(inputs.predictions, model=model)
     if stacked.empty:
         if MIXED in set(inputs.predictions["kind"]):
             return _missing(f"No mixed or control predictions of the {pretty_name(model)} model in this run.")
         return _missing("This run has no mixed plans: run run_a1.py with --kinds mixed (it brings the control plans).")
+    run_draw = mixed_draw(inputs)
+    if draw is not None and run_draw != draw:
+        other, _ = DRAW_FIGURES[run_draw]
+        moves = "whole 10 km blocks" if run_draw == "blocks" else "single points"
+        return _missing(f"This run's mixed plans move {moves}: its figure is {other}.")
     seed = inputs.settings.seed
     moved = moved_points(inputs)
     intervals = _with_moved(
@@ -318,6 +382,15 @@ def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None):
     rows = inputs.predictions[inputs.predictions["model"] == model]
     differences = evaluation.mixed_differences(rows, block_km=inputs.block_km, n=inputs.n_boot, seed=seed)
     differences = _with_moved(differences.rename(columns={"region": "held_out"}), moved)
+    from_compare = compare_rings(inputs, moved)
+    if not from_compare.empty:
+        differences = pd.concat(
+            [
+                differences[differences["metric"] != "rmse"],
+                from_compare[differences.columns.intersection(from_compare.columns)],
+            ],
+            ignore_index=True,
+        )
     e4, e4_repeats = e4_sizes(logo_runs, model=model, block_km=inputs.block_km, n=inputs.n_boot, seed=seed)
     if not e4.empty and not set(e4["basin"]) & set(intervals["region"]):
         e4, e4_repeats = pd.DataFrame(), pd.DataFrame()  # another dataset's basins (the demo, say): no panel
@@ -341,14 +414,28 @@ def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None):
                 f"{_kind_name(kind).lower()} at {count} share(s)" for kind, count in flagged.groupby("a").size().items()
             )
         parts.append(ps.minus(text))
+    _, title = DRAW_FIGURES[run_draw]
+    if run_draw == "blocks":
+        how = (
+            "Whole 10 km blocks are moved, the last one cut to the exact number and the rest of it left out, so no "
+            "test point shares a block with a moved point. "
+        )
+    else:
+        shared = sharing_range(inputs)
+        how = "Single points moved (design of Broeg et al. 2023); test points share 10 km blocks with moved points" + (
+            f" ({100 * shared[0]:.0f}–{100 * shared[1]:.0f} %, block_sharing.csv). " if shared is not None else ". "
+        )
+    rings = "mixed_arms_paired.csv" if not from_compare.empty else "computed here"
     caption = (
-        f"Figure 9. {pretty_name(model)} model, every input. RMSE (upper row) and bias, predicted − measured (lower "
+        f"{title}. {pretty_name(model)} model, every input. RMSE (upper row) and bias, predicted − measured (lower "
         "row), on the basin's points left out of training, against the number of the basin's points in training "
-        "(log scale): control (those points alone), mixed (the other basins plus them) and each arm the run has "
-        "(weighted: the moved points weigh more; indicator: an input flags them), and, dotted, the model trained "
-        "on the other basins alone on the same test points. Each share tests a different set of points; within a "
-        "share every line is scored on the same points. Rings: an arm differs from control (paired block bootstrap, "
-        "Holm across the shares of one basin). "
+        "(log scale): control (those points alone), mixed (the other basins plus them, pooled) and each arm the run "
+        "has (weighted: the moved points weigh more; indicator: an input flags them), and, dotted, the model trained "
+        "on the other basins alone on the same test points. "
+        + how
+        + "Each share tests a different set of points; within a share every line is scored on the same points. "
+        f"Rings: an arm differs from control (paired block bootstrap, Holm across the shares of one basin; RMSE "
+        f"{rings}). "
         + FIG9_NOTE
         + (
             " Right: E4, the transferred RMSE against the number of external training points - the matched draws "
@@ -360,14 +447,15 @@ def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None):
         + "; ".join(parts)
         + "."
     )
+    stem = DRAW_FIGURES[run_draw][0].split("_")[0]  # fig09 or figS7
     data = {
-        "fig09_mixed_intervals": intervals,
-        "fig09_mixed_repeats": repeats,
-        "fig09_mixed_vs_control": differences,
+        f"{stem}_mixed_intervals": intervals,
+        f"{stem}_mixed_repeats": repeats,
+        f"{stem}_mixed_vs_control": differences,
     }
     if not e4.empty:
-        data["fig09_e4_intervals"] = e4
-        data["fig09_e4_repeats"] = e4_repeats
+        data[f"{stem}_e4_intervals"] = e4
+        data[f"{stem}_e4_repeats"] = e4_repeats
     return attach(figure, data, caption)
 
 

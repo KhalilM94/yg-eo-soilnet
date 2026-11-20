@@ -458,6 +458,40 @@ C9_COLUMNS = (
 )
 #: Above this many test points a panel shows a density (hexbin) and the class medians, not every point.
 HEXBIN_FROM = 1000
+#: What figure C9's slope means, and what each correction changes (its caption).
+SLOPE_SENTENCE = (
+    "Slope of measured on predicted: < 1 means the predictions vary more than the measured SOM, i.e. the "
+    "model's point-to-point differences are partly wrong. The offset changes only the intercept; the linear "
+    "correction also changes the slope, but its slope estimated from k clustered samples is unstable (see "
+    "bias_correction_calibration.csv, 5–95 % over draws)."
+)
+
+
+def fit_segment(x, scores: dict, limits) -> Optional[tuple]:
+    """The least-squares line of one C9 panel, over the panel's points' x-range and inside its limits.
+
+    A steep line (a linear correction fitted on few clustered samples) stays a short segment where
+    the data are rather than crossing the whole panel. None without a finite fit.
+
+    >>> fit_segment([1.0, 3.0], {"slope": 1.0, "intercept": 0.0}, (0.0, 10.0))
+    (array([1., 3.]), array([1., 3.]))
+    >>> np.round(fit_segment([0.0, 10.0], {"slope": 5.0, "intercept": 0.0}, (0.0, 10.0))[0], 6).tolist()
+    [0.0, 2.0]
+    """
+    slope, intercept = scores.get("slope"), scores.get("intercept")
+    x = np.asarray(x, dtype=float)
+    x = x[np.isfinite(x)]
+    if x.size == 0 or slope is None or not np.isfinite(slope) or not np.isfinite(intercept):
+        return None
+    low, high = max(float(x.min()), limits[0]), min(float(x.max()), limits[1])
+    if slope != 0:
+        # Keep y inside the limits too: cut x where the line leaves the panel's height.
+        y_bounds = sorted(((limits[0] - intercept) / slope, (limits[1] - intercept) / slope))
+        low, high = max(low, y_bounds[0]), min(high, y_bounds[1])
+    if high <= low:
+        return None
+    xs = np.array([low, high])
+    return xs, intercept + slope * xs
 
 
 def figure_bias_correction_scatter(points: pd.DataFrame, *, k: int, local_model: str, labels, chosen: dict):
@@ -489,9 +523,8 @@ def figure_bias_correction_scatter(points: pd.DataFrame, *, k: int, local_model:
         "(offset), recalibrated on them (linear), with one offset per measured carbonate class, and for the "
         f"{local_text(local_model)} on the same points. For each basin one draw is shown: the one whose offset "
         "RMSE is the median over the 100 draws. Dashed: 1:1; solid: least-squares line of measured on predicted. "
-        "Colour: measured carbonate class; above 1,000 points, a density with each class's median point. The offset "
-        "changes only the intercept; the linear correction changes the slope too. A slope that stays below 1 after "
-        "correction is an error recalibration cannot remove. "
+        "Colour: measured carbonate class; above 1,000 points, a density with each class's median point. "
+        f"{SLOPE_SENTENCE} "
         + "; ".join(parts)
         + "."
         + (f" Not shown (fewer than 100 points left with k = {k}): {', '.join(missing)}." if missing else "")
@@ -544,9 +577,9 @@ def draw_bias_correction_scatter(points: pd.DataFrame, *, basins, labels):
                     axis.scatter(cls[method], cls["observed"], s=4, color=class_color(label), alpha=0.4, lw=0)
             axis.plot(limits, limits, color=ps.INK_2, lw=0.7, ls="--")
             scores = calibration(y, x)
-            if np.isfinite(scores["slope"]):
-                line = np.array(limits)
-                axis.plot(line, scores["intercept"] + scores["slope"] * line, color=ps.INK, lw=0.9)
+            segment = fit_segment(x, scores, limits)
+            if segment is not None:
+                axis.plot(*segment, color=ps.INK, lw=0.9)
             axis.set_xlim(limits)
             axis.set_ylim(limits)
             axis.set_aspect("equal", adjustable="box")

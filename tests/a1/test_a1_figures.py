@@ -996,9 +996,14 @@ def test_a_logo_and_mixed_run_draws_every_figure_it_can_and_no_two_alike(
     assert LOCAL in set(inputs.predictions["model"])  # the local reference, without --groups
     drawn = figures.render_all(inputs, relief=False, n_boot=30, close=True)
     messages = {name for name, figure in drawn.items() if figures.is_message_figure(figure)}
-    # Only what this run cannot have: no random split (4), one design (5), no other block size (S1).
-    assert messages == {"fig04_stage1", "fig05_spatial", "figS1_obs_pred_blocks"}
+    # Only what this run cannot have: no random split (4), one design (5), no other block size (S1), and
+    # figure 9 (block draws): its mixed plans move single points, so they are figure S7.
+    assert messages == {"fig04_stage1", "fig05_spatial", "figS1_obs_pred_blocks", "fig09_mixed"}
     folder = inputs.run_dir / "figures"
-    digests = [hashlib.sha256((folder / f"{name}.png").read_bytes()).hexdigest() for name in figures.FIGURE_NAMES]
+    digests = [
+        hashlib.sha256((folder / f"{name}.png").read_bytes()).hexdigest()
+        for name in figures.FIGURE_NAMES
+        if name not in messages
+    ]
     assert len(set(digests)) == len(digests)  # no figure is a copy of another
-    assert (folder / "data" / "fig09_mixed_intervals.csv").exists()
+    assert (folder / "data" / "figS7_mixed_intervals.csv").exists()

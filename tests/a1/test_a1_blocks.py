@@ -317,3 +317,14 @@ def test_the_block_configuration_loads():
     assert mixed.draw == "blocks" and mixed.fractions == (0.05, 0.1, 0.2, 0.3) and mixed.n_repeats == 5
     assert mixed.arms == ("weighted",) and settings.stage2.models == ("global",) and settings.seeds == (42,)
     assert settings.plans.logo.held_out == ("Oum Er Rbia", "Sebou") and settings.output_dir.endswith("a1_mixed_blocks")
+
+
+def test_the_c9_line_stays_where_the_points_are_and_the_caption_explains_the_slope():
+    from yg_eo_soilnet.a1.figures.robustness import SLOPE_SENTENCE, fit_segment
+
+    xs, ys = fit_segment([24.0, 26.0, 30.0], {"slope": 5.6, "intercept": -127.0}, (5.0, 60.0))
+    assert xs.min() >= 24.0 and xs.max() <= 30.0  # within the points' x-range
+    assert ys.min() >= 5.0 - 1e-9 and ys.max() <= 60.0 + 1e-9  # within the panel's height
+    assert fit_segment([1.0, 2.0], {"slope": float("nan"), "intercept": 0.0}, (0.0, 10.0)) is None
+    assert "< 1 means the predictions vary more than the measured SOM" in SLOPE_SENTENCE
+    assert "unstable (see bias_correction_calibration.csv" in SLOPE_SENTENCE

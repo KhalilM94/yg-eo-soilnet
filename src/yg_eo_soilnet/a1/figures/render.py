@@ -65,6 +65,7 @@ SUPPLEMENTARY_FIGURES = (
     "figS4_shap_features",
     "figS5_dissimilarity",
     "figS6_basin_errors",
+    "figS7_mixed_points",
 )
 #: The prediction-interval figures, drawn only for a run with the quantile model (``global_q``).
 UNCERTAINTY_FIGURES = uncertainty.UNCERTAINTY_FIGURES
@@ -98,7 +99,10 @@ def _builders(
         "fig06_obs_pred": lambda: obs_pred.figure_obs_pred(inputs),
         "fig07_class_bias": lambda: class_bias.figure_class_bias(inputs),
         "fig08_transfer": lambda: transfer.figure_transfer(inputs),
-        "fig09_mixed": lambda: transfer.figure_mixed(inputs, model=mixed_model, logo_runs=logo_runs),
+        "fig09_mixed": lambda: transfer.figure_mixed(inputs, model=mixed_model, logo_runs=logo_runs, draw="blocks"),
+        "figS7_mixed_points": lambda: transfer.figure_mixed(
+            inputs, model=mixed_model, logo_runs=logo_runs, draw="points"
+        ),
         "fig10_basins": lambda: basins.figure_basins(inputs),
         "fig11_shap_groups": lambda: shap.figure_shap_groups(inputs, plan_id=shap_plan),
         "figS1_obs_pred_blocks": lambda: obs_pred.figure_obs_pred_blocks(inputs),

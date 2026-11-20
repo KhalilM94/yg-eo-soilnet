@@ -275,8 +275,8 @@ def test_figure_9_draws_every_kind_with_bands_dots_and_rings():
     figure = transfer.figure_mixed(inputs)
     assert not figure_core.is_message_figure(figure)
     data = figure_core.figure_data(figure)
-    assert {"fig09_mixed_intervals", "fig09_mixed_repeats", "fig09_mixed_vs_control"} <= set(data)
-    intervals = data["fig09_mixed_intervals"]
+    assert {"figS7_mixed_intervals", "figS7_mixed_repeats", "figS7_mixed_vs_control"} <= set(data)
+    intervals = data["figS7_mixed_intervals"]
     assert set(intervals["kind"]) == {CONTROL, MIXED, MIXED_WEIGHTED, evaluation.TRANSFERRED}
     assert sorted(intervals["moved"].unique()) == [36, 72]  # the control plans' n_train, mean over repeats
     caption = figure_core.figure_caption(figure)
@@ -298,7 +298,7 @@ def test_figure_9_with_control_and_mixed_only_and_with_the_e4_panel():
     frame = _mixed_frame(points, kinds=(CONTROL, MIXED))
     inputs = _figure_inputs(frame)
     figure = transfer.figure_mixed(inputs)
-    assert set(figure_core.figure_data(figure)["fig09_mixed_intervals"]["kind"]) == {
+    assert set(figure_core.figure_data(figure)["figS7_mixed_intervals"]["kind"]) == {
         CONTROL,
         MIXED,
         evaluation.TRANSFERRED,
@@ -376,3 +376,58 @@ def test_figure_9_is_a_message_without_mixed_plans():
 def test_e4_sizes_without_folders_is_empty(tmp_path):
     intervals, repeats = transfer.e4_sizes([tmp_path / "nothing"])
     assert intervals.empty and repeats.empty
+
+
+# --- figure 9 (block draws) and S7 (point draws) --------------------------------------------------------
+
+
+def test_the_draw_decides_between_figure_9_and_s7():
+    points = _points()
+    frame = _mixed_frame(points, kinds=(CONTROL, MIXED))
+    inputs = _figure_inputs(frame)
+    assert transfer.mixed_draw(inputs) == "points"
+    assert figure_core.is_message_figure(transfer.figure_mixed(inputs, draw="blocks"))
+    s7 = transfer.figure_mixed(inputs, draw="points")
+    assert not figure_core.is_message_figure(s7) and figure_core.figure_caption(s7).startswith("Figure S7.")
+    assert "Broeg et al. 2023" in figure_core.figure_caption(s7)
+    inputs.index = inputs.index.assign(draw="blocks")
+    assert transfer.mixed_draw(inputs) == "blocks"
+    nine = transfer.figure_mixed(inputs, draw="blocks")
+    caption = figure_core.figure_caption(nine)
+    assert caption.startswith("Figure 9.") and "no test point shares a block" in caption
+    assert "fig09_mixed_intervals" in figure_core.figure_data(nine)
+    note = transfer.figure_mixed(inputs, draw="points")
+    assert figure_core.is_message_figure(note) and "fig09_mixed" in figure_core.figure_caption(note)
+
+
+def test_rings_and_the_sharing_range_come_from_compare_when_it_has_the_run(tmp_path):
+    points = _points()
+    frame = _mixed_frame(points, kinds=(CONTROL, MIXED))
+    inputs = _figure_inputs(frame)
+    run_dir = tmp_path / "a1_points" / "runs" / "default"
+    run_dir.mkdir(parents=True)
+    inputs.run_dir = run_dir
+    compare_dir = tmp_path / "a1_compare_mixed"
+    compare_dir.mkdir()
+    pd.DataFrame(
+        [
+            {"run": "a1_points", "basin": "A", "fraction": f, "a": MIXED, "b": CONTROL, "p_holm": p}
+            for f, p in ((0.3, 0.01), (0.6, 0.5))
+        ]
+        + [{"run": "other", "basin": "A", "fraction": 0.3, "a": MIXED, "b": CONTROL, "p_holm": 0.9}]
+    ).to_csv(compare_dir / "mixed_arms_paired.csv", index=False)
+    pd.DataFrame(
+        [
+            {"run": "a1_points", "basin": "A", "fraction": f, "repeat": r, "share_test_sharing_block": v}
+            for f, r, v in ((0.3, 0, 0.5), (0.3, 1, 0.54), (0.6, 0, 0.97))
+        ]
+    ).to_csv(compare_dir / "block_sharing.csv", index=False)
+    assert transfer.sharing_range(inputs) == pytest.approx((0.52, 0.97))
+    rings = transfer.compare_rings(inputs, transfer.moved_points(inputs))
+    assert set(rings["p_holm"]) == {0.01, 0.5} and set(rings["metric"]) == {"rmse"}
+    figure = transfer.figure_mixed(inputs, draw="points")
+    caption = figure_core.figure_caption(figure)
+    assert "(52–97 %, block_sharing.csv)" in caption and "RMSE mixed_arms_paired.csv" in caption
+    rmse = figure_core.figure_data(figure)["figS7_mixed_vs_control"]
+    rmse = rmse[rmse["metric"] == "rmse"]
+    assert sorted(rmse["p_holm"]) == [0.01, 0.5]  # the compare file's, not the figure's own test
