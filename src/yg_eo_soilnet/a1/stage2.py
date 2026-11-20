@@ -330,14 +330,17 @@ def run_model(
     return result
 
 
-def run_group(context: Stage2Context, columns: Sequence[str]) -> ModelResult:
+def run_group(context: Stage2Context, columns: Sequence[str], *, native_categorical: bool = False) -> ModelResult:
     """``global_aux`` restricted to one covariate group's columns.
+
+    ``native_categorical`` (E5's variants of that name) gives the class inputs to XGBoost as
+    classes, gaps left missing, instead of one-hot columns (:func:`build_stage_pipeline`).
 
     Returns
     -------
     ModelResult
     """
-    return _single_model(context, list(columns))
+    return _single_model(context, list(columns), native_categorical=native_categorical)
 
 
 #: The fewest spatial blocks a region needs for a ``local`` score: with 3 or more, every outer
@@ -553,11 +556,17 @@ def run_local(context: Stage2Context, columns: Sequence[str], local: LocalFolds)
 # --- the pieces ----------------------------------------------------------------------------
 
 
-def _single_model(context: Stage2Context, columns: list[str]) -> ModelResult:
+def _single_model(context: Stage2Context, columns: list[str], *, native_categorical: bool = False) -> ModelResult:
     """One model on these columns, fitted on every training point."""
     settings = context.settings
     pipeline, grid = build_stage_pipeline(
-        settings, context.config, columns, context.categorical, stage=settings.stage2, target=settings.target
+        settings,
+        context.config,
+        columns,
+        context.categorical,
+        stage=settings.stage2,
+        target=settings.target,
+        native_categorical=native_categorical,
     )
     train, held = context.train_ids, context.held_out_ids
     fitted, params = fit_tuned(

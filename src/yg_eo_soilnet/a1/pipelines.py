@@ -14,6 +14,10 @@ The estimator is seeded with the settings' model seed
 fitted on the graphics card is moved to the processor before it predicts (:func:`to_cpu`): the
 data are on the processor, and XGBoost would otherwise copy them over, with a warning, on every
 call.
+
+E5's ``native_categorical`` variants hand the class inputs to XGBoost as classes instead
+(:class:`NativeCategories`): no one-hot columns and no filling, so a tree can split any group of
+classes from the rest and learns where a point without a class goes.
 """
 
 from __future__ import annotations
@@ -21,6 +25,8 @@ from __future__ import annotations
 from typing import Optional, Sequence
 
 import numpy as np
+import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 
 from yg_eo_soilnet.a1.settings import A1Settings, StageSettings
 
@@ -33,6 +39,7 @@ def build_stage_pipeline(
     *,
     stage: StageSettings,
     target: Optional[str] = None,
+    native_categorical: bool = False,
 ):
     """One stage's estimator in its input preparation, and the grid of settings to tune it over.
 
@@ -49,6 +56,10 @@ def build_stage_pipeline(
         ``settings.stage1`` or ``settings.stage2``.
     target : str, optional
         The property predicted, for the log transform.
+    native_categorical : bool, default False
+        Give the class inputs to the model as classes (:class:`NativeCategories`), gaps left
+        missing, with XGBoost's ``enable_categorical``. Only for XGBoost; the numeric inputs are
+        prepared as usual.
 
     Returns
     -------
@@ -60,7 +71,8 @@ def build_stage_pipeline(
     Raises
     ------
     ValueError
-        If the entry is not in the model list, or cannot be built.
+        If the entry is not in the model list, or cannot be built, or ``native_categorical`` is
+        asked of a model other than XGBoost.
     """
     from yg_eo_soilnet.datamodules.scikit.scikit_trainer_utils import PipelineBuilder
     from yg_eo_soilnet.models import ModelConfigFactory
@@ -101,7 +113,17 @@ def build_stage_pipeline(
         tree_categorical_encoding=getattr(config, "TREE_CATEGORICAL_ENCODING", "ordinal"),
         tree_onehot_max_categories=getattr(config, "TREE_ONEHOT_MAX_CATEGORIES", None),
     )
-    pipeline = builder.build(model, is_log_target, categorical_cols=categorical, numeric_cols=numeric)
+    if native_categorical and categorical:
+        if not type(model).__module__.startswith("xgboost"):
+            raise ValueError(
+                f"native_categorical needs XGBoost, which reads classes itself; {stage.estimator} is "
+                f"{type(model).__name__}."
+            )
+        model.set_params(enable_categorical=True)
+        pipeline = builder.build(model, is_log_target, categorical_cols=[], numeric_cols=numeric)
+        pipeline.steps[0] = ("preprocessor", native_preprocessor(pipeline.steps[0][1], categorical))
+    else:
+        pipeline = builder.build(model, is_log_target, categorical_cols=categorical, numeric_cols=numeric)
 
     raw_grid = stage.params if stage.params is not None else (spec.get("params") or {})
     grid = {
@@ -113,6 +135,65 @@ def build_stage_pipeline(
     if grid:
         pipeline.set_params(**{name: values[0] for name, values in grid.items()})
     return pipeline, grid
+
+
+class NativeCategories(TransformerMixin, BaseEstimator):
+    """Class inputs as pandas classes, for a model that reads them itself (XGBoost's ``enable_categorical``).
+
+    The classes are learned on the training points and fixed: a class first seen at prediction
+    becomes missing, like a gap. Gaps are not filled - the model decides where a point without a
+    class goes.
+
+    >>> step = NativeCategories().fit(pd.DataFrame({"texture": ["lo", "cl", None]}))
+    >>> out = step.transform(pd.DataFrame({"texture": ["cl", "sa", None]}))
+    >>> list(out["texture"].cat.categories), out["texture"].isna().tolist()
+    (['cl', 'lo'], [False, True, True])
+    """
+
+    def fit(self, X, y=None):
+        """Learn each column's classes (sorted, gaps left out)."""
+        frame = pd.DataFrame(X)
+        self.categories_ = {column: sorted(set(frame[column].dropna().map(_as_text))) for column in frame.columns}
+        self.feature_names_in_ = np.asarray(frame.columns, dtype=object)
+        return self
+
+    def transform(self, X):
+        """Each column as a pandas class column with the learned classes."""
+        frame = pd.DataFrame(X)
+        return pd.DataFrame(
+            {
+                column: pd.Categorical(frame[column].map(_as_text), categories=classes)
+                for column, classes in self.categories_.items()
+            },
+            index=frame.index,
+        )
+
+    def get_feature_names_out(self, input_features=None):
+        """The column names, unchanged."""
+        return np.asarray(list(self.categories_), dtype=object)
+
+
+def _as_text(value):
+    """A class as text (so 3, 3.0 - a code in a column with gaps - and "3" are one class); a gap stays a gap."""
+    if pd.isna(value):
+        return value
+    if isinstance(value, (float, np.floating)) and float(value).is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def native_preprocessor(numeric_preprocessor, categorical: Sequence[str]):
+    """The builder's numeric preparation with the class columns added as :class:`NativeCategories`.
+
+    Returns a :class:`~sklearn.compose.ColumnTransformer` giving a pandas table, so the class
+    columns reach the model with their class type.
+    """
+    from sklearn.compose import ColumnTransformer
+
+    transformers = [*numeric_preprocessor.transformers, ("cat", NativeCategories(), list(categorical))]
+    return ColumnTransformer(transformers, remainder="drop", verbose_feature_names_out=False).set_output(
+        transform="pandas"
+    )
 
 
 def final_estimator(fitted):

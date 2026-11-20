@@ -737,7 +737,7 @@ def _run_one_plan(row, seed: int, shared: _Shared, *, logger) -> JobOutcome:
                 extra = variant.pca.transform(context, table)
                 context.X = pd.concat([context.X.drop(columns=list(extra.columns), errors="ignore"), extra], axis=1)
                 columns += list(extra.columns)
-            result = run_group(context, columns)
+            result = run_group(context, columns, native_categorical=variant.native_categorical)
         elif model in (LOCAL, LOCAL_GLOBAL):
             if model == LOCAL_GLOBAL:
                 columns = list(global_columns)
@@ -1110,11 +1110,16 @@ class Variant:
     inputs : tuple of (str, str)
         The cached files the columns were read from and the SHA-256 of each (E5's representations).
         Kept in each prediction file's metadata: a file made from other versions is refitted.
+    native_categorical : bool, default False
+        Give the class inputs to XGBoost as classes, gaps left missing, instead of one-hot columns
+        with gaps filled by the commonest class. Part of :attr:`fingerprint` only when set, so the
+        variants fitted before it existed keep theirs.
     """
 
     columns: tuple
     pca: object = None
     inputs: tuple = ()
+    native_categorical: bool = False
 
     @property
     def inputs_hash(self) -> str:
@@ -1127,6 +1132,8 @@ class Variant:
     def fingerprint(self) -> str:
         """The SHA-256 of the column list (and the extra's description), as the manifest keeps it."""
         text = "\n".join(self.columns) + ("\n#pca " + repr(self.pca) if self.pca is not None else "")
+        if self.native_categorical:
+            text += "\n#native_categorical"
         return hashlib.sha256(text.encode()).hexdigest()
 
 
@@ -1143,7 +1150,9 @@ def _check_variants(manifest: dict, variants: dict, run_dir: Path, *, restart: b
     folder.mkdir(parents=True, exist_ok=True)
     features = manifest.setdefault("features", {})
     inputs = manifest.setdefault("variant_inputs", {})
+    encoding = manifest.setdefault("variant_class_encoding", {})
     for name, variant in variants.items():
+        encoding[name] = "native" if variant.native_categorical else "onehot"
         (folder / f"{name}.txt").write_text("\n".join(variant.columns) + "\n", encoding="utf-8")
         recorded[name] = variant.fingerprint
         features.update(dict(variant.inputs))

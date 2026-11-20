@@ -425,7 +425,7 @@ def e5_run(a1_settings_in, tmp_path_factory, mlflow_store):
                 "--part",
                 "A",
                 "--variants",
-                "all,all_minus_terrain,all_plus_xy",
+                "all,all_minus_terrain,all_plus_xy,all_native_cat,all_minus_legacy_keep_texture",
                 "--only",
                 "random,logo_*",
             ]
@@ -443,7 +443,8 @@ def test_run_e5_fits_each_variant_and_records_its_columns(e5_run):
     manifest = json.loads((run_dir / "manifest.json").read_text())
     for name in variants:
         listed = (run_dir / "variants" / f"{name}.txt").read_text().split()
-        assert manifest["variants"][name] == Variant(tuple(listed)).fingerprint
+        native = manifest["variant_class_encoding"][name] == "native"
+        assert manifest["variants"][name] == Variant(tuple(listed), native_categorical=native).fingerprint
     xy = (run_dir / "variants" / "all_plus_xy.txt").read_text().split()
     assert set(e5.XY_COLUMNS) <= set(xy) and not {"lat", "lon"} & set(xy)
     # Part B reused Part A's `all` rather than fitting it again.
@@ -478,9 +479,32 @@ def test_evaluate_e5_writes_both_tables_and_the_figures(e5_run):
         "all_plus_xy",
         "all_minus_legacy_soil",
         "only_satellite",
+        "all_native_cat",
+        "all_minus_legacy_keep_texture",
     }
+    keep = tables["ablation"][tables["ablation"]["variant"] == "all_minus_legacy_keep_texture"]
+    assert set(keep["reference"]) == {"all", "all_minus_legacy_soil", "all_native_cat"}
+    # Their own Holm family: the other Part A p_Holm values do not move when they are added.
+    native = tables["ablation"]["variant"].isin(["all_native_cat", "all_minus_legacy_keep_texture"])
+    assert set(tables["ablation"].loc[native, "family"]) == {e5.NATIVE_FAMILY}
+    assert set(tables["ablation"].loc[~native & (tables["ablation"]["part"] == "A"), "family"]) == {"A"}
     assert set(tables["ts_representation"]["reference"]) <= {"all", "all_minus_legacy_soil", "only_satellite"}
     assert "variant" in tables["scores"].columns
+
+
+def test_run_e5_fits_the_native_class_variants_on_the_demo(e5_run):
+    run_dir = e5_run["out"] / "runs" / "default"
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    assert manifest["variant_class_encoding"]["all_native_cat"] == "native"
+    assert manifest["variant_class_encoding"]["all"] == "onehot"
+    frame = evaluation.load_predictions(run_dir)
+    for name in ("all_native_cat", "all_minus_legacy_keep_texture"):
+        rows = frame[(frame["covariate_group"] == name) & (frame["split"] == "test")]
+        assert len(rows) and rows["predicted"].notna().all(), name
+    keep = (run_dir / "variants" / "all_minus_legacy_keep_texture.txt").read_text().split()
+    assert "landform_class" in keep and "clay_median_0_30cm" not in keep
+    every = (run_dir / "variants" / "all.txt").read_text().split()
+    assert (run_dir / "variants" / "all_native_cat.txt").read_text().split() == every
 
 
 def test_run_e5_refuses_a_changed_variant(e5_run, tmp_path):

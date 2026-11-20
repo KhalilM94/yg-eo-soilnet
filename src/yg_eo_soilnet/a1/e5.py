@@ -9,7 +9,10 @@ Part A, covariate ablation (:func:`part_a_variants`)
     ``all`` (Global's inputs), ``all_minus_<group>`` for each covariate group and each satellite
     sub-block (:data:`SUBBLOCKS`), ``only_satellite``, ``satellite_plus_terrain`` and
     ``all_plus_xy`` (the projected coordinates the blocks are cut on - an interpolation check,
-    not a transfer model).
+    not a transfer model). Two variants hand the class inputs (``texture_20cm``,
+    ``landform_class``) to XGBoost as classes, gaps left missing, instead of one-hot columns:
+    ``all_native_cat`` (every input) and ``all_minus_legacy_keep_texture`` (without the six
+    ``*_median_0_30cm`` soil-map layers, keeping ``texture_20cm``); see :data:`EXTRA_REFERENCES`.
 Part B, time-series representations (:func:`part_b_variants`)
     Every time-series percentile column (satellite and climate alike) replaced by another
     summary of each point's own monthly composites (:data:`REPRESENTATIONS`), with every static
@@ -41,6 +44,17 @@ logger = logging.getLogger(__name__)
 
 #: The covariate groups of Part A (every group of Global's inputs; ``auxiliary`` is never one).
 PART_A_GROUPS = ("satellite", "climate", "terrain", "management", "legacy_soil")
+#: Part A's variants with the class inputs read natively by XGBoost (gaps left missing).
+NATIVE_CAT = "all_native_cat"
+KEEP_TEXTURE = "all_minus_legacy_keep_texture"
+#: The soil-map layers ``all_minus_legacy_keep_texture`` drops: the legacy_soil columns with this ending.
+MEDIAN_LAYER_SUFFIX = "_median_0_30cm"
+#: References a Part A variant is compared with besides ``all``: ``all_native_cat`` shares
+#: ``all_minus_legacy_keep_texture``'s encoding, so that pair measures the six layers alone.
+EXTRA_REFERENCES = {KEEP_TEXTURE: ("all_minus_legacy_soil", NATIVE_CAT)}
+#: The Holm family of the native-class comparisons: their own, so adding them leaves every other
+#: Part A p_Holm as it was.
+NATIVE_FAMILY = "A native classes"
 #: The satellite sub-blocks of Part A: name to the column prefixes it holds.
 SUBBLOCKS = {
     "s2_barest": ("s2_",),
@@ -681,7 +695,8 @@ def _without(columns, removed) -> tuple:
 
 def part_a_variants(resolved) -> dict:
     """Part A: ``all``, ``all_minus_<group>`` and ``all_minus_<sub-block>``, ``only_satellite``,
-    ``satellite_plus_terrain`` and ``all_plus_xy``."""
+    ``satellite_plus_terrain``, ``all_plus_xy``, and the two native-class variants
+    (``all_native_cat``, ``all_minus_legacy_keep_texture``)."""
     base = global_inputs(resolved)
     groups = {name: list(resolved.groups[name]) for name in PART_A_GROUPS if name in resolved.groups}
     variants = {"all": Variant(tuple(base))}
@@ -692,6 +707,10 @@ def part_a_variants(resolved) -> dict:
     variants["only_satellite"] = Variant(tuple(groups.get("satellite", ())))
     variants["satellite_plus_terrain"] = Variant(tuple(groups.get("satellite", ())) + tuple(groups.get("terrain", ())))
     variants["all_plus_xy"] = Variant(tuple(base) + XY_COLUMNS)
+    variants[NATIVE_CAT] = Variant(tuple(base), native_categorical=True)
+    medians = [c for c in groups.get("legacy_soil", ()) if c.endswith(MEDIAN_LAYER_SUFFIX)]
+    if medians:
+        variants[KEEP_TEXTURE] = Variant(_without(base, medians), native_categorical=True)
     return variants
 
 
@@ -784,14 +803,14 @@ def part_b_reference(variant: str) -> Optional[str]:
 def part_of(name: str) -> Optional[str]:
     """Which part a variant belongs to (``A``, ``B``, ``C``); None for ``all``, the shared reference.
 
-    >>> [part_of(n) for n in ("all", "all_minus_climate", "all_plus_xy", "ts_R4", "only_satellite_R2", "all_plus_embeddings", "only_embeddings")]
-    [None, 'A', 'A', 'B', 'B', 'C', 'C']
+    >>> [part_of(n) for n in ("all", "all_minus_climate", "all_plus_xy", "ts_R4", "only_satellite_R2", "all_plus_embeddings", "only_embeddings", "all_native_cat")]
+    [None, 'A', 'A', 'B', 'B', 'C', 'C', 'A']
     """
     if name == "all":
         return None
     if name.startswith("ts_") or (name.startswith("only_satellite_") and name != "only_satellite"):
         return "B"
-    if name.startswith("all_minus_") or name in ("only_satellite", "satellite_plus_terrain", "all_plus_xy"):
+    if name.startswith("all_minus_") or name in ("only_satellite", "satellite_plus_terrain", "all_plus_xy", NATIVE_CAT):
         return "A"
     if name.startswith(("all_plus_", "only_")):
         return "C"
@@ -801,13 +820,16 @@ def part_of(name: str) -> Optional[str]:
 def comparisons(part: str, names: Sequence[str]) -> list:
     """The ``(variant, reference)`` pairs of a part, among the variants fitted.
 
-    Part A and C against ``all``; Part B against its own reference (:func:`part_b_reference`).
+    Part A and C against ``all``, and a Part A variant of :data:`EXTRA_REFERENCES` against those
+    too; Part B against its own reference (:func:`part_b_reference`).
     """
     present = set(names)
     if part == "B":
         pairs = [(name, part_b_reference(name)) for name in names if part_of(name) == "B"]
     else:
         pairs = [(name, "all") for name in names if part_of(name) == part]
+        if part == "A":
+            pairs += [(name, ref) for name in names for ref in EXTRA_REFERENCES.get(name, ())]
     return [(a, b) for a, b in pairs if a in present and b in present]
 
 
@@ -840,6 +862,15 @@ def _paired_estimates(rows: pd.DataFrame, a: str, b: str) -> dict:
     return {score: sa[score] - sb[score] for score in evaluation.STACKED_SCORES}
 
 
+def holm_family(part: str, variant: str) -> str:
+    """The Holm family of a comparison: its part, or :data:`NATIVE_FAMILY` for a native-class variant.
+
+    >>> holm_family("A", "all_minus_climate"), holm_family("A", "all_native_cat")
+    ('A', 'A native classes')
+    """
+    return NATIVE_FAMILY if variant in (NATIVE_CAT, KEEP_TEXTURE) else part
+
+
 def variant_differences(
     frame: pd.DataFrame,
     pairs: Sequence[tuple],
@@ -854,12 +885,15 @@ def variant_differences(
     """Each ``(variant, reference)`` pair on every design: ΔRMSE, Δbias, ΔR² (variant - reference).
 
     The first seed's predictions give the estimate, a 95 % paired 10 km block-bootstrap interval
-    and a p-value; Holm corrects within each family (``part``, design, score). Every seed with both
+    and a p-value; Holm corrects within each family (``family``, design, score), the family being
+    the part, except the native-class variants' comparisons, a family of their own
+    (:data:`NATIVE_FAMILY`). Every seed with both
     the variant and its reference gives its own estimate: ``mean_over_seeds``, ``n_seeds_same_sign``
     (as the first seed's) and ``n_seeds`` count those seeds only.
     """
     columns = [
         "part",
+        "family",
         "design",
         "variant",
         "reference",
@@ -904,6 +938,7 @@ def variant_differences(
             rows.append(
                 {
                     "part": part,
+                    "family": holm_family(part, row.a),
                     "design": design,
                     "variant": row.a,
                     "reference": row.b,
@@ -925,7 +960,7 @@ def variant_differences(
     table = pd.DataFrame(rows, columns=[c for c in columns if c != "p_holm"])
     if table.empty:
         return pd.DataFrame(columns=columns)
-    table["p_holm"] = table.groupby(["part", "design", "metric"], sort=False)["p_value"].transform(evaluation.holm)
+    table["p_holm"] = table.groupby(["family", "design", "metric"], sort=False)["p_value"].transform(evaluation.holm)
     return table[columns]
 
 

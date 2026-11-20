@@ -5,7 +5,9 @@ One part at a time (``--part``):
 ``A``
     Covariate ablation: ``all`` (Global's inputs), ``all_minus_<group>`` and
     ``all_minus_<satellite sub-block>``, ``only_satellite``, ``satellite_plus_terrain``,
-    ``all_plus_xy`` (projected coordinates - an interpolation check, not a transfer model).
+    ``all_plus_xy`` (projected coordinates - an interpolation check, not a transfer model),
+    ``all_native_cat`` and ``all_minus_legacy_keep_texture`` (the class inputs read natively by
+    XGBoost, gaps left missing; the latter without the six ``*_median_0_30cm`` layers).
 ``B``
     Time-series representations: every percentile column replaced by R1, R2, R3, R4, R6 (and R5
     when switched on), on ``all``, on ``all_minus_legacy_soil`` and (R2, R6) on ``only_satellite``.

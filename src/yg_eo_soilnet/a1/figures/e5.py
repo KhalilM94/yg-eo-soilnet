@@ -22,6 +22,21 @@ MAIN_DESIGNS = (e5.DESIGN_RANDOM, e5.DESIGN_10KM, e5.DESIGN_LOGO)
 #: Holm significance.
 ALPHA = 0.05
 NOTE = "Bars: 95 % paired 10 km block bootstrap (first seed); filled: p_Holm < 0.05 within each part and design."
+#: The native-class row of E5a/E5b: a marker per reference.
+NATIVE_MARKERS = {
+    "all": ("o", model_color(GLOBAL)),
+    "all_minus_legacy_soil": ("s", ps.INK_2),
+    e5.NATIVE_CAT: ("^", "#1baf7a"),
+}
+NATIVE_OFFSETS = {"all": -0.22, "all_minus_legacy_soil": 0.0, e5.NATIVE_CAT: 0.22}
+#: What the native-class row says, in the E5a caption.
+NATIVE_SENTENCE = (
+    "Lowest row: texture_20cm and landform_class given to XGBoost as classes with their gaps left missing, "
+    "instead of one-hot columns with gaps filled by the commonest class; all, classes native − all measures "
+    "native categorical handling, including missing values. Without the six *_median_0_30cm soil-map layers, "
+    "texture kept (classes native), against all (circle), all − legacy soil maps (square) and all, classes "
+    "native (triangle: the six layers alone, encoding held fixed); Holm within these four comparisons."
+)
 
 
 def variant_label(name: str, n_features=None) -> str:
@@ -30,7 +45,11 @@ def variant_label(name: str, n_features=None) -> str:
     >>> variant_label("all_minus_legacy_soil")
     'all − Legacy soil maps'
     """
-    if name.startswith("all_minus_"):
+    if name == e5.NATIVE_CAT:
+        text = "all, classes native"
+    elif name == e5.KEEP_TEXTURE:
+        text = "all − soil-map medians, texture kept"
+    elif name.startswith("all_minus_"):
         text = f"all − {pretty_name(name.removeprefix('all_minus_'))}"
     elif name == "all_plus_xy":
         text = "all + x, y (interpolation check)"
@@ -96,12 +115,16 @@ def draw_ablation(table: pd.DataFrame, designs, *, title_of=None):
     import matplotlib.pyplot as plt
 
     rows = _rmse(table)
+    if "reference" not in rows:
+        rows = rows.assign(reference="all")
+    native = [v for v in (e5.NATIVE_CAT, e5.KEEP_TEXTURE) if v in set(rows["variant"])]
+    against_all = rows[(rows["reference"] == "all") & ~rows["variant"].isin(native)]
     groups = [f"all_minus_{g}" for g in e5.PART_A_GROUPS] + ["only_satellite", "satellite_plus_terrain", "all_plus_xy"]
-    groups = [g for g in groups if g in set(rows["variant"])]
-    blocks = [f"all_minus_{b}" for b in e5.SUBBLOCKS if f"all_minus_{b}" in set(rows["variant"])]
+    groups = [g for g in groups if g in set(against_all["variant"])]
+    blocks = [f"all_minus_{b}" for b in e5.SUBBLOCKS if f"all_minus_{b}" in set(against_all["variant"])]
     features = rows.drop_duplicates("variant").set_index("variant")["n_features"].to_dict()
-    # A row of panels per list that has variants (the groups, the satellite sub-blocks).
-    orders = [order for order in (groups, blocks) if order]
+    # A row of panels per list that has variants (the groups, the satellite sub-blocks, the native classes).
+    orders = [order for order in (groups, blocks, native) if order]
     figure, axes = plt.subplots(
         len(orders),
         len(designs),
@@ -112,14 +135,23 @@ def draw_ablation(table: pd.DataFrame, designs, *, title_of=None):
         gridspec_kw={"height_ratios": [len(order) for order in orders]},
     )
     for column, design in enumerate(designs):
-        part = rows[rows["design"] == design]
         for row, order in enumerate(orders):
             axis = axes[row, column]
-            _panel(axis, part, order, [variant_label(v, features.get(v)) for v in order], show_labels=column == 0)
+            labels = [variant_label(v, features.get(v)) for v in order]
+            if order is native:
+                part = rows[(rows["design"] == design) & rows["variant"].isin(native)].assign(
+                    series=lambda frame: frame["reference"]
+                )
+                present = set(part["series"])
+                markers = {k: v for k, v in NATIVE_MARKERS.items() if k in present}
+                _panel(axis, part, order, labels, markers=markers, offsets=NATIVE_OFFSETS, show_labels=column == 0)
+            else:
+                part = against_all[against_all["design"] == design]
+                _panel(axis, part, order, labels, show_labels=column == 0)
             if row == 0:
                 axis.set_title(title_of(design) if title_of else design, fontsize=8)
             if row == len(orders) - 1:
-                axis.set_xlabel(f"ΔRMSE vs all ({SOM_UNIT})")
+                axis.set_xlabel(f"ΔRMSE vs reference ({SOM_UNIT})" if native else f"ΔRMSE vs all ({SOM_UNIT})")
         letter(axes[0, column], "abcdefghij"[column])
     caption_line(figure, NOTE + " Positive: the model does worse without the group.")
     return figure
@@ -132,7 +164,10 @@ def figure_ablation(table: pd.DataFrame):
         return _missing("No Part A comparisons: run run_e5.py --part A, then evaluate_e5.py."), "Not drawn."
     designs = [d for d in MAIN_DESIGNS if d in set(rows["design"])]
     figure = draw_ablation(table, designs)
-    worst = rows[rows["design"] == e5.DESIGN_LOGO].sort_values("estimate", ascending=False).head(1)
+    removals = rows[~rows["variant"].isin((e5.NATIVE_CAT, e5.KEEP_TEXTURE))]
+    if "reference" in removals:
+        removals = removals[removals["reference"] == "all"]
+    worst = removals[removals["design"] == e5.DESIGN_LOGO].sort_values("estimate", ascending=False).head(1)
     caption = (
         "Figure E5a. What each input group adds to Global: ΔRMSE = RMSE without the group − RMSE with every input "
         "(all), on the random split, the 10 km block folds pooled and the five held-out basins pooled; upper: the "
@@ -145,8 +180,13 @@ def figure_ablation(table: pd.DataFrame):
             if not worst.empty
             else ""
         )
+        + (" " + NATIVE_SENTENCE if _has_native(rows) else "")
     )
     return figure, ps.minus(caption)
+
+
+def _has_native(rows: pd.DataFrame) -> bool:
+    return bool(rows["variant"].isin((e5.NATIVE_CAT, e5.KEEP_TEXTURE)).any())
 
 
 def figure_ablation_basins(table: pd.DataFrame):
@@ -157,7 +197,9 @@ def figure_ablation_basins(table: pd.DataFrame):
         return _missing("No held-out basin in the Part A comparisons."), "Not drawn."
     figure = draw_ablation(table, designs, title_of=lambda d: d.removeprefix("logo "))
     caption = (
-        "Figure E5b. As figure E5a, for each held-out basin on its own (Global trained on the other four). " + NOTE
+        "Figure E5b. As figure E5a, for each held-out basin on its own (Global trained on the other four). "
+        + NOTE
+        + (" " + NATIVE_SENTENCE if _has_native(rows) else "")
     )
     return figure, ps.minus(caption)
 
