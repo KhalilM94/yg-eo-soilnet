@@ -21,7 +21,7 @@ COMPLEMENT_COLOR = ps.INK_2
 
 def figure_basin_relations(relations: pd.DataFrame, *, block_km: float = 10.0, n_boot: int = 1000):
     """Figure C3 and its caption, from ``basin_relations.csv`` (every point of a side, not per class)."""
-    from yg_eo_soilnet.a1.basin_relations import ALL_CLASSES, PRIMARY, variables_in_order
+    from yg_eo_soilnet.a1.basin_relations import ALL_CLASSES, PRIMARY, p_method_text, variables_in_order
 
     overall = relations[relations["class"] == ALL_CLASSES]
     if overall.empty:
@@ -41,7 +41,8 @@ def figure_basin_relations(relations: pd.DataFrame, *, block_km: float = 10.0, n
         "basin (filled) and in every other point - the training data when that basin is held out (open); bars are "
         f"95 % intervals from {n_boot} resamples of {block_km:g} km blocks, each side resampled on its own. "
         "Basin − rest differences are Holm-corrected within each basin in two families: primary (CaCO₃ and CEC) and "
-        "exploratory (the covariates, and every variable within each carbonate class, in basin_relations.csv). "
+        "exploratory (the covariates, and every variable within each carbonate class, in basin_relations.csv)"
+        + (f"; {p_method_text(relations)}. " if p_method_text(relations) else ". ")
         + ("; ".join(parts) + ". " if parts else "")
         + f"{len(flagged)} exploratory difference(s) of {int((overall['family'] != PRIMARY).sum())} drawn have p_Holm < 0.05."
     )

@@ -13,8 +13,12 @@ correlation of SOM with:
 
 Each correlation gets a 95 % interval from resampling whole spatial blocks (``bootstrap.block_size_km``),
 the basin's and the complement's blocks each on their own; the basin - complement difference takes
-its interval and two-sided p-value from the same draws, and the p-values are Holm-corrected within
-each basin and family (the ``family`` column).
+its interval from the same draws. Its two-sided p-value (:func:`difference_p_value`, the
+``p_method`` column) is by default from a normal approximation on Fisher's z (``normal``); the
+older rule, the share of draws on either side of zero (``draws``), is kept for comparison: it
+cannot go below 2/n, which with 1,000 draws (0.002) is above Holm's first threshold for an 83-test
+family (0.05/83 = 0.0006). The p-values are Holm-corrected within each basin and family (the
+``family`` column).
 """
 
 from __future__ import annotations
@@ -36,6 +40,10 @@ ALL_CLASSES = "all"
 PRIMARY = "primary"
 EXPLORATORY = "exploratory"
 LEVEL = 0.95
+#: How a difference's p-value is computed (:func:`difference_p_value`): the default first.
+P_METHODS = ("normal", "draws")
+#: Fisher's z is capped this close to |rho| = 1, so a perfect correlation gives a large, finite z.
+RHO_LIMIT = 1.0 - 1e-9
 
 
 @dataclass
@@ -146,7 +154,59 @@ def _bounds(draws: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return np.array(low), np.array(high)
 
 
-def basin_relations(data: BasinData, *, min_cell_size: int = 30, n: int = 1000, seed: int = 42) -> pd.DataFrame:
+def fisher_z(rho):
+    """Fisher's z = atanh(rho), with rho capped just inside (-1, 1)."""
+    return np.arctanh(np.clip(np.asarray(rho, dtype=float), -RHO_LIMIT, RHO_LIMIT))
+
+
+def difference_p_value(rho_basin: float, rho_complement: float, draws_basin, draws_complement, method: str = "normal"):
+    """Two-sided p-value of "no difference" between the basin's and the complement's rho.
+
+    ``normal``
+        z = Δ / SE, with Δ = atanh(rho_basin) - atanh(rho_complement) and SE the standard deviation
+        of the same difference over the bootstrap draws; p = 2 (1 - Φ(|z|)). Not bounded by the
+        number of draws.
+    ``draws``
+        Twice the smaller share of draws of the difference on either side of 0
+        (:func:`~yg_eo_soilnet.a1.evaluation._p_value`): never below 2/n with n draws.
+
+    >>> rng = np.random.default_rng(0)
+    >>> b, c = 0.6 + 0.05 * rng.standard_normal(300), 0.1 + 0.05 * rng.standard_normal(300)
+    >>> difference_p_value(0.6, 0.1, b, c, "normal") < 1e-6, difference_p_value(0.6, 0.1, b, c, "draws")
+    (True, 0.0)
+    """
+    draws_basin = np.asarray(draws_basin, dtype=float)
+    draws_complement = np.asarray(draws_complement, dtype=float)
+    if method == "draws":
+        return evaluation._p_value(draws_basin - draws_complement)
+    if method != "normal":
+        raise ValueError(f"p_method {method!r}: expected one of {P_METHODS}")
+    from scipy.stats import norm
+
+    gaps = fisher_z(draws_basin) - fisher_z(draws_complement)
+    gaps = gaps[np.isfinite(gaps)]
+    estimate = float(fisher_z(rho_basin) - fisher_z(rho_complement))
+    if gaps.size < 2 or not np.isfinite(estimate):
+        return np.nan
+    se = float(np.std(gaps, ddof=1))
+    if se == 0.0:
+        return 1.0 if estimate == 0.0 else 0.0
+    return float(2.0 * norm.sf(abs(estimate) / se))
+
+
+def p_method_text(table: pd.DataFrame) -> str:
+    """How the table's p-values were computed, for a caption (empty for a table without ``p_method``)."""
+    methods = set(table["p_method"].dropna()) if "p_method" in table else set()
+    if methods == {"normal"}:
+        return "p-values from a normal approximation on Fisher's z, with the bootstrap standard error"
+    if methods == {"draws"}:
+        return "p-values from the share of draws on either side of 0 (resolution-limited: never below 2/n)"
+    return ""
+
+
+def basin_relations(
+    data: BasinData, *, min_cell_size: int = 30, n: int = 1000, seed: int = 42, p_method: str = "normal"
+) -> pd.DataFrame:
     """``basin_relations.csv``: per basin, class and pair, rho in the basin and its complement, and their difference.
 
     Returns
@@ -154,8 +214,11 @@ def basin_relations(data: BasinData, *, min_cell_size: int = 30, n: int = 1000, 
     pandas.DataFrame
         ``basin, class`` (``all`` or a measured class), ``variable, family, rho_basin, low_basin,
         high_basin, n_basin, rho_complement, low_complement, high_complement, n_complement,
-        difference, low_difference, high_difference, p_value, p_holm``.
+        difference, low_difference, high_difference, p_value, p_holm, p_method``; the p-value by
+        ``p_method`` (:func:`difference_p_value`).
     """
+    if p_method not in P_METHODS:
+        raise ValueError(f"p_method {p_method!r}: expected one of {P_METHODS}")
     rows = []
     for basin, ids in data.basins.items():
         complement = data.frame.index.difference(ids)
@@ -192,7 +255,11 @@ def basin_relations(data: BasinData, *, min_cell_size: int = 30, n: int = 1000, 
                         "difference": rho_b[position] - rho_c[position],
                         "low_difference": low_d[position],
                         "high_difference": high_d[position],
-                        "p_value": evaluation._p_value(gaps[:, position]) if n else np.nan,
+                        "p_value": difference_p_value(
+                            rho_b[position], rho_c[position], draws_b[:, position], draws_c[:, position], p_method
+                        )
+                        if n
+                        else np.nan,
                     }
                 )
     columns = [
@@ -213,11 +280,13 @@ def basin_relations(data: BasinData, *, min_cell_size: int = 30, n: int = 1000, 
         "high_difference",
         "p_value",
         "p_holm",
+        "p_method",
     ]
-    table = pd.DataFrame(rows, columns=[column for column in columns if column != "p_holm"])
+    table = pd.DataFrame(rows, columns=[column for column in columns if column not in ("p_holm", "p_method")])
     if table.empty:
         return pd.DataFrame(columns=columns)
     table["p_holm"] = table.groupby(["basin", "family"], sort=False)["p_value"].transform(evaluation.holm)
+    table["p_method"] = p_method
     return table[columns]
 
 
@@ -248,7 +317,7 @@ def som_by_class(data: BasinData, carbonate_column: str) -> pd.DataFrame:
 
 
 def run_basin_relations(
-    settings: A1Settings, out_dir, *, n: int = 1000, config=None, n_covariates: int = 15
+    settings: A1Settings, out_dir, *, n: int = 1000, config=None, n_covariates: int = 15, p_method: str = "normal"
 ) -> tuple[dict, dict]:
     """Compute both tables, draw figure C3, and write them all into ``out_dir``.
 
@@ -263,7 +332,7 @@ def run_basin_relations(
     from yg_eo_soilnet.a1.figures.core import save_figure, write_table
 
     data = load_basin_data(settings, config, n_covariates=n_covariates)
-    relations = basin_relations(data, min_cell_size=settings.min_cell_size, n=n, seed=settings.seed)
+    relations = basin_relations(data, min_cell_size=settings.min_cell_size, n=n, seed=settings.seed, p_method=p_method)
     by_class = som_by_class(data, settings.carbonate.column)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
@@ -290,3 +359,46 @@ def variables_in_order(relations: pd.DataFrame, primary: Optional[Sequence[str]]
     if primary is None:
         first = list(dict.fromkeys(relations.loc[relations["family"] == PRIMARY, "variable"]))
     return first + [variable for variable in variables if variable not in first]
+
+
+def method_comparison(tables: dict, *, alpha: float = 0.05) -> pd.DataFrame:
+    """``p_method_comparison.csv``: the same tests under several p-value runs, side by side.
+
+    Parameters
+    ----------
+    tables : dict of str to pandas.DataFrame
+        A label (``normal, 1,000``) to a ``basin_relations.csv`` table; the first is the reference.
+    alpha : float
+        The Holm level.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per basin, class and variable: ``difference`` (from the first table), then
+        ``p_value``, ``p_holm`` and ``significant`` per label (``p_holm [label]``), and
+        ``differs``: the Holm decision is not the same under every label.
+    """
+    keys = ["basin", "class", "variable", "family"]
+    labels = list(tables)
+    merged = None
+    for label in labels:
+        part = tables[label][[*keys, "difference", "p_value", "p_holm"]].copy()
+        part[f"significant [{label}]"] = part["p_holm"] < alpha
+        part = part.rename(columns={"p_value": f"p_value [{label}]", "p_holm": f"p_holm [{label}]"})
+        if merged is None:
+            merged = part
+        else:
+            merged = merged.merge(part.drop(columns="difference"), on=keys, how="outer")
+    flags = merged[[f"significant [{label}]" for label in labels]].fillna(False).astype(bool)
+    merged["differs"] = flags.nunique(axis=1) > 1
+    return merged
+
+
+def significant_counts(comparison: pd.DataFrame, *, within_class: bool = True) -> pd.DataFrame:
+    """Per basin, the number of Holm-significant tests under each label of :func:`method_comparison`."""
+    rows = comparison[comparison["class"] != ALL_CLASSES] if within_class else comparison
+    flags = [column for column in rows.columns if column.startswith("significant [")]
+    counts = rows.groupby("basin")[flags].sum().astype(int)
+    counts.columns = [column.removeprefix("significant [").removesuffix("]") for column in counts.columns]
+    counts["n_differ"] = rows.groupby("basin")["differs"].sum().astype(int)
+    return counts.reset_index()

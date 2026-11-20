@@ -58,7 +58,18 @@ MIN_CLASS_SAMPLES = 5
 #: The methods of the correction check, in the order the tables and figure show them.
 METHODS = ("uncorrected", "offset", "linear", "per_class_offset")
 #: The columns of every draw of the power check (:func:`subsample_relations`).
-SUBSAMPLE_COLUMNS = ("n_sub", "draw", "basin", "class", "variable", "difference", "p_value", "p_holm", "significant")
+SUBSAMPLE_COLUMNS = (
+    "n_sub",
+    "draw",
+    "basin",
+    "class",
+    "variable",
+    "difference",
+    "p_value",
+    "p_holm",
+    "significant",
+    "p_method",
+)
 #: The pairs correlated across the cells: (y, x), with what each tests.
 CELL_PAIRS = (
     ("bias_transferred", "level_shift"),
@@ -171,6 +182,7 @@ def subsample_relations(
     n_boot: int = 300,
     seed: int = 42,
     min_cell_size: int = 30,
+    p_method: str = "normal",
 ) -> pd.DataFrame:
     """Every draw of the power check at one size: per basin, class and variable, the difference and its p_Holm.
 
@@ -182,6 +194,9 @@ def subsample_relations(
     p-values are Holm-corrected within the basin over the family of :mod:`.basin_relations`: the
     within-class tests of the draw, plus the basin's all-point exploratory tests, whose p-values are
     kept from ``relations`` - so the family has the size it had, and only the subsample varies.
+    ``p_method`` is how each p-value is computed
+    (:func:`~yg_eo_soilnet.a1.basin_relations.difference_p_value`); ``relations`` should have been
+    computed the same way (a warning says so otherwise).
 
     Parameters
     ----------
@@ -190,14 +205,23 @@ def subsample_relations(
         ``basin_relations.csv``.
     n_sub, n_draws, n_boot, seed, min_cell_size : int
         Each draw is seeded by ``[seed, draw, basin]``.
+    p_method : {"normal", "draws"}
 
     Returns
     -------
     pandas.DataFrame
-        ``n_sub, draw, basin, class, variable, difference, p_value, p_holm, significant``; a basin
-        with no class large enough has no rows.
+        ``n_sub, draw, basin, class, variable, difference, p_value, p_holm, significant, p_method``;
+        a basin with no class large enough has no rows.
     """
-    from yg_eo_soilnet.a1.basin_relations import ALL_CLASSES, EXPLORATORY, _side
+    from yg_eo_soilnet.a1.basin_relations import ALL_CLASSES, EXPLORATORY, P_METHODS, _side, difference_p_value
+
+    if p_method not in P_METHODS:
+        raise ValueError(f"p_method {p_method!r}: expected one of {P_METHODS}")
+    if "p_method" in relations and set(relations["p_method"].dropna()) - {p_method}:
+        logger.warning(
+            f"basin_relations.csv was computed with p_method {sorted(set(relations['p_method'].dropna()))}, the "
+            f"power check with {p_method!r}: the family mixes the two."
+        )
 
     rows = []
     for basin, ids in data.basins.items():
@@ -220,7 +244,6 @@ def subsample_relations(
             for label, basin_ids, rho_c, draws_c in cells:
                 chosen, _ = block_sample(basin_ids, data.blocks, n_sub, rng)
                 rho_b, draws_b = _side(data, chosen, n_boot, seed, (basin, label, "basin", n_sub, draw))
-                gaps = draws_b - draws_c
                 for position, variable in enumerate(data.pairs):
                     found.append(
                         {
@@ -230,7 +253,10 @@ def subsample_relations(
                             "class": label,
                             "variable": variable,
                             "difference": rho_b[position] - rho_c[position],
-                            "p_value": evaluation._p_value(gaps[:, position]),
+                            "p_value": difference_p_value(
+                                rho_b[position], rho_c[position], draws_b[:, position], draws_c[:, position], p_method
+                            ),
+                            "p_method": p_method,
                         }
                     )
             p_values = np.array([row["p_value"] for row in found] + list(fixed), dtype=float)

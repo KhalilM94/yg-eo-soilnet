@@ -13,7 +13,9 @@ See :mod:`yg_eo_soilnet.a1.basin_relations`.
 With ``--subsample``, the power check instead (:func:`yg_eo_soilnet.a1.robustness.subsample_relations`):
 each basin's classes cut to ``--n-sub`` points by whole blocks, ``--n-draws`` times, the
 within-class tests repeated (``--n-boot`` defaults to 300 there), Holm within the basin over the
-same 83-test family. It reads the ``basin_relations.csv`` already written, leaves it as it is, and
+same 83-test family. ``--p-method`` (both modes) picks how each p-value is computed: ``normal``
+(default; Fisher's z over the bootstrap standard error) or ``draws`` (the share of draws on either
+side of 0, which cannot go below 2/n). It reads the ``basin_relations.csv`` already written, leaves it as it is, and
 writes ``basin_relations_subsample.csv`` (the summary) and ``basin_relations_subsample_draws.csv``
 beside it, and figure C4 (with its data and caption) into ``<output_dir>/robustness/``.
 
@@ -58,6 +60,13 @@ def main(argv: list[str] | None = None) -> dict:
         "--n-boot", type=int, default=None, help="Bootstrap resamples (default 1000; 300 with --subsample)."
     )
     parser.add_argument("--subsample", action="store_true", help="Run the power check (figure C4) instead.")
+    parser.add_argument(
+        "--p-method",
+        choices=("normal", "draws"),
+        default="normal",
+        help="How each difference's p-value is computed: normal (Fisher's z / bootstrap SE, the default) or "
+        "draws (share of draws on either side of 0; never below 2/n).",
+    )
     parser.add_argument("--n-sub", default="240,55", help="Subsample sizes per class (default 240,55).")
     parser.add_argument("--n-draws", type=int, default=100, help="Subsamples per size (default 100).")
     parser.add_argument("--run-name", default="default", help="The run folder whose failing basins C4 labels.")
@@ -71,14 +80,24 @@ def main(argv: list[str] | None = None) -> dict:
         "--robustness-out", default=None, help="Where figure C4 goes (default <output_dir>/robustness)."
     )
     parser.add_argument("--no-mlflow", action="store_true", help="Do not add figure C4 to MLflow.")
+    parser.add_argument(
+        "--compare",
+        action="append",
+        default=None,
+        metavar="LABEL=PATH",
+        help="Compare basin_relations.csv tables already written (repeat; the first is the reference): writes "
+        "p_method_comparison.csv and p_method_counts.csv into --out, computing nothing.",
+    )
     args = parser.parse_args(argv)
 
     settings = load_settings(args.config)
     out = Path(args.out) if args.out else Path(settings.output_dir) / "basin_relations"
+    if args.compare:
+        return _compare(out, args.compare)
     if args.subsample:
         return _subsample(settings, out, args)
     setup_logging(out / "basin_relations.log")
-    tables, _ = run_basin_relations(settings, out, n=args.n_boot or 1000)
+    tables, _ = run_basin_relations(settings, out, n=args.n_boot or 1000, p_method=args.p_method)
     relations = tables["basin_relations"]
     primary = relations[relations["family"] == "primary"]
     if not primary.empty:
@@ -88,8 +107,40 @@ def main(argv: list[str] | None = None) -> dict:
             .round(3)
             .to_string(index=False)
         )
+    exploratory = relations[(relations["class"] != "all") & (relations["p_holm"] < 0.05)]
+    summary(
+        f"p-values: {args.p_method}. Within-class differences with p_Holm < 0.05: "
+        + (", ".join(f"{b} {n}" for b, n in exploratory.groupby("basin").size().items()) or "none")
+    )
     summary(f"Tables, figure and caption in {out}/")
     return tables
+
+
+def _compare(out: Path, specs: list) -> dict:
+    """Line up the Holm decisions of several basin_relations.csv tables."""
+    import pandas as pd
+
+    from yg_eo_soilnet.a1.basin_relations import method_comparison, significant_counts
+
+    tables = {}
+    for spec in specs:
+        label, sep, path = spec.partition("=")
+        if not sep or not Path(path).exists():
+            raise SystemExit(f"--compare {spec!r}: expected LABEL=PATH to an existing basin_relations.csv")
+        tables[label.strip()] = pd.read_csv(path)
+    setup_logging(out / "p_method_comparison.log")
+    comparison = method_comparison(tables)
+    counts = significant_counts(comparison)
+    out.mkdir(parents=True, exist_ok=True)
+    comparison.to_csv(out / "p_method_comparison.csv", index=False)
+    counts.to_csv(out / "p_method_counts.csv", index=False)
+    summary("Within-class Holm-significant differences per basin:")
+    summary(counts.to_string(index=False))
+    differ = comparison[comparison["differs"]]
+    summary(f"{len(differ)} test(s) whose Holm decision differs:")
+    shown = ["basin", "class", "variable", "difference", *[c for c in comparison.columns if c.startswith("p_holm [")]]
+    summary(differ[shown].round(4).to_string(index=False) if not differ.empty else "none")
+    return {"p_method_comparison": comparison, "p_method_counts": counts}
 
 
 def _subsample(settings, out: Path, args) -> dict:
@@ -118,6 +169,7 @@ def _subsample(settings, out: Path, args) -> dict:
             n_boot=n_boot,
             seed=settings.seed,
             min_cell_size=settings.min_cell_size,
+            p_method=args.p_method,
         )
         for size in sizes
     ]

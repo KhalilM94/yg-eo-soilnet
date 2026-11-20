@@ -81,6 +81,9 @@ def figure_within_class(
     basins = basin_order(list(dict.fromkeys(relations["basin"])), failing)
     bars = summary[summary["level"] == "basin"] if not summary.empty else summary
     figure = draw_within_class(grid, bars, basins=basins, labels=labels, failing=failing, sizes=sizes)
+    from yg_eo_soilnet.a1.basin_relations import p_method_text
+
+    method = p_method_text(relations)
     significant = grid[grid["p_holm"] < ALPHA].groupby("basin").size()
     found = "; ".join(f"{basin} {int(count)}" for basin, count in significant.items()) or "none"
     parts = []
@@ -97,7 +100,7 @@ def figure_within_class(
     caption = (
         "Figure C4. Within each measured carbonate class, the basin − rest difference in Spearman ρ(SOM, covariate) "
         "for the 15 covariates of figure 3; outlined: p_Holm < 0.05 (Holm within each basin over the exploratory "
-        f"family). Significant within-class cells: {found}. Side bars: the power check - each class of the basin "
+        f"family{'; ' + method if method else ''}). Significant within-class cells: {found}. Side bars: the power check - each class of the basin "
         f"cut to n points by whole {block_km:g} km blocks, {n_draws} draws, the share of draws with at least one "
         "significant within-class difference (CaCO₃ and CEC counted), for n = "
         + " and ".join(str(size) for size in sizes)
@@ -280,10 +283,14 @@ def figure_bias_correction(
         if part.empty:
             continue
         last = part.iloc[-1]
-        parts.append(
+        text = (
             f"{basin}, k = {int(last['k'])}: {last['rmse_uncorrected']:.2f} uncorrected, {last['rmse_offset']:.2f} with "
             f"the offset, {last['rmse_local']:.2f} local"
         )
+        removed = offset_share(last)
+        if removed is not None:
+            text += f" (the offset removes {removed:.0%} of the loss)"
+        parts.append(text)
     caption = (
         f"Figure C6. RMSE ({SOM_UNIT}) on each held-out basin's remaining points when k of its points are used as "
         "local samples to correct the model trained on the other basins (Global, no refitting): no correction; "
@@ -291,8 +298,8 @@ def figure_bias_correction(
         "per measured carbonate class (a diagnostic: it needs the measured class of every point). Samples drawn by "
         f"whole {block_km:g} km blocks, the rest of the last block set aside; {n_draws} draws per k, line the mean, "
         f"band 5-95 %. Dashed: the {local_text(local_model)} on the same test points. A k is shown when at least 100 "
-        "points remain. The mechanism predicts that an offset fixes Bouregreg, partly Oum Er Rbia, and not Sebou; "
-        "the panels show whether it does. "
+        "points remain. Per basin at its largest k, with the share of the loss (uncorrected − local) the offset "
+        "removes where there is a loss: "
         + ("; ".join(parts) + ". " if parts else "")
         + (
             "Grey squares and diamonds: E2 retraining (control: the moved points alone; mixed: the other basins plus "
@@ -303,6 +310,22 @@ def figure_bias_correction(
         )
     )
     return figure, ps.minus(caption)
+
+
+def offset_share(row) -> Optional[float]:
+    """The share of the loss (uncorrected - local RMSE) an offset removes; None without a loss.
+
+    A negative share: the offset made it worse.
+
+    >>> round(offset_share({"rmse_uncorrected": 11.66, "rmse_offset": 11.03, "rmse_local": 9.50}), 3)
+    0.292
+    >>> offset_share({"rmse_uncorrected": 11.0, "rmse_offset": 11.3, "rmse_local": 11.1}) is None
+    True
+    """
+    loss = float(row["rmse_uncorrected"]) - float(row["rmse_local"])
+    if not np.isfinite(loss) or loss <= 0:
+        return None
+    return (float(row["rmse_uncorrected"]) - float(row["rmse_offset"])) / loss
 
 
 @styled

@@ -347,10 +347,42 @@ def compare_rings(inputs: FigureInputs, moved: pd.DataFrame) -> pd.DataFrame:
             "fraction": rows["fraction"],
             "a": rows["a"],
             "metric": "rmse",
+            # The stacked block-bootstrap estimate, on the same resamples as its interval.
+            "estimate": rows["pooled_difference"] if "pooled_difference" in rows else np.nan,
+            "low": rows["low"] if "low" in rows else np.nan,
+            "high": rows["high"] if "high" in rows else np.nan,
             "p_holm": rows["p_holm"],
+            "n_repeats_better": rows["n_repeats_better"] if "n_repeats_better" in rows else np.nan,
+            "n_repeats": rows["n_repeats"] if "n_repeats" in rows else np.nan,
         }
     )
     return _with_moved(found, moved)
+
+
+#: Short names of the kinds in the quoted differences.
+SHORT_KIND = {"mixed": "mixed (pooled)", "mixed_weighted": "weighted", "mixed_indicator": "indicator"}
+
+
+def smallest_share_text(rings: pd.DataFrame, region: str) -> str:
+    """Each arm - control at the region's smallest share: ``pooled_difference [low, high]`` and the repeats better.
+
+    >>> rings = pd.DataFrame({"region": ["A", "A"], "fraction": [0.05, 0.1], "a": ["mixed_weighted"] * 2,
+    ...     "estimate": [-1.95, -1.0], "low": [-2.36, -1.5], "high": [-1.49, -0.5],
+    ...     "n_repeats_better": [5, 4], "n_repeats": [5, 5]})
+    >>> smallest_share_text(rings, "A")
+    'weighted − control at 5 %: −1.95 [−2.36, −1.49], 5/5 repeats better'
+    """
+    part = rings[(rings["region"] == region) & rings["estimate"].notna()] if not rings.empty else rings
+    if part.empty:
+        return ""
+    first = part[part["fraction"] == part["fraction"].min()]
+    texts = []
+    for row in first.itertuples():
+        text = f"{SHORT_KIND.get(row.a, row.a)} − control at {100 * row.fraction:.0f} %: {row.estimate:.2f} [{row.low:.2f}, {row.high:.2f}]"
+        if np.isfinite(row.n_repeats_better) and np.isfinite(row.n_repeats):
+            text += f", {int(row.n_repeats_better)}/{int(row.n_repeats)} repeats better"
+        texts.append(text)
+    return ps.minus("; ".join(texts))
 
 
 def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None, draw: Optional[str] = None):
@@ -413,6 +445,9 @@ def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None, d
             text += "; differs from control (p_Holm < 0.05): " + ", ".join(
                 f"{_kind_name(kind).lower()} at {count} share(s)" for kind, count in flagged.groupby("a").size().items()
             )
+        smallest = smallest_share_text(from_compare, region)
+        if smallest:
+            text += f"; {smallest}"
         parts.append(ps.minus(text))
     _, title = DRAW_FIGURES[run_draw]
     if run_draw == "blocks":
@@ -436,6 +471,12 @@ def figure_mixed(inputs: FigureInputs, *, model: str = GLOBAL, logo_runs=None, d
         + "Each share tests a different set of points; within a share every line is scored on the same points. "
         f"Rings: an arm differs from control (paired block bootstrap, Holm across the shares of one basin; RMSE "
         f"{rings}). "
+        + (
+            "Differences quoted: pooled_difference of mixed_arms_paired.csv (arm − control, repeats stacked), its "
+            "95 % interval and the repeats in which the arm does better. "
+            if not from_compare.empty
+            else ""
+        )
         + FIG9_NOTE
         + (
             " Right: E4, the transferred RMSE against the number of external training points - the matched draws "
