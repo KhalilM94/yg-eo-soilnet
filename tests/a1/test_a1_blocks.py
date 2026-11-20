@@ -328,3 +328,53 @@ def test_the_c9_line_stays_where_the_points_are_and_the_caption_explains_the_slo
     assert fit_segment([1.0, 2.0], {"slope": float("nan"), "intercept": 0.0}, (0.0, 10.0)) is None
     assert "< 1 means the predictions vary more than the measured SOM" in SLOPE_SENTENCE
     assert "unstable (see bias_correction_calibration.csv" in SLOPE_SENTENCE
+
+
+def test_the_sensitivity_sentence_adds_the_texture_only_and_native_class_results(tmp_path):
+    def row(design, variant, est, p, reference="all", same=3):
+        return {
+            "design": design,
+            "variant": variant,
+            "reference": reference,
+            "metric": "rmse",
+            "estimate": est,
+            "low": est - 0.1,
+            "high": est + 0.1,
+            "p_holm": p,
+            "n_seeds_same_sign": same,
+            "n_seeds": 3,
+        }
+
+    rows = [row(d, "all_minus_legacy_soil", 0.0, 1.0) for d in ("random", "10 km", "logo pooled", "logo A")]
+    rows += [
+        row("random", "all_minus_legacy_keep_texture", 0.001, 1.0),
+        row("10 km", "all_minus_legacy_keep_texture", -0.03, 1.0),
+        row("logo pooled", "all_minus_legacy_keep_texture", -0.087, 0.156),
+        row("logo pooled", "all_minus_legacy_keep_texture", 0.03, 0.98, reference="all_native_cat"),
+        row("random", "all_native_cat", -0.06, 1.0, same=2),
+        row("10 km", "all_native_cat", -0.01, 1.0),
+        row("logo pooled", "all_native_cat", -0.117, 0.048),
+        row("logo A", "all_native_cat", -0.27, 0.0004),
+    ]
+    (tmp_path / "a1_e5").mkdir()
+    pd.DataFrame(rows).to_csv(tmp_path / "a1_e5" / "ablation.csv", index=False)
+    sentence = figure_core.legacy_soil_sensitivity(_inputs(tmp_path, ["A"]))
+    assert "Sensitivity (E5): without the legacy soil" in sentence  # the existing sentence stays
+    texture = sentence.split("all_minus_legacy_keep_texture")[1].split("Reading")[0]
+    assert (
+        "+0.00 [−0.10, 0.10] on the random split" in texture and "−0.09 [−0.19, 0.01] on the basins pooled" in texture
+    )
+    assert "p_Holm 1.00, 1.00, 0.16" in texture and "no difference survives" in texture
+    assert "+0.03" not in texture  # the comparison against all_native_cat is not this sentence's
+    native = sentence.split("(all_native_cat)")[1]
+    assert "−0.12 [−0.22, −0.02] on the basins pooled (p_Holm 0.048, 3/3 seeds)" in native
+    assert "−0.27 [−0.37, −0.17] in A (p_Holm < 0.001, 3/3 seeds)" in native
+    assert "no change on the random split and the 10 km folds" in native
+
+
+def test_figure_c6_says_when_the_offset_increases_the_error():
+    from yg_eo_soilnet.a1.figures.robustness import offset_share_text
+
+    assert offset_share_text(-0.06) == " (the offset increases the error: −6 % of the loss removed)"
+    assert "removes −" not in offset_share_text(-0.06)
+    assert offset_share_text(0.29) == " (the offset removes 29 % of the loss)"

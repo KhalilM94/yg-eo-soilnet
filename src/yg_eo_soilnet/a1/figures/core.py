@@ -678,12 +678,95 @@ def dissimilarity_frame(transfer: pd.DataFrame, summary: pd.DataFrame) -> pd.Dat
 E5_FOLDER = "a1_e5"
 
 
-def legacy_soil_sensitivity(inputs) -> str:
-    """A caption sentence: what E5 found when the legacy soil-map layers are left out of Global.
+#: The designs of the sensitivity sentence, with their caption names.
+SENSITIVITY_DESIGNS = (
+    ("random", "the random split"),
+    ("10 km", "the 10 km folds"),
+    ("logo pooled", "the basins pooled"),
+)
 
-    Read from ``<output_dir>/../a1_e5/ablation.csv`` (variant ``all_minus_legacy_soil``, ΔRMSE on the
-    random split, the 10 km folds and the basins pooled). Empty when the file is not there, or when
-    E5's held-out basins do not include this run's (another dataset, the demo).
+
+def _ablation_rows(table: pd.DataFrame, variant: str, reference: str = "all") -> pd.DataFrame:
+    """One E5 comparison's ΔRMSE rows, indexed by design (a table without ``reference`` is against ``all``)."""
+    rows = table[(table["variant"] == variant) & (table["metric"] == "rmse")]
+    if "reference" in rows:
+        rows = rows[rows["reference"] == reference]
+    return rows.set_index("design")
+
+
+def _delta(row) -> str:
+    return f"{row['estimate']:+.2f} [{row['low']:.2f}, {row['high']:.2f}]"
+
+
+def _p_text(p: float) -> str:
+    """A p-value for a caption: ``< 0.001`` below it, three decimals otherwise."""
+    return "< 0.001" if p < 0.001 else f"{p:.3f}"
+
+
+def _seeds_text(row) -> str:
+    """``3/3 seeds`` (same sign as the first seed, of the seeds with both variants), when the table has it."""
+    if "n_seeds_same_sign" in row and "n_seeds" in row and np.isfinite(row["n_seeds"]) and row["n_seeds"] > 1:
+        return f", {int(row['n_seeds_same_sign'])}/{int(row['n_seeds'])} seeds"
+    return ""
+
+
+def _texture_only_sentence(table: pd.DataFrame) -> str:
+    """E5's texture-only input set (``all_minus_legacy_keep_texture``) against ``all``, on the three designs."""
+    rows = _ablation_rows(table, "all_minus_legacy_keep_texture")
+    found = [(label, rows.loc[design]) for design, label in SENSITIVITY_DESIGNS if design in rows.index]
+    if not found:
+        return ""
+    parts = ", ".join(f"{_delta(row)} on {label}" for label, row in found)
+    p_values = ", ".join(f"{row['p_holm']:.2f}" for _, row in found)
+    verdict = (
+        "no difference survives the Holm correction"
+        if all(row["p_holm"] >= 0.05 for _, row in found)
+        else "a difference survives the Holm correction"
+    )
+    return (
+        " Without the six *_median_0_30cm layers only, texture class kept and the class inputs read natively "
+        f"(all_minus_legacy_keep_texture, the input set recommended for new experiments): {parts} "
+        f"(p_Holm {p_values}) - {verdict}."
+    )
+
+
+def _native_class_sentence(table: pd.DataFrame) -> str:
+    """E5's native-class variant (``all_native_cat``) against ``all``: where it differs, and where not."""
+    rows = _ablation_rows(table, "all_native_cat")
+    if rows.empty:
+        return ""
+    significant = [design for design in rows.index if rows.loc[design, "p_holm"] < 0.05]
+    named = {design: label for design, label in SENSITIVITY_DESIGNS}
+    # The pooled designs first, then each basin, in the table's order.
+    order = [d for d, _ in SENSITIVITY_DESIGNS if d in significant] + [
+        d for d in significant if d not in named and d.startswith("logo ")
+    ]
+    if not order:
+        return (
+            " Reading texture_20cm and landform_class natively, their gaps left missing (all_native_cat), changes "
+            "no RMSE after the Holm correction."
+        )
+    parts = ", ".join(
+        f"{_delta(rows.loc[d])} {'on ' + named[d] if d in named else 'in ' + d.removeprefix('logo ')} "
+        f"(p_Holm {_p_text(rows.loc[d, 'p_holm'])}{_seeds_text(rows.loc[d])})"
+        for d in order
+    )
+    unchanged = [label for design, label in SENSITIVITY_DESIGNS if design in rows.index and design not in significant]
+    return (
+        " Reading texture_20cm and landform_class natively, their gaps left missing, instead of as yes/no "
+        f"columns (all_native_cat): {parts}" + (f"; no change on {' and '.join(unchanged)}" if unchanged else "") + "."
+    )
+
+
+def legacy_soil_sensitivity(inputs) -> str:
+    """Caption sentences: what E5 found when the legacy soil-map layers are left out of Global.
+
+    Read from ``<output_dir>/../a1_e5/ablation.csv``: ``all_minus_legacy_soil`` (every soil-map
+    layer and the texture class removed), and, when fitted, ``all_minus_legacy_keep_texture`` (the
+    six ``*_median_0_30cm`` layers removed, texture kept) and ``all_native_cat`` (the class inputs
+    read natively), each against ``all`` - ΔRMSE on the random split, the 10 km folds and the basins
+    pooled. Empty when the file is not there, or when E5's held-out basins do not include this run's
+    (another dataset, the demo).
     """
     from yg_eo_soilnet.a1.figures.style import SOM_UNIT
 
@@ -691,7 +774,7 @@ def legacy_soil_sensitivity(inputs) -> str:
     if not path.exists():
         return ""
     table = pd.read_csv(path)
-    rows = table[(table["variant"] == "all_minus_legacy_soil") & (table["metric"] == "rmse")].set_index("design")
+    rows = _ablation_rows(table, "all_minus_legacy_soil")
     e5_basins = {
         design.removeprefix("logo ") for design in rows.index if design.startswith("logo ") and design != "logo pooled"
     }
@@ -699,21 +782,17 @@ def legacy_soil_sensitivity(inputs) -> str:
     if rows.empty or not mine or not mine <= e5_basins:
         return ""
     parts, p_values = [], []
-    for design, label in (
-        ("random", "the random split"),
-        ("10 km", "the 10 km folds"),
-        ("logo pooled", "the basins pooled"),
-    ):
+    for design, label in SENSITIVITY_DESIGNS:
         if design in rows.index:
             row = rows.loc[design]
-            parts.append(f"{row['estimate']:+.2f} [{row['low']:.2f}, {row['high']:.2f}] on {label}")
+            parts.append(f"{_delta(row)} on {label}")
             p_values.append(f"{row['p_holm']:.2f}")
     seeds = int(rows["n_seeds"].max()) if "n_seeds" in rows else 1
     return ps.minus(
         " Sensitivity (E5): without the legacy soil-map layers (soil-property layers exported from Google Earth "
         f"Engine; source product not documented), Global's RMSE changes ({SOM_UNIT}) by {', '.join(parts)} "
         f"(p_Holm {', '.join(p_values)}; {seeds} seed(s)) - no difference survives the Holm correction, so the "
-        "results stand with these layers in."
+        "results stand with these layers in." + _texture_only_sentence(table) + _native_class_sentence(table)
     )
 
 

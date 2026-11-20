@@ -287,9 +287,7 @@ def figure_bias_correction(
             f"{basin}, k = {int(last['k'])}: {last['rmse_uncorrected']:.2f} uncorrected, {last['rmse_offset']:.2f} with "
             f"the offset, {last['rmse_local']:.2f} local"
         )
-        removed = offset_share(last)
-        if removed is not None:
-            text += f" (the offset removes {removed:.0%} of the loss)"
+        text += offset_share_text(offset_share(last))
         parts.append(text)
     caption = (
         f"Figure C6. RMSE ({SOM_UNIT}) on each held-out basin's remaining points when k of its points are used as "
@@ -326,6 +324,19 @@ def offset_share(row) -> Optional[float]:
     if not np.isfinite(loss) or loss <= 0:
         return None
     return (float(row["rmse_uncorrected"]) - float(row["rmse_offset"])) / loss
+
+
+def offset_share_text(removed: Optional[float]) -> str:
+    """The caption's reading of :func:`offset_share`.
+
+    >>> offset_share_text(0.29), offset_share_text(-0.06), offset_share_text(None)
+    (' (the offset removes 29 % of the loss)', ' (the offset increases the error: −6 % of the loss removed)', '')
+    """
+    if removed is None:
+        return ""
+    if removed < 0:
+        return f" (the offset increases the error: −{abs(removed):.0%} of the loss removed)".replace("%", " %")
+    return f" (the offset removes {removed:.0%} of the loss)".replace("%", " %")
 
 
 @styled
