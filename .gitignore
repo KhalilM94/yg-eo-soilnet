@@ -13,9 +13,16 @@ htmlcov/
 
 # ML / training artifacts
 mlruns/
-# A1's MLflow metadata (SQLite, with its write-ahead log) and the file store kept from before it.
-mlflow.db
-mlflow.db-*
+# MLflow metadata in SQLite (A1's mlflow.db, a per-job store on a cluster, any name), with
+# SQLite's side files (write-ahead log, shared memory, rollback journal) next to any database.
+mlflow*.db
+mlruns*.db
+*.db-wal
+*.db-shm
+*.db-journal
+# Artifacts of an MLflow tracking server (its default --artifacts-destination), and the file store
+# kept from before the SQLite migration.
+mlartifacts/
 mlruns_backup_*/
 lightning_logs/
 mlflow_exports/
